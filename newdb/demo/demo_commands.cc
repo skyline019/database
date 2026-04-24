@@ -1666,6 +1666,8 @@ bool handle_dml_attr_commands(ShellState& st,
                     a.end());
             st.session.schema.attrs = std::move(a);
         }
+        // Persist schema sidecar so GUI (reads <table>.attr) stays in sync.
+        newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
         invalidate_eq_sidecars_after_write(eff_data, std::set<std::string>{key});
         log_and_print(log_file, "[DELATTR] ok: key=%s removed from %zu rows (table='%s').\n",
                       key.c_str(), tbl.rows.size(), current_table.c_str());

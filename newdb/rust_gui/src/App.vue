@@ -5,6 +5,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { shouldStopAndSkipHistory } from "./commandPolicy";
 import { shouldApplyPageResult } from "./pagePolicy";
+import { buildReindexInsertArgs } from "./reindexPolicy";
+import { buildDefattrAppendCommand } from "./attrPolicy";
 import {
   FolderOpened,
   Coin,
@@ -894,7 +896,8 @@ function setCellInvalid(rowIndex: number, colIndex: number) {
 }
 
 async function deleteRow(row: string[]) {
-  const id = (row?.[1] ?? "").trim();
+  const idIdx = idColumnIndex.value >= 0 ? idColumnIndex.value : 1;
+  const id = (row?.[idIdx] ?? "").trim();
   if (!id) {
     await openUiMessage("alert", "删除失败", "当前行缺少 id，无法删除");
     return;
@@ -909,6 +912,7 @@ async function reindexIds() {
   if (!state.value.currentTable.trim()) return;
   // Fetch all rows by paging with stable order.
   const allRows: string[][] = [];
+  const headers = tableViewData.value.headers;
   const pageSize = 500;
   for (let p = 1; p <= 2000; p += 1) {
     const pr = await invoke<PageResult>("query_page", {
@@ -930,8 +934,7 @@ async function reindexIds() {
   for (let i = 0; i < allRows.length; i += 1) {
     const r = allRows[i];
     const newId = String(i + 1);
-    const values = r.slice(2).map((v) => String(v ?? "").trim());
-    const args = [newId, ...values].join(",");
+    const args = buildReindexInsertArgs(headers, r, newId);
     cmds.push(`INSERT(${args})`);
   }
   await runScriptText(cmds.join("\n"));
@@ -946,14 +949,41 @@ async function quickAddRow() {
   if (id) {
     cmd = vals ? `INSERT(${id},${vals})` : `INSERT(${id})`;
   } else {
-    const last = tableViewData.value.rows[tableViewData.value.rows.length - 1];
-    const lastId = Number((last?.[1] ?? "").trim());
-    const next = Number.isFinite(lastId) && lastId > 0 ? String(lastId + 1) : "1";
+    const idIdx = idColumnIndex.value >= 0 ? idColumnIndex.value : 1;
+    let maxId = 0;
+    for (const row of tableViewData.value.rows) {
+      const n = Number((row?.[idIdx] ?? "").trim());
+      if (Number.isFinite(n) && n > maxId) {
+        maxId = n;
+      }
+    }
+    const next = String(maxId > 0 ? maxId + 1 : 1);
     cmd = vals ? `INSERT(${next},${vals})` : `INSERT(${next})`;
   }
   await runCommand(cmd, { opType: "data_insert", title: "新增行" });
   addRowId.value = "";
   addRowValues.value = "";
+}
+
+function isEnterKey(ev: KeyboardEvent): boolean {
+  return ev.key === "Enter" || ev.key === "NumpadEnter";
+}
+
+function handleQuickToolEnter(ev: KeyboardEvent, action: "addRow" | "addAttr" | "delAttr") {
+  if (!isEnterKey(ev)) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  if (action === "addRow") {
+    void quickAddRow();
+    return;
+  }
+  // Schema mutations can invalidate current row editor shape; close editor first.
+  cancelEditRow();
+  if (action === "addAttr") {
+    void addAttribute();
+  } else {
+    void deleteAttribute();
+  }
 }
 
 async function addAttribute() {
@@ -966,7 +996,14 @@ async function addAttribute() {
     await openUiMessage("alert", "保留字段", "id 为保留主键列，请使用其它名称");
     return;
   }
-  const cmd = `DEFATTR(${name}:${addAttrType.value})`;
+  const existing = tableColumns.value
+    .map((c) => ({ name: String(c.name ?? "").trim(), ty: String(c.ty ?? "string").trim() || "string" }))
+    .filter((c) => !!c.name && c.name !== "#" && c.name.toLowerCase() !== "id");
+  if (existing.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+    await openUiMessage("alert", "属性已存在", `属性 ${name} 已存在，请使用其它名称`);
+    return;
+  }
+  const cmd = buildDefattrAppendCommand(tableColumns.value, name, addAttrType.value);
   await runCommand(cmd, { opType: "schema_defattr", title: `新增属性 ${name}:${addAttrType.value}` });
   addAttrName.value = "";
   delAttrName.value = "";
@@ -1804,8 +1841,18 @@ onUnmounted(() => {
                   <el-form label-width="0">
                     <el-form-item>
                       <div class="tool-row">
-                        <el-input v-model="addRowId" placeholder="id（可空，自动+1）" style="width: 160px" />
-                        <el-input v-model="addRowValues" placeholder="其它值（可空，如 Alice,ENG,29）" style="flex: 1" />
+                        <el-input
+                          v-model="addRowId"
+                          placeholder="id（可空，自动+1）"
+                          style="width: 160px"
+                          @keydown="handleQuickToolEnter($event, 'addRow')"
+                        />
+                        <el-input
+                          v-model="addRowValues"
+                          placeholder="其它值（可空，如 Alice,ENG,29）"
+                          style="flex: 1"
+                          @keydown="handleQuickToolEnter($event, 'addRow')"
+                        />
                         <el-button type="primary" :disabled="busy" @click="quickAddRow">新增</el-button>
                       </div>
                     </el-form-item>
@@ -1816,7 +1863,12 @@ onUnmounted(() => {
                   <el-form label-width="0">
                     <el-form-item>
                       <div class="tool-row">
-                        <el-input v-model="addAttrName" placeholder="属性名，如 salary" style="width: 180px" />
+                        <el-input
+                          v-model="addAttrName"
+                          placeholder="属性名，如 salary"
+                          style="width: 180px"
+                          @keydown="handleQuickToolEnter($event, 'addAttr')"
+                        />
                         <el-select v-model="addAttrType" style="width: 140px">
                           <el-option value="string" label="string" />
                           <el-option value="int" label="int" />
@@ -1833,7 +1885,12 @@ onUnmounted(() => {
                     </el-form-item>
                     <el-form-item>
                       <div class="tool-row" style="width: 100%;">
-                        <el-select v-model="delAttrName" style="flex: 1" placeholder="选择要删除的属性">
+                        <el-select
+                          v-model="delAttrName"
+                          style="flex: 1"
+                          placeholder="选择要删除的属性"
+                          @keydown="handleQuickToolEnter($event, 'delAttr')"
+                        >
                           <el-option
                             v-for="h in sortableAttrs.filter((x) => x !== 'id')"
                             :key="`attr-${h}`"
@@ -1841,7 +1898,13 @@ onUnmounted(() => {
                             :label="h"
                           />
                         </el-select>
-                        <el-button type="danger" plain :disabled="busy" @click="deleteAttribute">删除属性</el-button>
+                        <el-button
+                          type="danger"
+                          plain
+                          :disabled="busy"
+                          @click="deleteAttribute"
+                          @keydown="handleQuickToolEnter($event, 'delAttr')"
+                        >删除属性</el-button>
                       </div>
                     </el-form-item>
                   </el-form>
@@ -1897,8 +1960,7 @@ onUnmounted(() => {
                     </div>
                   </template>
                   <template v-else>
-                    <span v-if="!String(scope.row[colIdx] ?? '').trim()" class="cell-empty-placeholder">—</span>
-                    <span v-else>{{ scope.row[colIdx] }}</span>
+                    <span>{{ (scope.row[colIdx] ?? "") }}</span>
                   </template>
                 </template>
               </el-table-column>

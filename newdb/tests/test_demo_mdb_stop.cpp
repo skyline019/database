@@ -169,3 +169,45 @@ TEST(DemoMdb, LowercaseCommandsAreAccepted) {
     fs::remove_all(temp_dir, ec);
 }
 
+TEST(DemoMdb, DelattrPersistsSchemaSidecarAndRemovesColumn) {
+    const fs::path temp_dir = newdb::test::unique_temp_subdir("newdb_mdb_delattr_schema");
+    ASSERT_TRUE(fs::create_directories(temp_dir));
+
+    const fs::path script = temp_dir / "case_delattr.mdb";
+    {
+        std::ofstream out(script);
+        ASSERT_TRUE(out.is_open());
+        out << "CREATE TABLE(tda)\n";
+        out << "USE(tda)\n";
+        out << "DEFATTR(name:string,age:int)\n";
+        out << "INSERT(1,Alice,20)\n";
+        out << "INSERT(2,Bob,30)\n";
+        out << "DELATTR(age)\n";
+    }
+
+    ShellState st;
+    st.data_dir = temp_dir.string();
+    st.log_file_path = (temp_dir / "demo_log.bin").string();
+
+    run_mdb_script(st, script.string().c_str());
+
+    const fs::path data_file = temp_dir / "tda.bin";
+    ASSERT_TRUE(fs::exists(data_file));
+
+    newdb::TableSchema schema;
+    const newdb::Status schema_st = newdb::load_schema_text(
+        newdb::schema_sidecar_path_for_data_file(data_file.string()), schema);
+    ASSERT_TRUE(schema_st.ok) << schema_st.message;
+
+    EXPECT_EQ(schema.find_attr("age"), nullptr);
+
+    const std::string sidecar_text = read_all_text(newdb::schema_sidecar_path_for_data_file(data_file.string()));
+    EXPECT_EQ(sidecar_text.find("age:"), std::string::npos);
+
+    const std::string log_text = read_all_text(temp_dir / "demo_log.bin");
+    EXPECT_NE(log_text.find("[DELATTR] ok: key=age"), std::string::npos);
+
+    std::error_code ec;
+    fs::remove_all(temp_dir, ec);
+}
+

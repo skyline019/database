@@ -1,0 +1,82 @@
+name: newdb
+
+on:
+  push:
+    paths:
+      - "newdb/**"
+      - "waterfall/**"
+      - ".github/workflows/newdb-ci.yml"
+  pull_request:
+    paths:
+      - "newdb/**"
+      - "waterfall/**"
+      - ".github/workflows/newdb-ci.yml"
+
+jobs:
+  linux-gcc-coverage:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: newdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config lcov
+
+      - name: Configure (with coverage)
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Debug
+          -DNEWDB_ENABLE_COVERAGE=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: python3 scripts/ci/ci_bench_gate.py build
+
+      - name: Coverage (geninfo + line gate)
+        run: |
+          cd build
+          geninfo . --output-filename coverage.info --ignore-errors mismatch,gcov,negative
+          python3 ../scripts/ci/check_coverage_threshold.py coverage.info \
+            --require newdb/src/:70 \
+            --require newdb/demo/:40
+
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-coverage-lcov
+          path: newdb/build/coverage.info
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: newdb
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config
+
+      - name: Configure
+        env:
+          CXX: clang++
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build and test
+        run: |
+          cmake --build build --parallel
+          cd build && ctest --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: python3 scripts/ci/ci_bench_gate.py build

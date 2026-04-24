@@ -1,0 +1,87 @@
+\documentclass{book}
+\usepackage{doc}
+\usepackage{tikz}
+\usepackage{tabularx}  % 添加自适应宽度表格支持
+\usepackage{booktabs}  % 添加三线表支持
+\usepackage{algorithm}
+\usepackage{algpseudocode}  % 伪代码算法环境
+\usetikzlibrary{trees, positioning, arrows.meta}
+\usepackage{pifont}   % 引入ding字体
+
+% 算法编号
+\renewcommand{\thealgorithm}{\arabic{chapter}.\arabic{algorithm}}
+\newcommand{\algorithmname}{{\bf Algorithm~}}
+
+% 定义theorem环境
+\newtheorem{theorem}{Theorem}[chapter]
+\newcommand{\theoremname}{{\bf Theorem~}}
+
+% 定义example环境
+\makeatletter
+% 创建与chapter关联的example计数器
+\newcounter{example}[chapter]
+\newcommand{\examplename}{{\bf Example~}}
+\renewcommand{\theexample}{\thechapter.\arabic{example}}
+% 定义example环境
+\newenvironment{example}{%
+  \refstepcounter{example}%
+  \par\addvspace{\medskipamount}%
+  \noindent\textbf{\examplename \theexample:}\quad%
+}{%
+  \par\addvspace{\medskipamount}%
+}
+\makeatother
+
+% 定义exercise环境
+\makeatletter
+% 创建与chapter关联的exercise计数器
+\newcounter{exercise}[chapter]
+\newcommand{\exercisename}{{\bf Exercise~}}
+\renewcommand{\theexercise}{\thechapter.\arabic{exercise}}
+% 定义exercise环境
+\newenvironment{exercise}{%
+  \refstepcounter{exercise}%
+  \par\addvspace{\medskipamount}%
+  \noindent\textbf{\exercisename \theexercise:}\quad%
+}{%
+  \par\addvspace{\medskipamount}%
+}
+\makeatother
+
+\begin{document}
+
+% 标题
+\title{数据库系统实现\\讲义}
+\author{聂晓文\\niexiaowen@uestc.edu.cn}
+\maketitle
+\thispagestyle{empty}
+This page is blank.
+
+% 前言
+\frontmatter
+\input{handout/preface.tex}
+
+% 目录
+\tableofcontents
+
+% 正文
+\mainmatter
+\raggedbottom
+\input{handout/introduction.tex} % 1
+\input{handout/layout.tex} % 2
+\input{handout/btree.tex} % 3
+\input{handout/buffer.tex} % 4
+\input{handout/operator.tex} % 5
+\input{handout/query.tex} % 6
+\input{handout/concurrent.tex} % 7
+\input{handout/recovery.tex} % 8
+% \input{distributed.tex}
+
+% 参考文献
+\printbibliography[heading=bibintoc]
+
+% 附录
+\appendix
+% \chapter{术语表}
+
+\end{document}

@@ -1,0 +1,51 @@
+name: newdb-gui
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust-gui-tauri-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: newdb/rust_gui/package-lock.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build native bridge (newdb.dll + demo/perf)
+        shell: pwsh
+        working-directory: newdb
+        run: |
+          cmake -S . -B build_gui_ci -G "Visual Studio 17 2022" -A x64 -DNEWDB_BUILD_TESTS=OFF -DNEWDB_BUILD_GUI=OFF -DNEWDB_BUILD_SHARED=ON
+          cmake --build build_gui_ci --config RelWithDebInfo --target newdb_shared newdb_demo newdb_perf
+          $out = Join-Path (Resolve-Path build_gui_ci).Path "RelWithDebInfo"
+          Copy-Item -Force (Join-Path $out "newdb.dll") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb.dll")
+          Copy-Item -Force (Join-Path $out "newdb_demo.exe") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb_demo.exe")
+          Copy-Item -Force (Join-Path $out "newdb_perf.exe") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb_perf.exe")
+
+      - name: Install frontend dependencies
+        working-directory: newdb/rust_gui
+        run: npm ci
+
+      - name: Frontend build
+        working-directory: newdb/rust_gui
+        run: npm run build
+
+      - name: Tauri build (smoke)
+        working-directory: newdb/rust_gui
+        run: npm run tauri:build
+
+      - name: App self-check (no UI)
+        working-directory: newdb/rust_gui/src-tauri
+        shell: pwsh
+        env:
+          NEWDB_GUI_EXPECT_DLL: "1"
+        run: cargo run --release -- --self-check

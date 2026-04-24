@@ -1,0 +1,141 @@
+name: newdb-ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  c-api-abi-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate C API ABI and symbol surface
+        run: python3 scripts/validate/check_c_api_abi.py --expected-abi 1
+
+  observability-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate perf summary schema contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("scripts/results/ci_sample_perf_summary.json")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(
+              json.dumps(
+                  {
+                      "schema_version": "newdb.perf_summary.v1",
+                      "timestamp": "2026-04-24T00:00:00Z",
+                      "data_dir": "ci://sample",
+                      "table": "qa_regression",
+                      "perf": {
+                          "txn_normal_avg_ms": 1.0,
+                          "query_avg_ms_max": 2.0,
+                          "where_policy_rejects": 0,
+                          "where_policy_fallbacks": 0,
+                      },
+                  }
+              ),
+              encoding="utf-8",
+          )
+          PY
+          python3 scripts/validate/validate_perf_summary.py scripts/results/ci_sample_perf_summary.json
+
+  telemetry-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate telemetry JSONL contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("scripts/results/ci_sample_telemetry.jsonl")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          events = [
+              {
+                  "schema_version": "newdb.telemetry.v1",
+                  "timestamp": "2026-04-24T00:00:00Z",
+                  "run_id": "testloop_20260424_000000",
+                  "source": "test_loop",
+                  "env": "ci",
+                  "build": "build-ci",
+                  "profile": "gate",
+                  "phase": "prep",
+                  "metrics": {"bench_prep_rows": 1000, "bench_prep_chunk_size": 500},
+              },
+              {
+                  "schema_version": "newdb.telemetry.v1",
+                  "timestamp": "2026-04-24T00:00:01Z",
+                  "run_id": "testloop_20260424_000000",
+                  "source": "test_loop",
+                  "env": "ci",
+                  "build": "build-ci",
+                  "profile": "gate",
+                  "phase": "summary",
+                  "metrics": {"summary_path": "scripts/results/test_loop_summary.json"},
+              },
+          ]
+          p.write_text("\n".join(json.dumps(x) for x in events) + "\n", encoding="utf-8")
+          PY
+          python3 scripts/validate/validate_telemetry_event.py scripts/results/ci_sample_telemetry.jsonl
+
+  linux-gcc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: python3 scripts/ci/ci_bench_gate.py build
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config libcrc32c-dev python3
+
+      - name: Configure
+        env:
+          CXX: clang++
+        run: cmake -S . -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build and test
+        run: |
+          cmake --build build-clang --parallel
+          ctest --test-dir build-clang --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: python3 scripts/ci/ci_bench_gate.py build-clang
+
+  windows-clean-room:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify clean-room configure/build/test
+        shell: pwsh
+        run: >
+          .\scripts\ci\verify_clean_reconfigure.ps1
+          -BuildDir build_ci_windows
+          -Generator "Visual Studio 17 2022"
+          -BuildConfig RelWithDebInfo

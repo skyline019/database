@@ -1,0 +1,46 @@
+# newdb database project
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.out
+build/
+build_*/
+*.build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+*.gcda
+*.gcno
+*.gcov
+coverage/
+coverage_html/
+
+# WAL files (for development)
+*.wal
+*.lock
+
+# Temporary
+tmp/
+temp/

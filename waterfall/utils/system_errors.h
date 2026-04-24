@@ -1,0 +1,149 @@
+// 自动生成的系统错误码定义头文件
+// extract_errno_info.py从系统errno.h及相关头文件提取
+
+#pragma once
+
+#include "error.h"
+
+namespace wf::utils {
+
+// 系统错误静态对象命名空间
+namespace system_errors {
+extern error_info system_UNKNOWN;
+extern error_info system_EPERM;
+extern error_info system_ENOENT;
+extern error_info system_ESRCH;
+extern error_info system_EINTR;
+extern error_info system_EIO;
+extern error_info system_ENXIO;
+extern error_info system_E2BIG;
+extern error_info system_ENOEXEC;
+extern error_info system_EBADF;
+extern error_info system_ECHILD;
+extern error_info system_EAGAIN;
+extern error_info system_ENOMEM;
+extern error_info system_EACCES;
+extern error_info system_EFAULT;
+extern error_info system_ENOTBLK;
+extern error_info system_EBUSY;
+extern error_info system_EEXIST;
+extern error_info system_EXDEV;
+extern error_info system_ENODEV;
+extern error_info system_ENOTDIR;
+extern error_info system_EISDIR;
+extern error_info system_EINVAL;
+extern error_info system_ENFILE;
+extern error_info system_EMFILE;
+extern error_info system_ENOTTY;
+extern error_info system_ETXTBSY;
+extern error_info system_EFBIG;
+extern error_info system_ENOSPC;
+extern error_info system_ESPIPE;
+extern error_info system_EROFS;
+extern error_info system_EMLINK;
+extern error_info system_EPIPE;
+extern error_info system_EDOM;
+extern error_info system_ERANGE;
+extern error_info system_EDEADLK;
+extern error_info system_ENAMETOOLONG;
+extern error_info system_ENOLCK;
+extern error_info system_ENOSYS;
+extern error_info system_ENOTEMPTY;
+extern error_info system_ELOOP;
+extern error_info system_ENOMSG;
+extern error_info system_EIDRM;
+extern error_info system_ECHRNG;
+extern error_info system_EL2NSYNC;
+extern error_info system_EL3HLT;
+extern error_info system_EL3RST;
+extern error_info system_ELNRNG;
+extern error_info system_EUNATCH;
+extern error_info system_ENOCSI;
+extern error_info system_EL2HLT;
+extern error_info system_EBADE;
+extern error_info system_EBADR;
+extern error_info system_EXFULL;
+extern error_info system_ENOANO;
+extern error_info system_EBADRQC;
+extern error_info system_EBADSLT;
+extern error_info system_EBFONT;
+extern error_info system_ENOSTR;
+extern error_info system_ENODATA;
+extern error_info system_ETIME;
+extern error_info system_ENOSR;
+extern error_info system_ENONET;
+extern error_info system_ENOPKG;
+extern error_info system_EREMOTE;
+extern error_info system_ENOLINK;
+extern error_info system_EADV;
+extern error_info system_ESRMNT;
+extern error_info system_ECOMM;
+extern error_info system_EPROTO;
+extern error_info system_EMULTIHOP;
+extern error_info system_EDOTDOT;
+extern error_info system_EBADMSG;
+extern error_info system_EOVERFLOW;
+extern error_info system_ENOTUNIQ;
+extern error_info system_EBADFD;
+extern error_info system_EREMCHG;
+extern error_info system_ELIBACC;
+extern error_info system_ELIBBAD;
+extern error_info system_ELIBSCN;
+extern error_info system_ELIBMAX;
+extern error_info system_ELIBEXEC;
+extern error_info system_EILSEQ;
+extern error_info system_ERESTART;
+extern error_info system_ESTRPIPE;
+extern error_info system_EUSERS;
+extern error_info system_ENOTSOCK;
+extern error_info system_EDESTADDRREQ;
+extern error_info system_EMSGSIZE;
+extern error_info system_EPROTOTYPE;
+extern error_info system_ENOPROTOOPT;
+extern error_info system_EPROTONOSUPPORT;
+extern error_info system_ESOCKTNOSUPPORT;
+extern error_info system_EOPNOTSUPP;
+extern error_info system_EPFNOSUPPORT;
+extern error_info system_EAFNOSUPPORT;
+extern error_info system_EADDRINUSE;
+extern error_info system_EADDRNOTAVAIL;
+extern error_info system_ENETDOWN;
+extern error_info system_ENETUNREACH;
+extern error_info system_ENETRESET;
+extern error_info system_ECONNABORTED;
+extern error_info system_ECONNRESET;
+extern error_info system_ENOBUFS;
+extern error_info system_EISCONN;
+extern error_info system_ENOTCONN;
+extern error_info system_ESHUTDOWN;
+extern error_info system_ETOOMANYREFS;
+extern error_info system_ETIMEDOUT;
+extern error_info system_ECONNREFUSED;
+extern error_info system_EHOSTDOWN;
+extern error_info system_EHOSTUNREACH;
+extern error_info system_EALREADY;
+extern error_info system_EINPROGRESS;
+extern error_info system_ESTALE;
+extern error_info system_EUCLEAN;
+extern error_info system_ENOTNAM;
+extern error_info system_ENAVAIL;
+extern error_info system_EISNAM;
+extern error_info system_EREMOTEIO;
+extern error_info system_EDQUOT;
+extern error_info system_ENOMEDIUM;
+extern error_info system_EMEDIUMTYPE;
+extern error_info system_ECANCELED;
+extern error_info system_ENOKEY;
+extern error_info system_EKEYEXPIRED;
+extern error_info system_EKEYREVOKED;
+extern error_info system_EKEYREJECTED;
+extern error_info system_EOWNERDEAD;
+extern error_info system_ENOTRECOVERABLE;
+extern error_info system_ERFKILL;
+extern error_info system_EHWPOISON;
+}
+
+// 根据错误码值获取对应的错误信息对象
+error_info system_error(int errno_value);
+
+} // namespace wf::utils

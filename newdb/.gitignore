@@ -1,0 +1,43 @@
+# ---- CMake / native build outputs ----
+/build/
+/build_*/
+/cmake-build-*/
+/CMakeFiles/
+/CMakeCache.txt
+/CTestTestfile.cmake
+/cmake_install.cmake
+/install_manifest.txt
+/compile_commands.json
+
+# ---- Test/coverage artifacts ----
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+*.lcov
+*.info
+*.xml
+
+# ---- Runtime and benchmark generated files ----
+/qa_*.bin
+/qa_*.bin.*
+/scripts/results/
+*.log
+*.tmp
+
+# ---- Rust/Vite/Tauri generated files ----
+/rust_gui/node_modules/
+/rust_gui/dist/
+/rust_gui/src-tauri/target/
+/rust_gui/src-tauri/.tauri/
+/rust_gui/src-tauri/gen/
+/rust_gui/.vite/
+/rust_gui/.turbo/
+
+# ---- Rust GUI extra targets ----
+/rust_gui/target/
+
+# ---- IDE / OS ----
+.DS_Store
+Thumbs.db

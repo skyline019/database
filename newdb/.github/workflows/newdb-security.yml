@@ -1,0 +1,144 @@
+name: newdb-security
+
+on:
+  pull_request:
+  push:
+    branches: [ "main", "master" ]
+  schedule:
+    - cron: "30 2 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+  codeql:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ "cpp" ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build-codeql -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          cmake --build build-codeql --parallel
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+  codeql-severity-gate:
+    if: github.event_name == 'pull_request'
+    needs: codeql
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: Block PR on open high/critical CodeQL alerts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const ref = `refs/pull/${context.issue.number}/merge`;
+            const waitMs = 20000;
+            const maxAttempts = 6;
+
+            function sleep(ms) {
+              return new Promise((resolve) => setTimeout(resolve, ms));
+            }
+
+            let findings = [];
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              const res = await github.request("GET /repos/{owner}/{repo}/code-scanning/alerts", {
+                owner,
+                repo,
+                ref,
+                state: "open",
+                per_page: 100
+              });
+              findings = (res.data || []).filter((a) => {
+                const sev = a.rule?.security_severity_level || "";
+                return sev === "high" || sev === "critical";
+              });
+              core.info(`Attempt ${attempt}/${maxAttempts}: high/critical open alerts=${findings.length}`);
+              if (findings.length > 0 || attempt === maxAttempts) break;
+              await sleep(waitMs);
+            }
+
+            if (findings.length > 0) {
+              const sample = findings
+                .slice(0, 10)
+                .map((a) => `- [${a.rule?.security_severity_level}] ${a.rule?.id || "unknown"} @ ${a.most_recent_instance?.location?.path || "unknown"}`)
+                .join("\n");
+              core.setFailed(
+                `CodeQL severity gate failed: found ${findings.length} open high/critical alert(s) on ${ref}.\n${sample}`
+              );
+            } else {
+              core.info("CodeQL severity gate passed.");
+            }
+
+  sbom:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate source SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: newdb-source.spdx.json
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-source-sbom
+          path: newdb-source.spdx.json
+
+  sbom-attestation:
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'master')
+    needs: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - name: Download SBOM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: newdb-source-sbom
+      - name: Attest SBOM provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: newdb-source.spdx.json

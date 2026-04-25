@@ -85,9 +85,16 @@ WAL 压缩触发强度。
   `recent_runs`（默认最近 30 条，可用 `--recent-limit` 调整）方便前端直接绘制趋势线。
   P12 起 `recent_runs` 先按时间归并排序后再截断，并补充 `data_quality`（nightly 覆盖度）。
   P13 起补充 `secondary_metrics`（dashboard 质量门禁通过/失败计数）。
+  P15 起补充 `perf_metrics`（`txn_normal_avg_ms/query_avg_ms_max/cm_tps_min/hp_max_query_avg_ms`）与
+  `health` 分级对象（`healthy/warning/critical` + reasons）。
   支持 `--require-nightly-samples` 与 `--max-latest-nightly-age-hours` 质量门禁参数。
+  支持 `--max-health-tier` 与 warn/critical 阈值参数（query/cm_tps/nightly_pass_rate）做分级门禁。
   `nightly_soak_runner.ps1` 会把该门禁结果写回 trend（`dashboard_quality_gate_status/reason`）。
+  P16 起 `nightly_soak_runner.ps1` 还会回写 `dashboard_health_tier/dashboard_health_reasons`。
   `nightly_soak_runner.ps1 -LiteProfile` 可用于稳定 nightly 产样（避免高压分支造成抖动）。
+  P14 起新增首轮 bootstrap 旁路：当 `nightly_soak_trend.jsonl` 尚无样本时，runner 首轮不强制
+  `--require-nightly-samples`，先落第一条样本后恢复严格门禁，避免 Runs=1 场景首轮必失败。
+  同时 nightly workflow 失败场景也会上传 artifact，并在门禁失败时自动创建 issue 告警。
 
 ---
 

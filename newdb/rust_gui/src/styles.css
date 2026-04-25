@@ -286,6 +286,71 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   padding-right: 10px;
 }
 .mini-tip { font-size: 11px; color: #93c5fd; display: inline-flex; align-items: center; }
+.dashboard-tier-wrap { display: inline-flex; align-items: center; gap: 6px; }
+.dashboard-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.dashboard-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 11px;
+  color: #93c5fd;
+}
+.dashboard-tier-change {
+  color: #fcd34d;
+}
+.dashboard-tier-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+.tier-healthy {
+  background: rgba(34, 197, 94, 0.2);
+  color: #86efac;
+  border: 1px solid rgba(34, 197, 94, 0.45);
+}
+.tier-warning {
+  background: rgba(250, 204, 21, 0.18);
+  color: #fde68a;
+  border: 1px solid rgba(250, 204, 21, 0.45);
+}
+.tier-critical {
+  background: rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+.tier-unknown {
+  background: rgba(148, 163, 184, 0.2);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+}
+.recent-runs-list {
+  display: grid;
+  gap: 6px;
+  max-height: 180px;
+  overflow: auto;
+}
+.recent-run-row {
+  display: grid;
+  grid-template-columns: 1.8fr 0.8fr 1fr 0.8fr 0.8fr 1fr;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #2b3f63;
+  border-radius: 8px;
+  background: rgba(10, 18, 36, 0.55);
+  font-size: 11px;
+}
+.mono {
+  font-family: Consolas, "Courier New", monospace;
+}
 
 .pager { border-top: 1px solid var(--card-border); padding: 8px 12px; display: flex; align-items: center; gap: 6px; background: rgba(7, 14, 31, 0.84); min-height: 52px; }
 .pager .el-input-number,

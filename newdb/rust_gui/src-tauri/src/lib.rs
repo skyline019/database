@@ -451,6 +451,37 @@ fn resolve_script_path(script_name: &str) -> Result<PathBuf, String> {
     Err(format!("{script_name} not found; tried: {tried}"))
 }
 
+fn resolve_results_file(file_name: &str) -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join(file_name));
+            candidates.push(dir.join("results").join(file_name));
+            candidates.push(dir.join("scripts").join("results").join(file_name));
+            candidates.push(dir.join("../scripts").join("results").join(file_name));
+            candidates.push(dir.join("../../scripts").join("results").join(file_name));
+            candidates.push(dir.join("resources").join("scripts").join("results").join(file_name));
+            candidates.push(dir.join("../resources").join("scripts").join("results").join(file_name));
+        }
+    }
+    candidates.push(PathBuf::from("scripts").join("results").join(file_name));
+    candidates.push(PathBuf::from("../scripts").join("results").join(file_name));
+    candidates.push(PathBuf::from("../../scripts").join("results").join(file_name));
+    candidates.push(PathBuf::from(file_name));
+
+    for p in &candidates {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+    }
+    let tried = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(format!("{file_name} not found; tried: {tried}"))
+}
+
 fn resolve_newdb_dll() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
@@ -1512,6 +1543,13 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
 }
 
 #[tauri::command]
+fn runtime_trend_dashboard_json() -> Result<String, String> {
+    let dashboard = resolve_results_file("runtime_trend_dashboard.json")?;
+    fs::read_to_string(&dashboard)
+        .map_err(|e| format!("failed to read {}: {e}", dashboard.display()))
+}
+
+#[tauri::command]
 fn dll_info() -> DllInfo {
     let path = resolve_newdb_dll().display().to_string();
     match load_dll_api() {
@@ -1568,6 +1606,7 @@ pub fn run() {
             query_page,
             dll_info,
             runtime_artifact_info,
+            runtime_trend_dashboard_json,
             cli_terminal_start,
             cli_terminal_write_line,
             cli_terminal_stop

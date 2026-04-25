@@ -25,6 +25,7 @@ This folder now uses a Tauri (Rust) + Vue desktop architecture.
   - `BULKINSERT(start_id,count[,dept])` (safe default batch mode)
   - `BULKINSERTFAST(start_id,count[,dept])` (faster when IDs are guaranteed fresh/non-duplicate)
 - Logs panel.
+- Runtime dashboard panel (reads `scripts/results/runtime_trend_dashboard.json` and shows health tier / key perf metrics / reasons).
 
 ## Run
 

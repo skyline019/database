@@ -59,7 +59,7 @@ def main() -> int:
     if not isinstance(data.get("generated_at"), str) or not data["generated_at"]:
         return fail("generated_at must be non-empty string")
 
-    for key in ("sources", "overview", "nightly_status", "runtime_metrics", "data_quality", "secondary_metrics"):
+    for key in ("sources", "overview", "nightly_status", "runtime_metrics", "data_quality", "secondary_metrics", "perf_metrics", "health"):
         if not isinstance(data.get(key), dict):
             return fail(f"{key} must be object")
     if not isinstance(data.get("recent_runs"), list):
@@ -97,6 +97,26 @@ def main() -> int:
             if not _is_num_or_none(s.get(k)):
                 return fail(f"runtime_metrics.{series_name}.{k} must be number or null")
 
+    pm = data["perf_metrics"]
+    for series_name in ("txn_normal_avg_ms", "query_avg_ms_max", "cm_tps_min", "hp_max_query_avg_ms"):
+        s = pm.get(series_name)
+        if not isinstance(s, dict):
+            return fail(f"perf_metrics.{series_name} must be object")
+        if not isinstance(s.get("count"), int) or s["count"] < 0:
+            return fail(f"perf_metrics.{series_name}.count must be non-negative int")
+        for k in ("min", "max", "avg"):
+            if not _is_num_or_none(s.get(k)):
+                return fail(f"perf_metrics.{series_name}.{k} must be number or null")
+
+    h = data["health"]
+    if h.get("tier") not in ("healthy", "warning", "critical"):
+        return fail("health.tier must be healthy|warning|critical")
+    if not isinstance(h.get("reasons"), list) or any(not isinstance(x, str) for x in h["reasons"]):
+        return fail("health.reasons must be string array")
+    for k in ("latest_query_avg_ms", "latest_cm_tps_min", "latest_hp_max_query_avg_ms", "latest_txn_normal_avg_ms"):
+        if not _is_num_or_none(h.get(k)):
+            return fail(f"health.{k} must be number or null")
+
     parsed_ts: list[datetime] = []
     for idx, row in enumerate(data["recent_runs"], start=1):
         if not isinstance(row, dict):
@@ -118,9 +138,15 @@ def main() -> int:
             "runtime_conflict_rate_p95",
             "runtime_txn_begin_lock_conflict_delta",
             "runtime_wal_compact_delta",
+            "txn_normal_avg_ms",
+            "query_avg_ms_max",
+            "cm_tps_min",
+            "hp_max_query_avg_ms",
         ):
             if not _is_num_or_none(row.get(field)):
                 return fail(f"recent_runs[{idx}].{field} must be number or null")
+        if not _is_str_or_none(row.get("dashboard_quality_gate_status")):
+            return fail(f"recent_runs[{idx}].dashboard_quality_gate_status must be string or null")
 
     for i in range(1, len(parsed_ts)):
         if parsed_ts[i] < parsed_ts[i - 1]:

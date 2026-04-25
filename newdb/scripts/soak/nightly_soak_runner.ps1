@@ -21,6 +21,13 @@ param(
     [string]$TelemetryProfile = "soak",
     [bool]$RequireNightlySamplesForDashboard = $true,
     [double]$MaxLatestNightlyAgeHours = 48.0,
+    [string]$MaxDashboardHealthTier = "warning",
+    [double]$WarnMaxQueryAvgMs = 100.0,
+    [double]$CriticalMaxQueryAvgMs = 300.0,
+    [double]$WarnMinCmTps = 25000.0,
+    [double]$CriticalMinCmTps = 15000.0,
+    [double]$WarnMinNightlyPassRate = 0.90,
+    [double]$CriticalMinNightlyPassRate = 0.70,
     [switch]$LiteProfile
 )
 
@@ -129,6 +136,21 @@ function Invoke-PythonScriptCapture {
     }
 }
 
+function Load-JsonObject {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $null
+    }
+    try {
+        return (Get-Content -Path $Path -Raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
 Write-Host ("Nightly soak start: runs={0} soak_minutes={1}" -f $Runs, $SoakMinutes)
 
 for ($i = 1; $i -le $Runs; $i++) {
@@ -188,24 +210,56 @@ for ($i = 1; $i -le $Runs; $i++) {
 
     $testLoopTrendPath = Join-Path $resultDir "test_loop_trend.jsonl"
     $dashboardPath = Join-Path $resultDir "runtime_trend_dashboard.json"
+    $hasExistingNightlySamples = $false
+    if (Test-Path -LiteralPath $nightlyTrendPath) {
+        $nightlyRaw = (Get-Content -Path $nightlyTrendPath -Raw)
+        if (-not [string]::IsNullOrWhiteSpace($nightlyRaw)) {
+            $hasExistingNightlySamples = $true
+        }
+    }
+
     $rollupArgs = @(
         "--test-loop-trend", $testLoopTrendPath,
         "--nightly-trend", $nightlyTrendPath,
         "--output", $dashboardPath,
-        "--max-latest-nightly-age-hours", "$MaxLatestNightlyAgeHours"
+        "--max-latest-nightly-age-hours", "$MaxLatestNightlyAgeHours",
+        "--max-health-tier", "$MaxDashboardHealthTier",
+        "--warn-max-query-avg-ms", "$WarnMaxQueryAvgMs",
+        "--critical-max-query-avg-ms", "$CriticalMaxQueryAvgMs",
+        "--warn-min-cm-tps", "$WarnMinCmTps",
+        "--critical-min-cm-tps", "$CriticalMinCmTps",
+        "--warn-min-nightly-pass-rate", "$WarnMinNightlyPassRate",
+        "--critical-min-nightly-pass-rate", "$CriticalMinNightlyPassRate"
     )
-    if ($RequireNightlySamplesForDashboard) {
+    $bootstrapBypassRequireNightly = $RequireNightlySamplesForDashboard -and (-not $hasExistingNightlySamples)
+    if ($RequireNightlySamplesForDashboard -and (-not $bootstrapBypassRequireNightly)) {
         $rollupArgs += "--require-nightly-samples"
     }
     $rollup = Invoke-PythonScriptCapture -ScriptPath (Join-Path $scriptsRoot "runtime_trend_rollup.py") -ScriptArgs $rollupArgs
     $dashboardQualityGateStatus = if ($rollup.ok) { "passed" } else { "failed" }
     $dashboardQualityGateReason = if ($rollup.ok) { "" } else { $rollup.output }
+    if ($bootstrapBypassRequireNightly) {
+        $dashboardQualityGateReason = @(
+            "bootstrap_bypass=require-nightly-samples",
+            "reason=no_existing_nightly_samples",
+            "note=first-run allows seed append before strict gate"
+        ) -join "; "
+    }
     if (-not [string]::IsNullOrWhiteSpace($rollup.output)) {
         Write-Host $rollup.output
     }
     if ($rollup.ok) {
         Invoke-PythonScript -ScriptPath (Join-Path (Split-Path -Parent $scriptsRoot) "validate/validate_runtime_trend_dashboard.py") -ScriptArgs @($dashboardPath)
         Write-Host ("Nightly dashboard refresh: {0}" -f $dashboardPath)
+    }
+    $dashboardHealthTier = $null
+    $dashboardHealthReasons = $null
+    $dashboardObj = Load-JsonObject -Path $dashboardPath
+    if ($dashboardObj -and $dashboardObj.health) {
+        $dashboardHealthTier = [string]$dashboardObj.health.tier
+        if ($dashboardObj.health.reasons) {
+            $dashboardHealthReasons = (($dashboardObj.health.reasons | ForEach-Object { "$_" }) -join " | ")
+        }
     }
 
     $record = [ordered]@{
@@ -235,6 +289,8 @@ for ($i = 1; $i -le $Runs; $i++) {
         dashboard_path = $dashboardPath
         dashboard_quality_gate_status = $dashboardQualityGateStatus
         dashboard_quality_gate_reason = $dashboardQualityGateReason
+        dashboard_health_tier = $dashboardHealthTier
+        dashboard_health_reasons = $dashboardHealthReasons
     }
     ($record | ConvertTo-Json -Compress) | Add-Content -Path $nightlyTrendPath
     Write-Host ("Nightly trend append: {0}" -f $nightlyTrendPath)

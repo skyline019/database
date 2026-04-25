@@ -46,6 +46,35 @@ type RuntimeArtifactInfo = {
   dllPath: string;
   dllModified: string;
 };
+type RuntimeTrendDashboard = {
+  schema_version?: string;
+  generated_at?: string;
+  health?: {
+    tier?: "healthy" | "warning" | "critical" | string;
+    reasons?: string[];
+    latest_query_avg_ms?: number | null;
+    latest_cm_tps_min?: number | null;
+    latest_hp_max_query_avg_ms?: number | null;
+    latest_txn_normal_avg_ms?: number | null;
+  };
+  sources?: {
+    test_loop_rows?: number;
+    nightly_rows?: number;
+  };
+  nightly_status?: {
+    pass_rate?: number | null;
+  };
+  perf_metrics?: Record<string, { count: number; min: number | null; max: number | null; avg: number | null }>;
+  recent_runs?: Array<{
+    source?: string | null;
+    timestamp?: string | null;
+    runtime_run_id?: string | null;
+    status?: string | null;
+    dashboard_quality_gate_status?: string | null;
+    query_avg_ms_max?: number | null;
+    cm_tps_min?: number | null;
+  }>;
+};
 type TableTabState = {
   key: string;
   table: string;
@@ -138,6 +167,10 @@ const activeTab = ref<"data" | "mdb">("data");
 const busy = ref(false);
 const dll = ref<DllInfo>({ loaded: false, version: "n/a", path: "", message: "" });
 const runtimeArtifacts = ref<RuntimeArtifactInfo | null>(null);
+const runtimeDashboard = ref<RuntimeTrendDashboard | null>(null);
+const runtimeDashboardUpdatedAt = ref("");
+const runtimeDashboardPrevTier = ref<string>("");
+const runtimeDashboardTierChangeNote = ref("");
 const undoStack = ref<OperationRecord[]>([]);
 const redoStack = ref<OperationRecord[]>([]);
 const showHelp = ref(false);
@@ -426,6 +459,18 @@ const tableStatusText = computed(() => {
 });
 const canUndo = computed(() => undoStack.value.some((x) => !!x.backward));
 const canRedo = computed(() => redoStack.value.length > 0);
+const dashboardTier = computed(() => String(runtimeDashboard.value?.health?.tier || "unknown").toLowerCase());
+const dashboardTierClass = computed(() => {
+  if (dashboardTier.value === "healthy") return "tier-healthy";
+  if (dashboardTier.value === "warning") return "tier-warning";
+  if (dashboardTier.value === "critical") return "tier-critical";
+  return "tier-unknown";
+});
+const dashboardRecentRuns = computed(() => {
+  const rows = runtimeDashboard.value?.recent_runs ?? [];
+  if (!Array.isArray(rows)) return [];
+  return rows.slice(-8).reverse();
+});
 const layoutStyle = computed(() => {
   const s = settings.value;
   const gradient = "radial-gradient(circle at 15% 15%, #1e3a8a 0%, #0f172a 40%, #030712 100%)";
@@ -772,9 +817,29 @@ async function refreshRuntimeArtifacts() {
   runtimeArtifacts.value = await invoke<RuntimeArtifactInfo>("runtime_artifact_info");
 }
 
+async function refreshRuntimeDashboard() {
+  try {
+    const raw = await invoke<string>("runtime_trend_dashboard_json");
+    const next = JSON.parse(raw) as RuntimeTrendDashboard;
+    const nextTier = String(next?.health?.tier || "unknown").toLowerCase();
+    const prevTier = String(runtimeDashboard.value?.health?.tier || runtimeDashboardPrevTier.value || "unknown").toLowerCase();
+    runtimeDashboard.value = next;
+    runtimeDashboardUpdatedAt.value = now();
+    if (prevTier && nextTier && prevTier !== nextTier) {
+      runtimeDashboardTierChangeNote.value = `${prevTier} -> ${nextTier}`;
+      logLine(`[DASHBOARD] health tier changed: ${prevTier} -> ${nextTier}`);
+    }
+    runtimeDashboardPrevTier.value = nextTier;
+  } catch (e) {
+    runtimeDashboard.value = null;
+    logLine(`[DASHBOARD][WARN] ${String(e)}`);
+  }
+}
+
 async function openDllStatusModal() {
   await refreshDllInfo();
   await refreshRuntimeArtifacts();
+  await refreshRuntimeDashboard();
   showDllModal.value = true;
 }
 
@@ -1593,6 +1658,7 @@ async function runMenuAction(action: MenuAction) {
       });
       logs.value.unshift(`[${now()}] nightly soak\n${result}`);
       persistLogs();
+      await refreshRuntimeDashboard();
       await openUiMessage(
         "alert",
         "Nightly Soak 完成",
@@ -1678,6 +1744,7 @@ onMounted(async () => {
   } catch (e) {
     logLine(`[RUNTIME][ERROR] ${String(e)}`);
   }
+  await refreshRuntimeDashboard();
   await refreshTables();
   if (state.value.currentTable?.trim()) {
     const tab = ensureTableTab(state.value.currentTable.trim());
@@ -1821,6 +1888,72 @@ onUnmounted(() => {
         </div>
 
         <template v-if="activeTab === 'data'">
+          <div class="fold-panel">
+            <div class="fold-header">
+              <strong>Runtime Dashboard</strong>
+              <div class="dashboard-header-actions">
+                <span v-if="runtimeDashboard?.health?.tier" class="dashboard-tier-wrap">
+                  健康等级：
+                  <span class="dashboard-tier-pill" :class="dashboardTierClass">{{ runtimeDashboard.health.tier }}</span>
+                </span>
+                <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新</el-button>
+              </div>
+            </div>
+            <div class="fold-body">
+              <template v-if="runtimeDashboard">
+                <div class="dashboard-meta-line">
+                  <span>last refresh: {{ runtimeDashboardUpdatedAt || "n/a" }}</span>
+                  <span>generated_at: {{ runtimeDashboard.generated_at || "n/a" }}</span>
+                  <span v-if="runtimeDashboardTierChangeNote" class="dashboard-tier-change">
+                    tier changed: {{ runtimeDashboardTierChangeNote }}
+                  </span>
+                </div>
+                <div style="height: 8px" />
+                <div class="tool-grid">
+                  <div class="tool-card">
+                    <div class="tool-title">健康状态</div>
+                    <div><strong>tier:</strong> {{ runtimeDashboard.health?.tier || "unknown" }}</div>
+                    <div><strong>nightly rows:</strong> {{ runtimeDashboard.sources?.nightly_rows ?? 0 }}</div>
+                    <div><strong>test rows:</strong> {{ runtimeDashboard.sources?.test_loop_rows ?? 0 }}</div>
+                    <div><strong>nightly pass_rate:</strong> {{ runtimeDashboard.nightly_status?.pass_rate ?? "n/a" }}</div>
+                  </div>
+                  <div class="tool-card">
+                    <div class="tool-title">关键性能快照</div>
+                    <div><strong>latest query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_query_avg_ms ?? "n/a" }}</div>
+                    <div><strong>latest cm_tps_min:</strong> {{ runtimeDashboard.health?.latest_cm_tps_min ?? "n/a" }}</div>
+                    <div><strong>latest hp_query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_hp_max_query_avg_ms ?? "n/a" }}</div>
+                    <div><strong>latest txn_normal_avg_ms:</strong> {{ runtimeDashboard.health?.latest_txn_normal_avg_ms ?? "n/a" }}</div>
+                  </div>
+                  <div class="tool-card">
+                    <div class="tool-title">健康原因</div>
+                    <div v-if="runtimeDashboard.health?.reasons?.length">
+                      {{ runtimeDashboard.health?.reasons?.join(" | ") }}
+                    </div>
+                    <div v-else>无</div>
+                  </div>
+                </div>
+                <div style="height: 10px" />
+                <div class="tool-card">
+                  <div class="tool-title">最近运行（recent_runs）</div>
+                  <div v-if="dashboardRecentRuns.length === 0" class="mini-tip">暂无 recent_runs 数据</div>
+                  <div v-else class="recent-runs-list">
+                    <div v-for="(r, idx) in dashboardRecentRuns" :key="`run-${idx}`" class="recent-run-row">
+                      <span class="mono">{{ r.timestamp || "n/a" }}</span>
+                      <span>{{ r.source || "unknown" }}</span>
+                      <span class="mono">{{ r.runtime_run_id || "-" }}</span>
+                      <span>q={{ r.query_avg_ms_max ?? "n/a" }}</span>
+                      <span>cm={{ r.cm_tps_min ?? "n/a" }}</span>
+                      <span>status={{ r.status || "-" }}</span>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="mini-tip">未找到 runtime_trend_dashboard.json（先运行 test_loop/nightly_soak 产样）</div>
+              </template>
+            </div>
+          </div>
+
           <div class="open-table-tabs">
             <div class="open-table-tabs-left">
               <strong>已打开表</strong>

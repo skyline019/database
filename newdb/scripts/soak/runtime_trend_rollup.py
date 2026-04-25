@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import Any
 
 
+_HEALTH_ORDER = {"healthy": 0, "warning": 1, "critical": 2}
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not path.is_file():
@@ -73,7 +76,12 @@ def _recent_entries(test_rows: list[dict[str, Any]], nightly_rows: list[dict[str
                 "runtime_conflict_rate_p95": _to_float(row.get("runtime_conflict_rate_p95")),
                 "runtime_txn_begin_lock_conflict_delta": _to_float(row.get("runtime_txn_begin_lock_conflict_delta")),
                 "runtime_wal_compact_delta": _to_float(row.get("runtime_wal_compact_delta")),
+                "txn_normal_avg_ms": _to_float(row.get("txn_normal_avg_ms")),
+                "query_avg_ms_max": _to_float(row.get("query_avg_ms_max")),
+                "cm_tps_min": _to_float(row.get("cm_tps_min")),
+                "hp_max_query_avg_ms": _to_float(row.get("hp_max_query_avg_ms")),
                 "status": None,
+                "dashboard_quality_gate_status": None,
             }
         )
     for row in nightly_rows:
@@ -86,13 +94,34 @@ def _recent_entries(test_rows: list[dict[str, Any]], nightly_rows: list[dict[str
                 "runtime_conflict_rate_p95": _to_float(row.get("runtime_conflict_rate_p95")),
                 "runtime_txn_begin_lock_conflict_delta": _to_float(row.get("runtime_txn_begin_lock_conflict_delta")),
                 "runtime_wal_compact_delta": _to_float(row.get("runtime_wal_compact_delta")),
+                "txn_normal_avg_ms": _to_float(row.get("txn_normal_avg_ms")),
+                "query_avg_ms_max": _to_float(row.get("query_avg_ms_max")),
+                "cm_tps_min": _to_float(row.get("cm_tps_min")),
+                "hp_max_query_avg_ms": _to_float(row.get("hp_max_query_avg_ms")),
                 "status": row.get("status"),
+                "dashboard_quality_gate_status": row.get("dashboard_quality_gate_status"),
             }
         )
     if limit < 1:
         return []
     merged.sort(key=lambda x: (_parse_ts(x.get("timestamp")) is None, _parse_ts(x.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)))
     return merged[-limit:]
+
+
+def _latest_metric(rows: list[dict[str, Any]], key: str) -> float | None:
+    for row in reversed(rows):
+        val = _to_float(row.get(key))
+        if val is not None:
+            return val
+    return None
+
+
+def _health_tier_from_reasons(warning_reasons: list[str], critical_reasons: list[str]) -> str:
+    if critical_reasons:
+        return "critical"
+    if warning_reasons:
+        return "warning"
+    return "healthy"
 
 
 def main() -> int:
@@ -103,6 +132,13 @@ def main() -> int:
     p.add_argument("--recent-limit", type=int, default=30)
     p.add_argument("--require-nightly-samples", action="store_true")
     p.add_argument("--max-latest-nightly-age-hours", type=float, default=-1.0)
+    p.add_argument("--warn-max-query-avg-ms", type=float, default=100.0)
+    p.add_argument("--critical-max-query-avg-ms", type=float, default=300.0)
+    p.add_argument("--warn-min-cm-tps", type=float, default=25000.0)
+    p.add_argument("--critical-min-cm-tps", type=float, default=15000.0)
+    p.add_argument("--warn-min-nightly-pass-rate", type=float, default=0.90)
+    p.add_argument("--critical-min-nightly-pass-rate", type=float, default=0.70)
+    p.add_argument("--max-health-tier", choices=("healthy", "warning", "critical"), default="critical")
     args = p.parse_args()
 
     test_path = Path(args.test_loop_trend)
@@ -117,12 +153,20 @@ def main() -> int:
     conf_p95: list[float] = []
     begin_lock_delta: list[float] = []
     wal_compact_delta: list[float] = []
+    txn_normal_avg_ms: list[float] = []
+    query_avg_ms_max: list[float] = []
+    cm_tps_min: list[float] = []
+    hp_max_query_avg_ms: list[float] = []
     for row in (test_rows + nightly_rows):
         for src, bucket in (
             ("runtime_vacuum_efficiency_p50", vac_p50),
             ("runtime_conflict_rate_p95", conf_p95),
             ("runtime_txn_begin_lock_conflict_delta", begin_lock_delta),
             ("runtime_wal_compact_delta", wal_compact_delta),
+            ("txn_normal_avg_ms", txn_normal_avg_ms),
+            ("query_avg_ms_max", query_avg_ms_max),
+            ("cm_tps_min", cm_tps_min),
+            ("hp_max_query_avg_ms", hp_max_query_avg_ms),
         ):
             val = _to_float(row.get(src))
             if val is not None:
@@ -142,6 +186,40 @@ def main() -> int:
     nightly_age_hours = None
     if latest_nightly_dt is not None:
         nightly_age_hours = (datetime.now(timezone.utc) - latest_nightly_dt).total_seconds() / 3600.0
+
+    latest_query_avg_ms = _latest_metric(test_rows + nightly_rows, "query_avg_ms_max")
+    latest_cm_tps_min = _latest_metric(test_rows + nightly_rows, "cm_tps_min")
+    latest_hp_max_query_avg_ms = _latest_metric(test_rows + nightly_rows, "hp_max_query_avg_ms")
+    latest_txn_normal_avg_ms = _latest_metric(test_rows + nightly_rows, "txn_normal_avg_ms")
+
+    warning_reasons: list[str] = []
+    critical_reasons: list[str] = []
+    if pass_rate is not None:
+        if pass_rate < args.critical_min_nightly_pass_rate:
+            critical_reasons.append(
+                f"nightly_pass_rate={pass_rate:.4f} < critical_min={args.critical_min_nightly_pass_rate:.4f}"
+            )
+        elif pass_rate < args.warn_min_nightly_pass_rate:
+            warning_reasons.append(f"nightly_pass_rate={pass_rate:.4f} < warn_min={args.warn_min_nightly_pass_rate:.4f}")
+    if latest_query_avg_ms is not None:
+        if latest_query_avg_ms > args.critical_max_query_avg_ms:
+            critical_reasons.append(
+                f"latest_query_avg_ms={latest_query_avg_ms:.3f} > critical_max={args.critical_max_query_avg_ms:.3f}"
+            )
+        elif latest_query_avg_ms > args.warn_max_query_avg_ms:
+            warning_reasons.append(f"latest_query_avg_ms={latest_query_avg_ms:.3f} > warn_max={args.warn_max_query_avg_ms:.3f}")
+    if latest_cm_tps_min is not None:
+        if latest_cm_tps_min < args.critical_min_cm_tps:
+            critical_reasons.append(f"latest_cm_tps_min={latest_cm_tps_min:.3f} < critical_min={args.critical_min_cm_tps:.3f}")
+        elif latest_cm_tps_min < args.warn_min_cm_tps:
+            warning_reasons.append(f"latest_cm_tps_min={latest_cm_tps_min:.3f} < warn_min={args.warn_min_cm_tps:.3f}")
+    if nightly_age_hours is not None and args.max_latest_nightly_age_hours >= 0.0 and nightly_age_hours > args.max_latest_nightly_age_hours:
+        warning_reasons.append(
+            f"latest_nightly_age_hours={nightly_age_hours:.3f} > max={args.max_latest_nightly_age_hours:.3f}"
+        )
+
+    health_tier = _health_tier_from_reasons(warning_reasons, critical_reasons)
+    health_reasons = critical_reasons if critical_reasons else warning_reasons
 
     dashboard = {
         "schema_version": "newdb.runtime_trend_dashboard.v1",
@@ -181,6 +259,20 @@ def main() -> int:
             "txn_begin_lock_conflict_delta": _series(begin_lock_delta),
             "wal_compact_delta": _series(wal_compact_delta),
         },
+        "perf_metrics": {
+            "txn_normal_avg_ms": _series(txn_normal_avg_ms),
+            "query_avg_ms_max": _series(query_avg_ms_max),
+            "cm_tps_min": _series(cm_tps_min),
+            "hp_max_query_avg_ms": _series(hp_max_query_avg_ms),
+        },
+        "health": {
+            "tier": health_tier,
+            "reasons": health_reasons,
+            "latest_query_avg_ms": latest_query_avg_ms,
+            "latest_cm_tps_min": latest_cm_tps_min,
+            "latest_hp_max_query_avg_ms": latest_hp_max_query_avg_ms,
+            "latest_txn_normal_avg_ms": latest_txn_normal_avg_ms,
+        },
         "recent_runs": _recent_entries(test_rows, nightly_rows, args.recent_limit),
     }
 
@@ -200,6 +292,13 @@ def main() -> int:
     if args.max_latest_nightly_age_hours >= 0.0 and nightly_age_hours is None:
         print("RUNTIME_TREND_QUALITY_GATE_FAILED: latest nightly age unavailable")
         return 6
+    if _HEALTH_ORDER[health_tier] > _HEALTH_ORDER[args.max_health_tier]:
+        print(
+            "RUNTIME_TREND_QUALITY_GATE_FAILED: "
+            f"health_tier={health_tier} exceeds allowed={args.max_health_tier}; "
+            f"reasons={' | '.join(health_reasons) if health_reasons else 'none'}"
+        )
+        return 7
     return 0
 
 

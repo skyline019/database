@@ -5,6 +5,10 @@ on:
     - cron: "20 1 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+
 jobs:
   nightly-soak-lite:
     runs-on: windows-latest
@@ -26,16 +30,18 @@ jobs:
         working-directory: newdb
         run: >
           .\scripts\soak\nightly_soak_runner.ps1
-          -BuildDir build_nightly\RelWithDebInfo
+          -BuildDir build_nightly
           -Runs 1
           -SoakMinutes 0
           -SleepSecondsBetweenRuns 0
           -LiteProfile
           -RequireNightlySamplesForDashboard $true
           -MaxLatestNightlyAgeHours 168
+          -MaxDashboardHealthTier warning
           -ContinueOnFailure:$false
 
       - name: Upload nightly trend artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: newdb-nightly-soak-trend
@@ -43,4 +49,60 @@ jobs:
             newdb/scripts/results/nightly_soak_trend.jsonl
             newdb/scripts/results/runtime_trend_dashboard.json
           if-no-files-found: error
+
+      - name: Alert on dashboard quality gate failure
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'newdb/scripts/results/nightly_soak_trend.jsonl';
+            if (!fs.existsSync(path)) {
+              core.info('nightly trend file missing, skip alert step');
+              return;
+            }
+            const lines = fs.readFileSync(path, 'utf8').split(/\r?\n/).map(x => x.trim()).filter(Boolean);
+            if (lines.length === 0) {
+              core.info('nightly trend file empty, skip alert step');
+              return;
+            }
+            let latest = null;
+            try {
+              latest = JSON.parse(lines[lines.length - 1]);
+            } catch (e) {
+              core.warning(`failed to parse latest trend line: ${e}`);
+              return;
+            }
+            const gateStatus = String(latest.dashboard_quality_gate_status || '').toLowerCase();
+            if (gateStatus !== 'failed') {
+              core.info('dashboard quality gate is not failed, skip issue creation');
+              return;
+            }
+            const reason = String(latest.dashboard_quality_gate_reason || '').slice(0, 4000);
+            const title = '[newdb-nightly-soak] dashboard quality gate failed';
+            const body = [
+              '自动告警：nightly dashboard 质量门禁失败。',
+              '',
+              `- timestamp: ${latest.timestamp || 'unknown'}`,
+              `- run_index: ${latest.run_index || 'unknown'}`,
+              `- run_id: ${latest.runtime_run_id || 'unknown'}`,
+              `- reason: ${reason || 'unknown'}`,
+              `- workflow_run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '请检查 nightly artifact 与 runtime_trend_dashboard.json。'
+            ].join('\n');
+            const existing = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "${title}"`
+            });
+            if ((existing.data.total_count || 0) > 0) {
+              core.info('open alert issue already exists, skip duplicate');
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['nightly', 'runtime-gate', 'automated-alert']
+            });
 

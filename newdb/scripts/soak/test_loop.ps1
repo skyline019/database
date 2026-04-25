@@ -56,8 +56,9 @@ $scriptsBase = Split-Path -Parent $scriptsRoot
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir = Join-Path $projectRoot $BuildDir
 }
+$isWin = ($env:OS -eq "Windows_NT")
 if ([string]::IsNullOrWhiteSpace($DemoExe)) {
-    $exeName = if ($IsWindows) { "newdb_demo.exe" } else { "newdb_demo" }
+    $exeName = if ($isWin) { "newdb_demo.exe" } else { "newdb_demo" }
     $DemoExe = Join-Path $BuildDir $exeName
 } elseif (-not [System.IO.Path]::IsPathRooted($DemoExe)) {
     $DemoExe = Join-Path $projectRoot $DemoExe
@@ -143,6 +144,20 @@ function Parse-ConcurrentPressureSummaryPath([string]$text) {
         }
     }
     return $null
+}
+
+function Load-JsonFile([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) {
+        return $null
+    }
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    try {
+        return (Get-Content -Path $path -Raw | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
 }
 
 function Resolve-HighPressureQueryGate([double]$rows) {
@@ -311,6 +326,10 @@ $perf = [ordered]@{
     cm_tps_min = $null
     where_policy_rejects = 0
     where_policy_fallbacks = 0
+    runtime_samples = $null
+    runtime_vacuum_efficiency_p50 = $null
+    runtime_conflict_rate_p95 = $null
+    runtime_run_id = $null
     soak_repeat = $null
     soak_summary = $null
 }
@@ -436,9 +455,26 @@ if ($RunHighPressure) {
 
 if ($RunConcurrentPressure) {
     Write-Host "==> Perf: concurrent_pressure_bench.ps1 (repeat=$ConcurrentRepeatUntilFail)"
-    Exec "concurrent_pressure_bench" {
-        powershell -ExecutionPolicy Bypass -File (Join-Path $scriptsBase "bench/concurrent_pressure_bench.ps1") `
-            -BuildDir $BuildDir -Jobs $CtestJobs -RepeatUntilFail $ConcurrentRepeatUntilFail
+    $cpOut = & powershell -ExecutionPolicy Bypass -File (Join-Path $scriptsBase "bench/concurrent_pressure_bench.ps1") `
+        -BuildDir $BuildDir -Jobs $CtestJobs -RepeatUntilFail $ConcurrentRepeatUntilFail -RunRuntimeGate | Out-String
+    Write-Host $cpOut
+    if ($LASTEXITCODE -ne 0) {
+        throw "concurrent_pressure_bench failed: exit_code=$LASTEXITCODE"
+    }
+    $cpSummaryPath = Parse-ConcurrentPressureSummaryPath $cpOut
+    $cpSummary = Load-JsonFile $cpSummaryPath
+    if ($cpSummary -and $cpSummary.runtime_gate_summary) {
+        $perf.runtime_samples = $cpSummary.runtime_gate_summary.samples
+        $perf.runtime_vacuum_efficiency_p50 = $cpSummary.runtime_gate_summary.vacuum_efficiency_p50
+        $perf.runtime_conflict_rate_p95 = $cpSummary.runtime_gate_summary.conflict_rate_p95
+        $perf.runtime_run_id = $cpSummary.runtime_run_id
+        Add-TelemetryEvent -Phase "concurrent_pressure" -Metrics @{
+            runtime_samples = $perf.runtime_samples
+            runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
+            runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
+            runtime_run_id = $perf.runtime_run_id
+            summary = $cpSummaryPath
+        }
     }
 }
 
@@ -488,9 +524,19 @@ if ($SoakMinutes -gt 0) {
     }
     $perf.soak_repeat = $repeat
     $perf.soak_summary = Parse-ConcurrentPressureSummaryPath $soakOut
+    $soakSummary = Load-JsonFile $perf.soak_summary
+    if ($soakSummary -and $soakSummary.runtime_gate_summary) {
+        $perf.runtime_samples = $soakSummary.runtime_gate_summary.samples
+        $perf.runtime_vacuum_efficiency_p50 = $soakSummary.runtime_gate_summary.vacuum_efficiency_p50
+        $perf.runtime_conflict_rate_p95 = $soakSummary.runtime_gate_summary.conflict_rate_p95
+        $perf.runtime_run_id = $soakSummary.runtime_run_id
+    }
     Add-TelemetryEvent -Phase "soak" -Metrics @{
         soak_minutes = $SoakMinutes
         soak_repeat = $perf.soak_repeat
+        runtime_samples = $perf.runtime_samples
+        runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
+        runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
     }
 }
 
@@ -532,6 +578,10 @@ $trendPath = Join-Path $resultDir "test_loop_trend.jsonl"
     query_avg_ms_max = $perf.query_avg_ms_max
     where_policy_rejects = $perf.where_policy_rejects
     where_policy_fallbacks = $perf.where_policy_fallbacks
+    runtime_samples = $perf.runtime_samples
+    runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
+    runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
+    runtime_run_id = $perf.runtime_run_id
     cm_tps_min = $perf.cm_tps_min
     soak_repeat = $perf.soak_repeat
     soak_summary = $perf.soak_summary

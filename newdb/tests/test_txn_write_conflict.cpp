@@ -46,3 +46,67 @@ TEST(TxnWriteConflict, SameTableSameIdRejectedAcrossActiveTransactions) {
     fs::remove_all(ws, ec);
 }
 
+TEST(TxnWriteConflict, SameTableConcurrentBeginRejectedByFileLock) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_conflict_same_table_lock");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+    TxnCoordinator b;
+    b.set_workspace_root(ws.string());
+
+    ASSERT_TRUE(a.begin("users").isOk());
+    EXPECT_FALSE(b.begin("users").isOk());
+
+    ASSERT_TRUE(a.commit().isOk());
+
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
+TEST(TxnWriteConflict, DifferentTableSameIdAllowed) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_conflict_diff_table");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+    TxnCoordinator b;
+    b.set_workspace_root(ws.string());
+
+    ASSERT_TRUE(a.begin("users").isOk());
+    ASSERT_TRUE(b.begin("orders").isOk());
+
+    std::string reason;
+    EXPECT_TRUE(a.tryReserveWriteKey("users", 7, &reason));
+    EXPECT_TRUE(b.tryReserveWriteKey("orders", 7, &reason));
+    EXPECT_EQ(b.writeConflictCount(), 0u);
+
+    ASSERT_TRUE(a.commit().isOk());
+    ASSERT_TRUE(b.commit().isOk());
+
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
+TEST(TxnWriteConflict, RollbackReleasesWriteIntent) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_conflict_rollback_release");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+
+    ASSERT_TRUE(a.begin("users").isOk());
+    std::string reason;
+    EXPECT_TRUE(a.tryReserveWriteKey("users", 42, &reason));
+    ASSERT_TRUE(a.rollback().isOk());
+
+    TxnCoordinator b2;
+    b2.set_workspace_root(ws.string());
+    ASSERT_TRUE(b2.begin("users").isOk());
+    EXPECT_TRUE(b2.tryReserveWriteKey("users", 42, &reason));
+    ASSERT_TRUE(b2.commit().isOk());
+
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+

@@ -29,8 +29,9 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptsRoot)
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir = Join-Path $projectRoot $BuildDir
 }
+$isWin = ($env:OS -eq "Windows_NT")
 if ([string]::IsNullOrWhiteSpace($DemoExe)) {
-    $exeName = if ($IsWindows) { "newdb_demo.exe" } else { "newdb_demo" }
+    $exeName = if ($isWin) { "newdb_demo.exe" } else { "newdb_demo" }
     $DemoExe = Join-Path $BuildDir $exeName
 } elseif (-not [System.IO.Path]::IsPathRooted($DemoExe)) {
     $DemoExe = Join-Path $projectRoot $DemoExe
@@ -142,6 +143,7 @@ for ($i = 1; $i -le $Runs; $i++) {
     }
 
     $record = [ordered]@{
+        schema_version = "newdb.nightly_soak_trend.v1"
         timestamp = (Get-Date).ToString("o")
         run_index = $i
         runs_total = $Runs
@@ -156,6 +158,10 @@ for ($i = 1; $i -le $Runs; $i++) {
         cm_tps_min = if ($perf) { $perf.cm_tps_min } else { $null }
         where_policy_rejects = if ($perf) { $perf.where_policy_rejects } else { $null }
         where_policy_fallbacks = if ($perf) { $perf.where_policy_fallbacks } else { $null }
+        runtime_samples = if ($perf) { $perf.runtime_samples } else { $null }
+        runtime_vacuum_efficiency_p50 = if ($perf) { $perf.runtime_vacuum_efficiency_p50 } else { $null }
+        runtime_conflict_rate_p95 = if ($perf) { $perf.runtime_conflict_rate_p95 } else { $null }
+        runtime_run_id = if ($perf) { $perf.runtime_run_id } else { $null }
         soak_repeat = if ($soak) { $soak.repeat } else { $null }
         soak_summary = if ($soak) { $soak.summary } else { $null }
     }

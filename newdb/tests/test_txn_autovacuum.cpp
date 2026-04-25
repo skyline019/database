@@ -100,3 +100,37 @@ TEST(TxnAutoVacuum, CooldownSuppressesFrequentTriggersSameTable) {
     fs::remove_all(ws, ec);
 }
 
+TEST(TxnAutoVacuum, CooldownIsScopedPerTable) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_autovac_table_scope");
+
+    TxnCoordinator txn;
+    txn.set_workspace_root(ws.string());
+    txn.setVacuumOpsThreshold(1);
+    txn.setVacuumMinIntervalSec(5);
+
+    std::atomic<int> callback_hits{0};
+    txn.setVacuumCallback([&](const std::string&) {
+        callback_hits.fetch_add(1, std::memory_order_relaxed);
+    });
+    txn.startVacuumThread();
+
+    ASSERT_TRUE(txn.begin("users").isOk());
+    txn.recordOperation("INSERT", "users", "1", "", "name=a");
+    ASSERT_TRUE(txn.commit().isOk());
+
+    ASSERT_TRUE(txn.begin("orders").isOk());
+    txn.recordOperation("INSERT", "orders", "1", "", "name=o");
+    ASSERT_TRUE(txn.commit().isOk());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(450));
+    EXPECT_EQ(callback_hits.load(std::memory_order_relaxed), 2);
+    EXPECT_EQ(txn.vacuumTriggerCount(), 2u);
+    EXPECT_EQ(txn.vacuumExecuteCount(), 2u);
+    EXPECT_EQ(txn.vacuumCooldownSkipCount(), 0u);
+
+    txn.stopVacuumThread();
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+

@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <cstdio>
@@ -9,6 +10,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -2464,29 +2466,22 @@ bool process_command_line(ShellState& st, const char* input_line) {
     if (session_handled) {
         return true;
     }
-    if (handle_txn_commands(st, line, log_file, current_table)) {
-        return true;
-    }
-    if (handle_workspace_admin_commands(st, line, log_file, eff_data, current_table, current_file)) {
-        return true;
-    }
-    if (handle_import_defattr_commands(st, line, log_file, eff_data, current_file)) {
-        return true;
-    }
-    if (handle_schema_catalog_commands(st, line, log_file)) {
-        return true;
-    }
-    if (handle_ddl_create_use_commands(st, line, log_file, eff_data, current_table, current_file)) {
-        return true;
-    }
-    if (handle_ddl_alter_rename_commands(st, line, log_file, eff_data, current_table, current_file)) {
-        return true;
-    }
-    if (handle_schema_show_commands(st, line, log_file, current_table, current_file)) {
-        return true;
-    }
-    if (handle_dml_insert_command(st, line, log_file, eff_data, current_table, current_file)) {
-        return true;
+
+    // Phase-1 dispatch chain: commands that don't require loaded heap table.
+    const std::array<std::function<bool()>, 8> phase1_handlers = {
+        [&]() { return handle_txn_commands(st, line, log_file, current_table); },
+        [&]() { return handle_workspace_admin_commands(st, line, log_file, eff_data, current_table, current_file); },
+        [&]() { return handle_import_defattr_commands(st, line, log_file, eff_data, current_file); },
+        [&]() { return handle_schema_catalog_commands(st, line, log_file); },
+        [&]() { return handle_ddl_create_use_commands(st, line, log_file, eff_data, current_table, current_file); },
+        [&]() { return handle_ddl_alter_rename_commands(st, line, log_file, eff_data, current_table, current_file); },
+        [&]() { return handle_schema_show_commands(st, line, log_file, current_table, current_file); },
+        [&]() { return handle_dml_insert_command(st, line, log_file, eff_data, current_table, current_file); },
+    };
+    for (const auto& h : phase1_handlers) {
+        if (h()) {
+            return true;
+        }
     }
 
     // 其他命令优先使用缓存的表（按当前表文件名区分）；按需装载一次
@@ -2496,41 +2491,22 @@ bool process_command_line(ShellState& st, const char* input_line) {
     }
     newdb::HeapTable& tbl = *tbl_ptr;
 
-    if (handle_schema_key_command(st, line, log_file, eff_data, tbl)) {
-        return true;
-    }
-
-    if (handle_query_where_count_commands(st, line, log_file, eff_data, current_table, tbl)) {
-        return true;
-    }
-
-    if (handle_dml_update_delete_commands(st, line, log_file, eff_data, current_table, tbl)) {
-        return true;
-    }
-
-    if (handle_dml_attr_commands(st, line, log_file, eff_data, current_table, tbl)) {
-        return true;
-    }
-
-
-    if (handle_query_find_commands(st, line, log_file, eff_data, tbl)) {
-        return true;
-    }
-
-    if (handle_query_sum_avg_commands(st, line, log_file, eff_data, tbl)) {
-        return true;
-    }
-
-    if (handle_query_min_max_commands(st, line, log_file, tbl)) {
-        return true;
-    }
-
-    if (handle_query_page_command(st, line, log_file, eff_data, tbl)) {
-        return true;
-    }
-
-    if (handle_export_command(st, line, log_file, current_table, current_file, tbl)) {
-        return true;
+    // Phase-2 dispatch chain: commands requiring loaded table cache.
+    const std::array<std::function<bool()>, 9> phase2_handlers = {
+        [&]() { return handle_schema_key_command(st, line, log_file, eff_data, tbl); },
+        [&]() { return handle_query_where_count_commands(st, line, log_file, eff_data, current_table, tbl); },
+        [&]() { return handle_dml_update_delete_commands(st, line, log_file, eff_data, current_table, tbl); },
+        [&]() { return handle_dml_attr_commands(st, line, log_file, eff_data, current_table, tbl); },
+        [&]() { return handle_query_find_commands(st, line, log_file, eff_data, tbl); },
+        [&]() { return handle_query_sum_avg_commands(st, line, log_file, eff_data, tbl); },
+        [&]() { return handle_query_min_max_commands(st, line, log_file, tbl); },
+        [&]() { return handle_query_page_command(st, line, log_file, eff_data, tbl); },
+        [&]() { return handle_export_command(st, line, log_file, current_table, current_file, tbl); },
+    };
+    for (const auto& h : phase2_handlers) {
+        if (h()) {
+            return true;
+        }
     }
 
     log_and_print(log_file, "[ERR] unknown command. Type HELP.\n");

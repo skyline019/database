@@ -1,7 +1,10 @@
 #include <cstdlib>
+#include <algorithm>
+#include <cstdint>
+#include <cmath>
 #include <fstream>
 #include <iostream>
-#include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -11,13 +14,17 @@ struct Args {
     std::string input_jsonl;
     std::string output_json;
     std::string label_prefix;
+    std::string run_id;
     double min_vacuum_efficiency{-1.0};
     double max_conflict_rate{-1.0};
+    double min_vacuum_efficiency_p50{-1.0};
+    double max_conflict_rate_p95{-1.0};
     int last_n{0};
 };
 
 struct Row {
     std::string label;
+    std::string run_id;
     std::uint64_t trigger_count{0};
     std::uint64_t execute_count{0};
     std::uint64_t cooldown_skips{0};
@@ -25,12 +32,22 @@ struct Row {
     bool ok{false};
 };
 
+struct DistStats {
+    double min{0.0};
+    double max{0.0};
+    double avg{0.0};
+    double p50{0.0};
+    double p95{0.0};
+};
+
 void print_usage() {
     std::cout
         << "newdb_runtime_report\n"
         << "  --input <runtime_stats.jsonl> [--output <summary.json>]\n"
+        << "  [--run-id <id>|latest]\n"
         << "  [--label-prefix <prefix>] [--last-n <N>=2 for before/after]\n"
-        << "  [--min-vacuum-efficiency <0..1>] [--max-conflict-rate <0..1>]\n";
+        << "  [--min-vacuum-efficiency <0..1>] [--max-conflict-rate <0..1>]\n"
+        << "  [--min-vacuum-efficiency-p50 <0..1>] [--max-conflict-rate-p95 <0..1>]\n";
 }
 
 bool parse_double(const char* s, double& out) {
@@ -75,10 +92,26 @@ bool parse_args(int argc, char** argv, Args& out) {
             if (!v || !parse_double(v, out.max_conflict_rate)) return false;
             continue;
         }
+        if (arg == "--min-vacuum-efficiency-p50") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.min_vacuum_efficiency_p50)) return false;
+            continue;
+        }
+        if (arg == "--max-conflict-rate-p95") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_conflict_rate_p95)) return false;
+            continue;
+        }
         if (arg == "--label-prefix") {
             const char* v = next();
             if (!v) return false;
             out.label_prefix = v;
+            continue;
+        }
+        if (arg == "--run-id") {
+            const char* v = next();
+            if (!v) return false;
+            out.run_id = v;
             continue;
         }
         if (arg == "--last-n") {
@@ -131,7 +164,9 @@ Row parse_row(const std::string& line) {
     Row r{};
     bool ok = true;
     std::string label;
+    std::string run_id;
     if (extract_string_field(line, "label", label)) r.label = label;
+    if (extract_string_field(line, "run_id", run_id)) r.run_id = run_id;
     ok = ok && extract_u64_field(line, "vacuum_trigger_count", r.trigger_count);
     ok = ok && extract_u64_field(line, "vacuum_execute_count", r.execute_count);
     ok = ok && extract_u64_field(line, "vacuum_cooldown_skip_count", r.cooldown_skips);
@@ -140,13 +175,37 @@ Row parse_row(const std::string& line) {
     return r;
 }
 
+double percentile_nearest_rank(std::vector<double> values, const double p) {
+    if (values.empty()) return 0.0;
+    std::sort(values.begin(), values.end());
+    if (p <= 0.0) return values.front();
+    if (p >= 1.0) return values.back();
+    const std::size_t n = values.size();
+    const std::size_t rank = static_cast<std::size_t>(std::ceil(p * static_cast<double>(n)));
+    const std::size_t idx = (rank == 0) ? 0 : (rank - 1);
+    return values[std::min(idx, n - 1)];
+}
+
+DistStats build_dist_stats(const std::vector<double>& values) {
+    DistStats s{};
+    if (values.empty()) return s;
+    s.min = *std::min_element(values.begin(), values.end());
+    s.max = *std::max_element(values.begin(), values.end());
+    s.avg = std::accumulate(values.begin(), values.end(), 0.0) / static_cast<double>(values.size());
+    s.p50 = percentile_nearest_rank(values, 0.50);
+    s.p95 = percentile_nearest_rank(values, 0.95);
+    return s;
+}
+
 std::string build_summary_json(std::size_t samples,
                                std::uint64_t trigger_delta,
                                std::uint64_t execute_delta,
                                std::uint64_t skip_delta,
                                std::uint64_t conflict_delta,
                                double vacuum_efficiency,
-                               double conflict_rate) {
+                               double conflict_rate,
+                               const DistStats& vacuum_eff_stats,
+                               const DistStats& conflict_rate_stats) {
     return std::string("{") +
            "\"samples\":" + std::to_string(samples) + "," +
            "\"vacuum_trigger_delta\":" + std::to_string(trigger_delta) + "," +
@@ -154,7 +213,17 @@ std::string build_summary_json(std::size_t samples,
            "\"vacuum_cooldown_skip_delta\":" + std::to_string(skip_delta) + "," +
            "\"write_conflict_delta\":" + std::to_string(conflict_delta) + "," +
            "\"vacuum_efficiency\":" + std::to_string(vacuum_efficiency) + "," +
-           "\"conflict_rate\":" + std::to_string(conflict_rate) +
+           "\"conflict_rate\":" + std::to_string(conflict_rate) + "," +
+           "\"vacuum_efficiency_min\":" + std::to_string(vacuum_eff_stats.min) + "," +
+           "\"vacuum_efficiency_max\":" + std::to_string(vacuum_eff_stats.max) + "," +
+           "\"vacuum_efficiency_avg\":" + std::to_string(vacuum_eff_stats.avg) + "," +
+           "\"vacuum_efficiency_p50\":" + std::to_string(vacuum_eff_stats.p50) + "," +
+           "\"vacuum_efficiency_p95\":" + std::to_string(vacuum_eff_stats.p95) + "," +
+           "\"conflict_rate_min\":" + std::to_string(conflict_rate_stats.min) + "," +
+           "\"conflict_rate_max\":" + std::to_string(conflict_rate_stats.max) + "," +
+           "\"conflict_rate_avg\":" + std::to_string(conflict_rate_stats.avg) + "," +
+           "\"conflict_rate_p50\":" + std::to_string(conflict_rate_stats.p50) + "," +
+           "\"conflict_rate_p95\":" + std::to_string(conflict_rate_stats.p95) +
            "}";
 }
 
@@ -175,12 +244,23 @@ int main(int argc, char** argv) {
 
     std::vector<Row> rows;
     std::string line;
+    std::string latest_run_id;
     while (std::getline(in, line)) {
         if (line.empty()) continue;
         Row r = parse_row(line);
         if (!r.ok) continue;
+        if (!r.run_id.empty()) latest_run_id = r.run_id;
         if (!args.label_prefix.empty() && r.label.rfind(args.label_prefix, 0) != 0) continue;
         rows.push_back(r);
+    }
+    if (!args.run_id.empty()) {
+        const std::string want = (args.run_id == "latest") ? latest_run_id : args.run_id;
+        std::vector<Row> filtered;
+        filtered.reserve(rows.size());
+        for (const Row& r : rows) {
+            if (r.run_id == want) filtered.push_back(r);
+        }
+        rows.swap(filtered);
     }
     if (args.last_n > 0 && static_cast<std::size_t>(args.last_n) < rows.size()) {
         rows.erase(rows.begin(), rows.end() - args.last_n);
@@ -210,8 +290,34 @@ int main(int argc, char** argv) {
     const double conflict_rate =
         static_cast<double>(conflict_delta) / static_cast<double>(rows.size() - 1);
 
+    std::vector<double> vacuum_eff_series;
+    std::vector<double> conflict_rate_series;
+    vacuum_eff_series.reserve(rows.size() - 1);
+    conflict_rate_series.reserve(rows.size() - 1);
+    for (std::size_t i = 1; i < rows.size(); ++i) {
+        const Row& prev = rows[i - 1];
+        const Row& cur = rows[i];
+        const std::uint64_t trig_d = (cur.trigger_count >= prev.trigger_count) ? (cur.trigger_count - prev.trigger_count) : 0;
+        const std::uint64_t exec_d = (cur.execute_count >= prev.execute_count) ? (cur.execute_count - prev.execute_count) : 0;
+        const std::uint64_t conf_d =
+            (cur.write_conflicts >= prev.write_conflicts) ? (cur.write_conflicts - prev.write_conflicts) : 0;
+        const double eff = (trig_d == 0) ? 1.0 : (static_cast<double>(exec_d) / static_cast<double>(trig_d));
+        vacuum_eff_series.push_back(eff);
+        conflict_rate_series.push_back(static_cast<double>(conf_d));
+    }
+    const DistStats vacuum_eff_stats = build_dist_stats(vacuum_eff_series);
+    const DistStats conflict_rate_stats = build_dist_stats(conflict_rate_series);
+
     const std::string summary = build_summary_json(
-        rows.size(), trigger_delta, execute_delta, skip_delta, conflict_delta, vacuum_efficiency, conflict_rate);
+        rows.size(),
+        trigger_delta,
+        execute_delta,
+        skip_delta,
+        conflict_delta,
+        vacuum_efficiency,
+        conflict_rate,
+        vacuum_eff_stats,
+        conflict_rate_stats);
 
     std::cout << summary << "\n";
     if (!args.output_json.empty()) {
@@ -232,6 +338,16 @@ int main(int argc, char** argv) {
         std::cerr << "gate failed: conflict_rate(" << conflict_rate
                   << ") > max_conflict_rate(" << args.max_conflict_rate << ")\n";
         return 11;
+    }
+    if (args.min_vacuum_efficiency_p50 >= 0.0 && vacuum_eff_stats.p50 < args.min_vacuum_efficiency_p50) {
+        std::cerr << "gate failed: vacuum_efficiency_p50(" << vacuum_eff_stats.p50
+                  << ") < min_vacuum_efficiency_p50(" << args.min_vacuum_efficiency_p50 << ")\n";
+        return 12;
+    }
+    if (args.max_conflict_rate_p95 >= 0.0 && conflict_rate_stats.p95 > args.max_conflict_rate_p95) {
+        std::cerr << "gate failed: conflict_rate_p95(" << conflict_rate_stats.p95
+                  << ") > max_conflict_rate_p95(" << args.max_conflict_rate_p95 << ")\n";
+        return 13;
     }
 
     return 0;

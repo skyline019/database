@@ -7,8 +7,11 @@ param(
     [switch]$RunRuntimeGate = $false,
     [int]$RuntimePressureBatches = 12,
     [int]$RuntimePressureBatchSize = 40,
+    [int]$RuntimeSampleEveryBatches = 1,
     [double]$MinVacuumEfficiency = -1.0,
-    [double]$MaxConflictRate = -1.0
+    [double]$MaxConflictRate = -1.0,
+    [double]$MinVacuumEfficiencyP50 = -1.0,
+    [double]$MaxConflictRateP95 = -1.0
 )
 
 Set-StrictMode -Version Latest
@@ -43,13 +46,15 @@ function Invoke-RuntimePressureAndCapture {
         [string]$WorkspaceDir,
         [string]$OutJsonlPath,
         [int]$Batches,
-        [int]$BatchSize
+        [int]$BatchSize,
+        [int]$SampleEveryBatches
     )
 
-    if ($Batches -le 0 -or $BatchSize -le 0) {
-        throw "runtime pressure batches/batch-size must be > 0"
+    if ($Batches -le 0 -or $BatchSize -le 0 -or $SampleEveryBatches -le 0) {
+        throw "runtime pressure batches/batch-size/sample-every must be > 0"
     }
 
+    $runId = "pressure_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + [Guid]::NewGuid().ToString("N").Substring(0, 8)
     $scriptPath = Join-Path $WorkspaceDir "runtime_pressure.mdb"
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("CREATE TABLE(rtstats)")
@@ -65,6 +70,9 @@ function Invoke-RuntimePressureAndCapture {
             $lines.Add(("DELETE({0})" -f $startId))
         }
         $lines.Add("COMMIT")
+        if ((($i + 1) % $SampleEveryBatches) -eq 0) {
+            $lines.Add("SHOW TUNING JSON")
+        }
         $startId += $BatchSize
     }
     $lines.Add("SHOW TUNING JSON")
@@ -81,24 +89,25 @@ function Invoke-RuntimePressureAndCapture {
         throw "runtime log missing: $log"
     }
     $matched = @(Select-String -Path $log -Pattern '^\{".*"write_conflicts":')
-    if ($matched.Count -lt 2) {
-        throw "need at least 2 SHOW TUNING JSON lines in $log"
+    if ($matched.Count -lt 3) {
+        throw "need at least 3 SHOW TUNING JSON lines in $log (before + trend + after)"
     }
-    $first = $matched[0].Line
-    $last = $matched[$matched.Count - 1].Line
     $ts0 = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $ts1 = $ts0 + 1
-    $jsonBefore = "{""ts_ms"":$ts0,""label"":""pressure_before"",""stats"":" + $first + "}"
-    $jsonAfter = "{""ts_ms"":$ts1,""label"":""pressure_after"",""stats"":" + $last + "}"
-    Add-Content -Path $OutJsonlPath -Value $jsonBefore
-    Add-Content -Path $OutJsonlPath -Value $jsonAfter
+    for ($i = 0; $i -lt $matched.Count; $i++) {
+        $label = if ($i -eq 0) { "pressure_before" } elseif ($i -eq ($matched.Count - 1)) { "pressure_after" } else { "pressure_sample_$i" }
+        $ts = $ts0 + $i
+        $json = "{""schema_version"":""newdb.runtime_stats.v1"",""ts_ms"":$ts,""run_id"":""$runId"",""label"":""$label"",""stats"":" + $matched[$i].Line + "}"
+        Add-Content -Path $OutJsonlPath -Value $json
+    }
 
-    # Script-level regression guard: ensure the expected before/after labels exist.
-    $beforeCnt = @(Select-String -Path $OutJsonlPath -Pattern '"label":"pressure_before"').Count
-    $afterCnt = @(Select-String -Path $OutJsonlPath -Pattern '"label":"pressure_after"').Count
-    if ($beforeCnt -lt 1 -or $afterCnt -lt 1) {
+    # Script-level regression guard: ensure this run has expected labels.
+    $beforeCnt = @(Select-String -Path $OutJsonlPath -Pattern ('"run_id":"' + $runId + '".*"label":"pressure_before"')).Count
+    $afterCnt = @(Select-String -Path $OutJsonlPath -Pattern ('"run_id":"' + $runId + '".*"label":"pressure_after"')).Count
+    $sampleCnt = @(Select-String -Path $OutJsonlPath -Pattern ('"run_id":"' + $runId + '".*"label":"pressure_sample_')).Count
+    if ($beforeCnt -lt 1 -or $afterCnt -lt 1 -or $sampleCnt -lt 1) {
         throw "runtime snapshot jsonl missing pressure_before/pressure_after labels"
     }
+    return $runId
 }
 
 Write-Host "Concurrent pressure start: repeat=$RepeatUntilFail jobs=$Jobs"
@@ -120,15 +129,18 @@ if ((-not $AppendRuntimeJsonl) -and (Test-Path $runtimeJsonlPath)) {
 }
 
 $demoExe = Resolve-Binary -Name "newdb_demo"
+$pressureRunId = ""
+$runtimeGateSummary = $null
 $runtimeWs = Join-Path $env:TEMP ("newdb_runtime_capture_" + [Guid]::NewGuid().ToString("N"))
 New-Item -Path $runtimeWs -ItemType Directory | Out-Null
 try {
-    Invoke-RuntimePressureAndCapture `
+    $pressureRunId = Invoke-RuntimePressureAndCapture `
         -DemoExe $demoExe `
         -WorkspaceDir $runtimeWs `
         -OutJsonlPath $runtimeJsonlPath `
         -Batches $RuntimePressureBatches `
-        -BatchSize $RuntimePressureBatchSize
+        -BatchSize $RuntimePressureBatchSize `
+        -SampleEveryBatches $RuntimeSampleEveryBatches
 
     $cmd = @(
         "--test-dir", $BuildDir,
@@ -149,16 +161,29 @@ try {
 
 if ($RunRuntimeGate) {
     $reportExe = Resolve-Binary -Name "newdb_runtime_report"
-    $reportCmd = @("--input", $runtimeJsonlPath, "--last-n", "2")
+    $reportCmd = @("--input", $runtimeJsonlPath, "--run-id", $pressureRunId)
     if ($MinVacuumEfficiency -ge 0.0) {
         $reportCmd += @("--min-vacuum-efficiency", "$MinVacuumEfficiency")
     }
     if ($MaxConflictRate -ge 0.0) {
         $reportCmd += @("--max-conflict-rate", "$MaxConflictRate")
     }
-    & $reportExe @reportCmd
+    if ($MinVacuumEfficiencyP50 -ge 0.0) {
+        $reportCmd += @("--min-vacuum-efficiency-p50", "$MinVacuumEfficiencyP50")
+    }
+    if ($MaxConflictRateP95 -ge 0.0) {
+        $reportCmd += @("--max-conflict-rate-p95", "$MaxConflictRateP95")
+    }
+    $reportOut = (& $reportExe @reportCmd | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "runtime gate failed: exit_code=$LASTEXITCODE"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($reportOut)) {
+        try {
+            $runtimeGateSummary = $reportOut | ConvertFrom-Json
+        } catch {
+            $runtimeGateSummary = [ordered]@{ raw = $reportOut }
+        }
     }
 }
 
@@ -178,8 +203,13 @@ if ($RunRuntimeGate) {
      runtime_gate_enabled = [bool]$RunRuntimeGate
      runtime_pressure_batches = $RuntimePressureBatches
      runtime_pressure_batch_size = $RuntimePressureBatchSize
+     runtime_sample_every_batches = $RuntimeSampleEveryBatches
+     runtime_run_id = $pressureRunId
      min_vacuum_efficiency = $MinVacuumEfficiency
      max_conflict_rate = $MaxConflictRate
+     min_vacuum_efficiency_p50 = $MinVacuumEfficiencyP50
+     max_conflict_rate_p95 = $MaxConflictRateP95
+     runtime_gate_summary = $runtimeGateSummary
      status = "passed"
  } | ConvertTo-Json -Depth 5 | Set-Content -Path $summaryPath
  Write-Host ("Concurrent pressure summary: {0}" -f $summaryPath)

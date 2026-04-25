@@ -82,6 +82,57 @@ jobs:
           PY
           python3 scripts/validate/validate_telemetry_event.py scripts/results/ci_sample_telemetry.jsonl
 
+  runtime-stats-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate runtime stats JSONL contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("scripts/results/ci_sample_runtime_stats.jsonl")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          rows = [
+              {
+                  "schema_version": "newdb.runtime_stats.v1",
+                  "ts_ms": 1,
+                  "run_id": "pressure_ci_001",
+                  "label": "pressure_before",
+                  "stats": {
+                      "walsync": "normal",
+                      "normal_interval_ms": 20,
+                      "autovacuum": True,
+                      "vacuum_ops_threshold": 25,
+                      "vacuum_min_interval_sec": 0,
+                      "vacuum_trigger_count": 0,
+                      "vacuum_execute_count": 0,
+                      "vacuum_cooldown_skip_count": 0,
+                      "write_conflicts": 0,
+                  },
+              },
+              {
+                  "schema_version": "newdb.runtime_stats.v1",
+                  "ts_ms": 2,
+                  "run_id": "pressure_ci_001",
+                  "label": "pressure_after",
+                  "stats": {
+                      "walsync": "normal",
+                      "normal_interval_ms": 20,
+                      "autovacuum": True,
+                      "vacuum_ops_threshold": 25,
+                      "vacuum_min_interval_sec": 0,
+                      "vacuum_trigger_count": 2,
+                      "vacuum_execute_count": 2,
+                      "vacuum_cooldown_skip_count": 0,
+                      "write_conflicts": 0,
+                  },
+              },
+          ]
+          p.write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
+          PY
+          python3 scripts/validate/validate_runtime_stats.py scripts/results/ci_sample_runtime_stats.jsonl
+
   linux-gcc:
     runs-on: ubuntu-latest
     steps:

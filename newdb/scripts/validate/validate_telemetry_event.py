@@ -25,6 +25,7 @@ ALLOWED_PHASES = {
     "txn_bench",
     "query_bench",
     "eq_cache_bench",
+    "concurrent_pressure",
     "high_pressure",
     "concurrent_million",
     "soak",

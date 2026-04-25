@@ -37,8 +37,9 @@
 其中 `bench/concurrent_pressure_bench.ps1` 已支持：
 - 每次运行默认独立 `runtime_stats_concurrent_pressure_<timestamp>.jsonl`
 - `-AppendRuntimeJsonl`（显式开启后才追加）
-- `-RunRuntimeGate` + 阈值参数（内部调用 `newdb_runtime_report --last-n 2`）
-- `-RuntimePressureBatches` / `-RuntimePressureBatchSize`（控制同生命周期采样负载强度）
+- `-RunRuntimeGate` + 阈值参数（支持均值与趋势分位阈值）
+- `-RuntimePressureBatches` / `-RuntimePressureBatchSize` / `-RuntimeSampleEveryBatches`（控制同生命周期多点采样强度）
+- 采样会写入 `run_id`，可配合 `newdb_runtime_report --run-id` 做单次运行趋势分析（含 p50/p95）
 
 相关输入模板：
 - `query_bench.mdb`
@@ -49,13 +50,19 @@
 - `soak/test_loop.ps1`
 - `soak/nightly_soak_runner.ps1`
 
+`test_loop.ps1` 与 `nightly_soak_runner.ps1` 当前会输出趋势 JSONL，包含
+`runtime_samples`、`runtime_vacuum_efficiency_p50`、`runtime_conflict_rate_p95`
+等运行时门禁指标，便于长期回归追踪。
+
 ## 4) C API / 遥测 / 汇总校验（scripts/validate）
 
 - `validate/check_c_api_abi.py`
 - `validate/c_api_expected_symbols.txt`
 - `validate/validate_telemetry_event.py`
 - `validate/validate_perf_summary.py`
+- `validate/validate_runtime_stats.py`
 - `PERF_METRICS_SCHEMA.md`
+- `RUNTIME_STATS_SCHEMA.md`
 
 ## 5) 文档与运维说明
 

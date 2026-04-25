@@ -161,6 +161,7 @@ std::string build_runtime_snapshot_jsonl_line(const CApiSession& s, const std::s
     const auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     std::ostringstream oss;
     oss << "{"
+        << "\"schema_version\":\"newdb.runtime_stats.v1\","
         << "\"ts_ms\":" << ts_ms << ","
         << "\"label\":\"" << json_escape_local(label) << "\","
         << "\"stats\":" << build_runtime_stats_json(s)

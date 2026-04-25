@@ -68,13 +68,18 @@ def main() -> int:
     p.add_argument(
         "--runtime-last-n",
         type=int,
-        default=2,
-        help="Use only last N snapshots for gate delta (must be >=2).",
+        default=0,
+        help="Use only last N snapshots for gate delta (disabled when 0, must be >=2 when enabled).",
     )
     p.add_argument(
         "--runtime-label-prefix",
         default="",
         help="Optional label prefix filter before computing runtime deltas.",
+    )
+    p.add_argument(
+        "--runtime-run-id",
+        default="",
+        help="Optional run_id filter (use 'latest' to select latest run in file).",
     )
     p.add_argument(
         "--min-vacuum-efficiency",
@@ -87,6 +92,18 @@ def main() -> int:
         type=float,
         default=-1.0,
         help="Fail gate when conflict_rate is above this threshold (disabled when <0).",
+    )
+    p.add_argument(
+        "--min-vacuum-efficiency-p50",
+        type=float,
+        default=-1.0,
+        help="Fail gate when vacuum_efficiency_p50 is below this threshold (disabled when <0).",
+    )
+    p.add_argument(
+        "--max-conflict-rate-p95",
+        type=float,
+        default=-1.0,
+        help="Fail gate when conflict_rate_p95 is above this threshold (disabled when <0).",
     )
     args = p.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
@@ -115,7 +132,7 @@ def main() -> int:
 
     runtime_jsonl = args.runtime_jsonl
     if runtime_jsonl:
-        if args.runtime_last_n < 2:
+        if args.runtime_last_n != 0 and args.runtime_last_n < 2:
             print("ERROR: --runtime-last-n must be >= 2", file=sys.stderr)
             return 8
         if not os.path.isabs(runtime_jsonl):
@@ -129,13 +146,21 @@ def main() -> int:
             print(f"ERROR: runtime report tool not found: {reporter}", file=sys.stderr)
             return 7
 
-        cmd = [reporter, "--input", runtime_jsonl, "--last-n", str(args.runtime_last_n)]
+        cmd = [reporter, "--input", runtime_jsonl]
+        if args.runtime_last_n > 0:
+            cmd.extend(["--last-n", str(args.runtime_last_n)])
+        if args.runtime_run_id:
+            cmd.extend(["--run-id", args.runtime_run_id])
         if args.runtime_label_prefix:
             cmd.extend(["--label-prefix", args.runtime_label_prefix])
         if args.min_vacuum_efficiency >= 0.0:
             cmd.extend(["--min-vacuum-efficiency", str(args.min_vacuum_efficiency)])
         if args.max_conflict_rate >= 0.0:
             cmd.extend(["--max-conflict-rate", str(args.max_conflict_rate)])
+        if args.min_vacuum_efficiency_p50 >= 0.0:
+            cmd.extend(["--min-vacuum-efficiency-p50", str(args.min_vacuum_efficiency_p50)])
+        if args.max_conflict_rate_p95 >= 0.0:
+            cmd.extend(["--max-conflict-rate-p95", str(args.max_conflict_rate_p95)])
         out = subprocess.check_output(cmd, cwd=b, text=True).strip()
         # Keep one machine-readable summary line in CI logs.
         try:

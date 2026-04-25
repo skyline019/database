@@ -222,8 +222,10 @@ TEST(CApi, RuntimeSnapshotAppendsJsonl) {
     std::string l2;
     ASSERT_TRUE(static_cast<bool>(std::getline(in, l1)));
     ASSERT_TRUE(static_cast<bool>(std::getline(in, l2)));
+    EXPECT_NE(l1.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l1.find("\"label\":\"after_insert\""), std::string::npos);
     EXPECT_NE(l1.find("\"stats\":{"), std::string::npos);
+    EXPECT_NE(l2.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l2.find("\"label\":\"after_insert_2\""), std::string::npos);
     in.close();
 

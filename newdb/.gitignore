@@ -23,6 +23,8 @@
 /qa_*.bin
 /qa_*.bin.*
 /scripts/results/
+/scripts/bench/results/
+__pycache__/
 *.log
 *.tmp
 

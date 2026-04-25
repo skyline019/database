@@ -78,54 +78,68 @@
 \contentsline {subsubsection}{\numberline {8.3.1}A. 入口主流程（demo\_main）}{28}{subsubsection.8.3.1}%
 \contentsline {subsubsection}{\numberline {8.3.2}B. 命令处理主链（process\_command\_line）}{28}{subsubsection.8.3.2}%
 \contentsline {subsection}{\numberline {8.4}算法与复杂度（中层视角）}{28}{subsection.8.4}%
-\contentsline {subsection}{\numberline {8.5}中层风险与优化建议}{29}{subsection.8.5}%
+\contentsline {subsection}{\numberline {8.5}本章复评结论（现状 / 风险 / 建议）}{29}{subsection.8.5}%
+\contentsline {subsection}{\numberline {8.6}近期修复要点：PAGE id 排序语义一致性}{29}{subsection.8.6}%
 \contentsline {section}{\numberline {9}中层解析 II：include（公共 API 与契约层）}{29}{section.9}%
 \contentsline {subsection}{\numberline {9.1}模块定位}{29}{subsection.9.1}%
 \contentsline {subsection}{\numberline {9.2}头文件分层（建议理解顺序）}{29}{subsection.9.2}%
-\contentsline {subsection}{\numberline {9.3}关键契约示例}{29}{subsection.9.3}%
-\contentsline {subsubsection}{\numberline {9.3.1}Status：统一错误传播约定}{29}{subsubsection.9.3.1}%
+\contentsline {subsection}{\numberline {9.3}关键契约示例}{30}{subsection.9.3}%
+\contentsline {subsubsection}{\numberline {9.3.1}Status：统一错误传播约定}{30}{subsubsection.9.3.1}%
 \contentsline {subsubsection}{\numberline {9.3.2}Session：并发边界写在接口注释里}{30}{subsubsection.9.3.2}%
 \contentsline {subsubsection}{\numberline {9.3.3}WAL 管理接口：功能完整但实现可替换}{30}{subsubsection.9.3.3}%
-\contentsline {subsection}{\numberline {9.4}中层设计评估}{30}{subsection.9.4}%
-\contentsline {section}{\numberline {10}中层解析 III：tests（验证策略与质量护栏）}{30}{section.10}%
-\contentsline {subsection}{\numberline {10.1}测试分层概览}{30}{subsection.10.1}%
+\contentsline {subsection}{\numberline {9.4}本章复评结论（现状 / 风险 / 建议）}{30}{subsection.9.4}%
+\contentsline {section}{\numberline {10}中层解析 III：tests（验证策略与质量护栏）}{31}{section.10}%
+\contentsline {subsection}{\numberline {10.1}测试分层概览}{31}{subsection.10.1}%
 \contentsline {subsection}{\numberline {10.2}代表性测试样例}{31}{subsection.10.2}%
 \contentsline {subsubsection}{\numberline {10.2.1}A. WHERE 语义与策略（test\_demo\_where.cpp）}{31}{subsubsection.10.2.1}%
 \contentsline {subsubsection}{\numberline {10.2.2}B. 页 IO 容错与懒加载（test\_page\_io.cpp）}{31}{subsubsection.10.2.2}%
 \contentsline {subsubsection}{\numberline {10.2.3}C. WAL 并发正确性（test\_wal\_concurrency.cpp）}{31}{subsubsection.10.2.3}%
-\contentsline {subsection}{\numberline {10.3}测试策略评价}{31}{subsection.10.3}%
+\contentsline {subsubsection}{\numberline {10.2.4}D. PAGE id 排序回归（test\_demo\_cli.cpp）}{32}{subsubsection.10.2.4}%
+\contentsline {subsection}{\numberline {10.3}本章复评结论（现状 / 风险 / 建议）}{32}{subsection.10.3}%
 \contentsline {section}{\numberline {11}中层解析 IV：tools（基准与烟测工具链）}{32}{section.11}%
 \contentsline {subsection}{\numberline {11.1}工具集定位}{32}{subsection.11.1}%
-\contentsline {subsection}{\numberline {11.2}关键结构与流程}{32}{subsection.11.2}%
-\contentsline {subsubsection}{\numberline {11.2.1}A. newdb\_perf：脚本编排器}{32}{subsubsection.11.2.1}%
-\contentsline {subsubsection}{\numberline {11.2.2}B. newdb\_concurrent\_perf：并发 WAL 压测}{32}{subsubsection.11.2.2}%
+\contentsline {subsection}{\numberline {11.2}关键结构与流程}{33}{subsection.11.2}%
+\contentsline {subsubsection}{\numberline {11.2.1}A. newdb\_perf：脚本编排器}{33}{subsubsection.11.2.1}%
+\contentsline {subsubsection}{\numberline {11.2.2}B. newdb\_concurrent\_perf：并发 WAL 压测}{33}{subsubsection.11.2.2}%
 \contentsline {subsubsection}{\numberline {11.2.3}C. newdb\_smoke：最小可用性验证}{33}{subsubsection.11.2.3}%
-\contentsline {subsection}{\numberline {11.3}工具层评价与优化建议}{33}{subsection.11.3}%
-\contentsline {section}{\numberline {A}附录：与 LevelDB / InnoDB 底层结构对比}{33}{appendix.A}%
-\contentsline {subsection}{\numberline {A.1}一图总览（结构定位）}{33}{subsection.A.1}%
-\contentsline {subsection}{\numberline {A.2}1) 存储组织（Data Layout）}{34}{subsection.A.2}%
-\contentsline {subsubsection}{\numberline {A.2.1}newdb}{34}{subsubsection.A.2.1}%
-\contentsline {subsubsection}{\numberline {A.2.2}LevelDB}{34}{subsubsection.A.2.2}%
-\contentsline {subsubsection}{\numberline {A.2.3}InnoDB}{34}{subsubsection.A.2.3}%
-\contentsline {subsection}{\numberline {A.3}2) 索引与查询路径}{34}{subsection.A.3}%
-\contentsline {subsection}{\numberline {A.4}3) WAL / Redo 与恢复模型}{34}{subsection.A.4}%
-\contentsline {subsubsection}{\numberline {A.4.1}newdb}{34}{subsubsection.A.4.1}%
-\contentsline {subsubsection}{\numberline {A.4.2}LevelDB}{34}{subsubsection.A.4.2}%
-\contentsline {subsubsection}{\numberline {A.4.3}InnoDB}{34}{subsubsection.A.4.3}%
-\contentsline {subsection}{\numberline {A.5}4) 并发控制与 MVCC 深度}{35}{subsection.A.5}%
-\contentsline {subsection}{\numberline {A.6}5) 空间回收与长期运行形态}{35}{subsection.A.6}%
-\contentsline {subsection}{\numberline {A.7}6) 写放大 / 读放大（工程后果）}{35}{subsection.A.7}%
-\contentsline {subsection}{\numberline {A.8}7) 对 newdb 的演进启发（可落地）}{35}{subsection.A.8}%
-\contentsline {subsection}{\numberline {A.9}8) 结论（结构层面）}{35}{subsection.A.9}%
-\contentsline {subsection}{\numberline {A.10}9) 优劣评价（工程决策视角）}{36}{subsection.A.10}%
-\contentsline {subsubsection}{\numberline {A.10.1}newdb}{36}{subsubsection.A.10.1}%
-\contentsline {subsubsection}{\numberline {A.10.2}LevelDB}{36}{subsubsection.A.10.2}%
-\contentsline {subsubsection}{\numberline {A.10.3}InnoDB}{36}{subsubsection.A.10.3}%
-\contentsline {subsubsection}{\numberline {A.10.4}按场景选型建议}{37}{subsubsection.A.10.4}%
-\contentsline {subsection}{\numberline {A.11}10) 纳入中层（demo/include/tests/tools）后的再评估}{37}{subsection.A.11}%
-\contentsline {subsubsection}{\numberline {A.11.1}A. 架构完整性：从“内核原型”提升为“可用小系统”}{37}{subsubsection.A.11.1}%
-\contentsline {subsubsection}{\numberline {A.11.2}B. 与 LevelDB/InnoDB 的差距重述（中层视角）}{37}{subsubsection.A.11.2}%
-\contentsline {subsubsection}{\numberline {A.11.3}C. 工程风险再分级（加入中层后）}{37}{subsubsection.A.11.3}%
-\contentsline {subsubsection}{\numberline {A.11.4}D. 选型建议修订（纳入中层能力）}{37}{subsubsection.A.11.4}%
-\contentsline {subsubsection}{\numberline {A.11.5}E. 下一阶段优先级（基于中层现状）}{38}{subsubsection.A.11.5}%
-\contentsline {subsection}{\numberline {A.12}Executive Summary（1 页决策速览，面向评审会）}{38}{subsection.A.12}%
+\contentsline {subsection}{\numberline {11.3}本章复评结论（现状 / 风险 / 建议）}{34}{subsection.11.3}%
+\contentsline {section}{\numberline {12}中层解析 V：rust\_gui（前端 GUI 独立文档与复评）}{34}{section.12}%
+\contentsline {subsection}{\numberline {12.1}文档定位与范围}{34}{subsection.12.1}%
+\contentsline {subsection}{\numberline {12.2}架构分层复盘}{34}{subsection.12.2}%
+\contentsline {subsubsection}{\numberline {12.2.1}A. 交互与状态层（Vue）}{34}{subsubsection.12.2.1}%
+\contentsline {subsubsection}{\numberline {12.2.2}B. 原生桥接层（Tauri / Rust）}{34}{subsubsection.12.2.2}%
+\contentsline {subsubsection}{\numberline {12.2.3}C. 资源与交付层（脚本）}{34}{subsubsection.12.2.3}%
+\contentsline {subsection}{\numberline {12.3}近期关键变更归档（本轮）}{35}{subsection.12.3}%
+\contentsline {subsection}{\numberline {12.4}本章复评结论（现状 / 风险 / 建议）}{35}{subsection.12.4}%
+\contentsline {subsubsection}{\numberline {12.4.1}结论 1：结构可维护性明显提升}{35}{subsubsection.12.4.1}%
+\contentsline {subsubsection}{\numberline {12.4.2}结论 2：用户感知问题闭环较完整}{35}{subsubsection.12.4.2}%
+\contentsline {subsubsection}{\numberline {12.4.3}结论 3：仍有可优化空间（非阻塞）}{35}{subsubsection.12.4.3}%
+\contentsline {subsection}{\numberline {12.5}建议的后续演进顺序}{35}{subsection.12.5}%
+\contentsline {section}{\numberline {A}附录：与 LevelDB / InnoDB 底层结构对比}{35}{appendix.A}%
+\contentsline {subsection}{\numberline {A.1}一图总览（结构定位）}{36}{subsection.A.1}%
+\contentsline {subsection}{\numberline {A.2}1) 存储组织（Data Layout）}{36}{subsection.A.2}%
+\contentsline {subsubsection}{\numberline {A.2.1}newdb}{36}{subsubsection.A.2.1}%
+\contentsline {subsubsection}{\numberline {A.2.2}LevelDB}{36}{subsubsection.A.2.2}%
+\contentsline {subsubsection}{\numberline {A.2.3}InnoDB}{36}{subsubsection.A.2.3}%
+\contentsline {subsection}{\numberline {A.3}2) 索引与查询路径}{36}{subsection.A.3}%
+\contentsline {subsection}{\numberline {A.4}3) WAL / Redo 与恢复模型}{36}{subsection.A.4}%
+\contentsline {subsubsection}{\numberline {A.4.1}newdb}{36}{subsubsection.A.4.1}%
+\contentsline {subsubsection}{\numberline {A.4.2}LevelDB}{37}{subsubsection.A.4.2}%
+\contentsline {subsubsection}{\numberline {A.4.3}InnoDB}{37}{subsubsection.A.4.3}%
+\contentsline {subsection}{\numberline {A.5}4) 并发控制与 MVCC 深度}{37}{subsection.A.5}%
+\contentsline {subsection}{\numberline {A.6}5) 空间回收与长期运行形态}{37}{subsection.A.6}%
+\contentsline {subsection}{\numberline {A.7}6) 写放大 / 读放大（工程后果）}{37}{subsection.A.7}%
+\contentsline {subsection}{\numberline {A.8}7) 对 newdb 的演进启发（可落地）}{37}{subsection.A.8}%
+\contentsline {subsection}{\numberline {A.9}8) 结论（结构层面）}{38}{subsection.A.9}%
+\contentsline {subsection}{\numberline {A.10}9) 优劣评价（工程决策视角）}{38}{subsection.A.10}%
+\contentsline {subsubsection}{\numberline {A.10.1}newdb}{38}{subsubsection.A.10.1}%
+\contentsline {subsubsection}{\numberline {A.10.2}LevelDB}{38}{subsubsection.A.10.2}%
+\contentsline {subsubsection}{\numberline {A.10.3}InnoDB}{38}{subsubsection.A.10.3}%
+\contentsline {subsubsection}{\numberline {A.10.4}按场景选型建议}{39}{subsubsection.A.10.4}%
+\contentsline {subsection}{\numberline {A.11}10) 纳入中层（demo/include/tests/tools）后的再评估}{39}{subsection.A.11}%
+\contentsline {subsubsection}{\numberline {A.11.1}A. 架构完整性：从“内核原型”提升为“可用小系统”}{39}{subsubsection.A.11.1}%
+\contentsline {subsubsection}{\numberline {A.11.2}B. 与 LevelDB/InnoDB 的差距重述（中层视角）}{39}{subsubsection.A.11.2}%
+\contentsline {subsubsection}{\numberline {A.11.3}C. 工程风险再分级（加入中层后）}{39}{subsubsection.A.11.3}%
+\contentsline {subsubsection}{\numberline {A.11.4}D. 选型建议修订（纳入中层能力）}{39}{subsubsection.A.11.4}%
+\contentsline {subsubsection}{\numberline {A.11.5}E. 下一阶段优先级（基于中层现状）}{40}{subsubsection.A.11.5}%
+\contentsline {subsection}{\numberline {A.12}Executive Summary（1 页决策速览，面向评审会）}{40}{subsection.A.12}%

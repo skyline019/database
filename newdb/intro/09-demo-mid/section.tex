@@ -106,11 +106,27 @@ bool process_command_line(ShellState& st, const char* input_line) {
     \end{itemize}
 \end{itemize}
 
-\subsection{中层风险与优化建议}
+\subsection{本章复评结论（现状 / 风险 / 建议）}
 
 \begin{itemize}
   \item \textbf{handler 链增长风险}：\texttt{process\_command\_line} 已较长，建议后续拆成“命令注册表 + 表驱动分发”。
   \item \textbf{会话锁持有时长}：\texttt{session\_heap\_guard} 设计正确，但需警惕重 I/O 命令在持锁期间阻塞。
   \item \textbf{策略可观测性}：可把 \texttt{WhereQueryContext} 的原子计数接入统一诊断命令，形成运行期画像。
 \end{itemize}
+
+\subsection{近期修复要点：PAGE id 排序语义一致性}
+
+在 \fpath{demo/page_index_sidecar.cc} 的近期修复中，\texttt{PAGE(..., id, asc)} 明确改为\textbf{按整数 id 比较}，避免字符串字典序导致的
+\texttt{1,10,2} 问题（表现为新增到 10 后显示在 1 与 2 之间）。
+
+\begin{itemize}
+  \item \textbf{修复前}：\texttt{id} 在 sidecar 构建阶段以字符串键进入排序，可能出现 \texttt{10 < 2} 的错误顺序。
+  \item \textbf{修复后}：在排序收敛阶段对 \texttt{order\_key=="id"} 走数值比较（\texttt{a.id < b.id} / \texttt{a.id > b.id}）。
+  \item \textbf{兼容策略}：page sidecar header 引入版本字段（ver），旧索引自动失效重建，避免历史缓存继续污染分页顺序。
+\end{itemize}
+
+这类问题本质上是“\textbf{存储键编码语义} 与 \textbf{业务排序语义} 不一致”，后续新增索引 sidecar 时应优先遵循：
+\begin{center}
+排序比较规则必须与 \texttt{TableSchema::compare\_attr} / 字段类型语义保持一致。
+\end{center}
 

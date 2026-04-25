@@ -58,7 +58,24 @@ EXPECT_EQ(insert_count, kThreads * kOpsPerThread);
 
 价值：验证 writer 队列与 LSN 递增在高并发下不会破坏可读性与计数一致性。
 
-\subsection{测试策略评价}
+\subsubsection{D. PAGE id 排序回归（test\_demo\_cli.cpp）}
+\begin{lstlisting}[language=C++,caption={PAGE id 升序最小回归场景（节选）}]
+newdb::HeapTable tbl;
+tbl.rows = {
+    newdb::Row{1,  {{"name", "a"}}, {}},
+    newdb::Row{10, {{"name", "c"}}, {}},
+    newdb::Row{2,  {{"name", "b"}}, {}},
+};
+PageSidecarRequest req{/*order_key=*/"id", /*descending=*/false, ...};
+const auto idx = load_or_build_page_index_sidecar(req, schema, tbl);
+EXPECT_EQ(tbl.rows[idx[0]].id, 1);
+EXPECT_EQ(tbl.rows[idx[1]].id, 2);
+EXPECT_EQ(tbl.rows[idx[2]].id, 10);
+\end{lstlisting}
+
+价值：把“\texttt{1,2,10} 顺序正确性”固化为可重复验证的最小场景，避免后续 sidecar/排序重构时回归。
+
+\subsection{本章复评结论（现状 / 风险 / 建议）}
 
 \begin{itemize}
   \item \textbf{优点}：

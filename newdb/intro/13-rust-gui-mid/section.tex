@@ -1,0 +1,81 @@
+\section{中层解析 V：rust\_gui（前端 GUI 独立文档与复评）}
+
+\subsection{文档定位与范围}
+
+本章节将 \fpath{newdb/rust\_gui/} 作为\textbf{独立模块}评审，覆盖：
+\begin{itemize}
+  \item 前端渲染层：\fpath{src/App.vue}, \fpath{src/styles.css}
+  \item Tauri 后端桥接层：\fpath{src-tauri/src/lib.rs}
+  \item 运行时资源同步：\fpath{scripts/sync\_runtime\_binaries.ps1}
+\end{itemize}
+
+目标是回答三件事：\textbf{GUI 架构是否清晰}、\textbf{可配置性是否完整}、\textbf{近期修复是否形成闭环}。
+
+\subsection{架构分层复盘}
+
+\subsubsection{A. 交互与状态层（Vue）}
+\begin{itemize}
+  \item \texttt{App.vue} 承担主状态机：表格页、MDB 编辑器、日志窗、CLI 窗、事务栈、设置弹窗。
+  \item 关键状态分组已较完整：数据态（table/page/sort）、运行态（busy/runtime dashboard）、UI 态（modal/折叠/侧栏/主题）。
+  \item 日志由“整段文本”升级为“逐行分类渲染”，支持 \texttt{cmd/error/success/meta/session} 五类高亮。
+\end{itemize}
+
+\subsubsection{B. 原生桥接层（Tauri / Rust）}
+\begin{itemize}
+  \item \texttt{lib.rs} 暴露命令式接口：执行命令、分页查询、runtime dashboard 读取、settings 持久化、CLI 终端管理。
+  \item \texttt{UiSettings} 已使用 \texttt{serde(default)}，保证旧配置升级时缺字段不崩溃。
+  \item 二进制/资源路径解析覆盖 dev 与 bundle 双场景，容错能力优于早期版本。
+\end{itemize}
+
+\subsubsection{C. 资源与交付层（脚本）}
+\begin{itemize}
+  \item \texttt{sync\_runtime\_binaries.ps1} 统一同步 demo/perf/runtime\_report/DLL 与脚本、results 种子文件。
+  \item GUI 在离线打包后可直接读取 trend/dashboard 所需资源，减少“本地有文件但 GUI 读不到”的环境差异。
+\end{itemize}
+
+\subsection{近期关键变更归档（本轮）}
+
+\begin{itemize}
+  \item \textbf{日志可观测性}：新增会话分隔头（\texttt{[SESSION] ...}）并设为专属高亮类型。
+  \item \textbf{回看效率}：回看窗口支持“命中统计 + 上/下条跳转 + 自动定位命中行”。
+  \item \textbf{布局能力}：侧栏支持显示/隐藏、宽度拖拽并持久化（\texttt{sidebarWidth}）。
+  \item \textbf{设置体系升级}：
+    \begin{itemize}
+      \item 从单页堆叠改为“弹窗侧栏菜单”；
+      \item 支持预设、导入导出 JSON、保存状态反馈；
+      \item 扩展到圆角/阴影/日志排版/边框对比度/面板亮度/日志高亮强度。
+    \end{itemize}
+  \item \textbf{数据顺序修复}：PAGE 的 \texttt{id} 排序改为数值语义，并补最小回归测试（\texttt{1,2,10}）。
+\end{itemize}
+
+\subsection{本章复评结论（现状 / 风险 / 建议）}
+
+\subsubsection{结论 1：结构可维护性明显提升}
+\begin{itemize}
+  \item 设置系统从“零散硬编码”走向“变量驱动 + 持久化配置”，维护成本下降。
+  \item 侧栏菜单化后，设置弹窗的信息密度与可达性更稳定，后续新增配置项更可控。
+\end{itemize}
+
+\subsubsection{结论 2：用户感知问题闭环较完整}
+\begin{itemize}
+  \item 已闭环的问题：日志混会话、回看定位慢、侧栏操作割裂、分页 id 错序。
+  \item 已形成“修复 + 回归测试 + GUI 同步”的链路，降低同类问题复发概率。
+\end{itemize}
+
+\subsubsection{结论 3：仍有可优化空间（非阻塞）}
+\begin{itemize}
+  \item \textbf{组件拆分}：\texttt{App.vue} 仍偏大，建议逐步拆成 \texttt{SettingsPanel / LogPanel / SidebarPanel}。
+  \item \textbf{主题深度}：当前以强度参数为主，下一步可增加模块级基色（侧栏/主区/控制台独立色板）。
+  \item \textbf{日志性能}：日志量继续增长时，可引入虚拟列表减少 DOM 压力。
+\end{itemize}
+
+\subsection{建议的后续演进顺序}
+
+\begin{enumerate}
+  \item \textbf{先拆组件边界}（降低 \texttt{App.vue} 复杂度）；
+  \item \textbf{再补主题第三轮}（模块基色 + 对比度自适应）；
+  \item \textbf{最后做日志虚拟化}（在高日志量下保证交互流畅）。
+\end{enumerate}
+
+该顺序兼顾“工程可维护性”和“用户可感知收益”，能避免一次性大改导致回归面过大。
+

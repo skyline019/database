@@ -309,6 +309,11 @@ INPUT ./12-tools-mid/section.tex
 INPUT ./12-tools-mid/section.tex
 INPUT ./12-tools-mid/section.tex
 INPUT 12-tools-mid/section.tex
+INPUT ./13-rust-gui-mid/section.tex
+INPUT ./13-rust-gui-mid/section.tex
+INPUT ./13-rust-gui-mid/section.tex
+INPUT ./13-rust-gui-mid/section.tex
+INPUT 13-rust-gui-mid/section.tex
 INPUT ./08-compare-leveldb-innodb/section.tex
 INPUT ./08-compare-leveldb-innodb/section.tex
 INPUT ./08-compare-leveldb-innodb/section.tex

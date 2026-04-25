@@ -18,7 +18,9 @@ param(
     [double]$MaxHighPressureQueryAvgMs1M = 20000.0,
     [double]$MaxHighPressureQueryAvgMs3M = 45000.0,
     [string]$TelemetryEnvironment = "nightly",
-    [string]$TelemetryProfile = "soak"
+    [string]$TelemetryProfile = "soak",
+    [bool]$RequireNightlySamplesForDashboard = $true,
+    [double]$MaxLatestNightlyAgeHours = 48.0
 )
 
 Set-StrictMode -Version Latest
@@ -92,6 +94,40 @@ function Invoke-PythonScript {
     throw "failed to execute python script: $ScriptPath"
 }
 
+function Invoke-PythonScriptCapture {
+    param(
+        [string]$ScriptPath,
+        [string[]]$ScriptArgs
+    )
+    $pythonCandidates = @(
+        @("python3"),
+        @("py", "-3"),
+        @("python")
+    )
+    $lastOutput = ""
+    foreach ($candidate in $pythonCandidates) {
+        $cmd = $candidate[0]
+        $prefix = @()
+        if ($candidate.Length -gt 1) {
+            $prefix = $candidate[1..($candidate.Length - 1)]
+        }
+        $out = (& $cmd @prefix $ScriptPath @ScriptArgs 2>&1 | Out-String)
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                ok = $true
+                exit_code = 0
+                output = $out.Trim()
+            }
+        }
+        $lastOutput = $out
+    }
+    return [pscustomobject]@{
+        ok = $false
+        exit_code = 1
+        output = $lastOutput.Trim()
+    }
+}
+
 Write-Host ("Nightly soak start: runs={0} soak_minutes={1}" -f $Runs, $SoakMinutes)
 
 for ($i = 1; $i -le $Runs; $i++) {
@@ -142,6 +178,28 @@ for ($i = 1; $i -le $Runs; $i++) {
         Invoke-PythonScript -ScriptPath (Join-Path (Split-Path -Parent $scriptsRoot) "validate/validate_telemetry_event.py") -ScriptArgs @($telemetryPath)
     }
 
+    $testLoopTrendPath = Join-Path $resultDir "test_loop_trend.jsonl"
+    $dashboardPath = Join-Path $resultDir "runtime_trend_dashboard.json"
+    $rollupArgs = @(
+        "--test-loop-trend", $testLoopTrendPath,
+        "--nightly-trend", $nightlyTrendPath,
+        "--output", $dashboardPath,
+        "--max-latest-nightly-age-hours", "$MaxLatestNightlyAgeHours"
+    )
+    if ($RequireNightlySamplesForDashboard) {
+        $rollupArgs += "--require-nightly-samples"
+    }
+    $rollup = Invoke-PythonScriptCapture -ScriptPath (Join-Path $scriptsRoot "runtime_trend_rollup.py") -ScriptArgs $rollupArgs
+    $dashboardQualityGateStatus = if ($rollup.ok) { "passed" } else { "failed" }
+    $dashboardQualityGateReason = if ($rollup.ok) { "" } else { $rollup.output }
+    if (-not [string]::IsNullOrWhiteSpace($rollup.output)) {
+        Write-Host $rollup.output
+    }
+    if ($rollup.ok) {
+        Invoke-PythonScript -ScriptPath (Join-Path (Split-Path -Parent $scriptsRoot) "validate/validate_runtime_trend_dashboard.py") -ScriptArgs @($dashboardPath)
+        Write-Host ("Nightly dashboard refresh: {0}" -f $dashboardPath)
+    }
+
     $record = [ordered]@{
         schema_version = "newdb.nightly_soak_trend.v1"
         timestamp = (Get-Date).ToString("o")
@@ -166,20 +224,16 @@ for ($i = 1; $i -le $Runs; $i++) {
         runtime_run_id = if ($perf) { $perf.runtime_run_id } else { $null }
         soak_repeat = if ($soak) { $soak.repeat } else { $null }
         soak_summary = if ($soak) { $soak.summary } else { $null }
+        dashboard_path = $dashboardPath
+        dashboard_quality_gate_status = $dashboardQualityGateStatus
+        dashboard_quality_gate_reason = $dashboardQualityGateReason
     }
     ($record | ConvertTo-Json -Compress) | Add-Content -Path $nightlyTrendPath
     Write-Host ("Nightly trend append: {0}" -f $nightlyTrendPath)
 
-    $testLoopTrendPath = Join-Path $resultDir "test_loop_trend.jsonl"
-    $dashboardPath = Join-Path $resultDir "runtime_trend_dashboard.json"
-    Invoke-PythonScript -ScriptPath (Join-Path $scriptsRoot "runtime_trend_rollup.py") -ScriptArgs @(
-        "--test-loop-trend", $testLoopTrendPath,
-        "--nightly-trend", $nightlyTrendPath,
-        "--output", $dashboardPath
-    )
-    Invoke-PythonScript -ScriptPath (Join-Path (Split-Path -Parent $scriptsRoot) "validate/validate_runtime_trend_dashboard.py") -ScriptArgs @($dashboardPath)
-    Write-Host ("Nightly dashboard refresh: {0}" -f $dashboardPath)
-
+    if ((-not $rollup.ok) -and -not $ContinueOnFailure) {
+        throw "Nightly dashboard quality gate failed at index=$i: $dashboardQualityGateReason"
+    }
     if ($exitCode -ne 0 -and -not $ContinueOnFailure) {
         throw "Nightly run failed at index=$i exit_code=$exitCode"
     }

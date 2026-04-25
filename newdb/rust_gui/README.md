@@ -38,6 +38,7 @@ npm run tauri:dev
 
 ```bash
 cd newdb/rust_gui
+pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build_mingw
 npm run tauri:build
 ```
 
@@ -65,3 +66,16 @@ And `newdb_perf` is available under one of:
 - `../build_shared/newdb_perf(.exe)`
 - `../build/newdb_perf(.exe)`
 - `../build_all/newdb_perf(.exe)`
+
+For bundle resources, sync runtime binaries into `src-tauri/bin` first:
+
+```bash
+pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build_mingw
+```
+
+This syncs:
+
+- `newdb_demo.exe`
+- `newdb_perf.exe`
+- `newdb_runtime_report.exe`
+- `libnewdb.dll`

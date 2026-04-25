@@ -30,6 +30,7 @@
     "resources": [
       "bin/newdb_demo.exe",
       "bin/newdb_perf.exe",
+      "bin/newdb_runtime_report.exe",
       "bin/libnewdb.dll",
       "bin/libgcc_s_seh-1.dll",
       "bin/libwinpthread-1.dll",

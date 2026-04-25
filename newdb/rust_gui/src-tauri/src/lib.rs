@@ -380,6 +380,46 @@ fn resolve_perf_bin() -> Result<PathBuf, String> {
     Err(format!("newdb_perf not found; tried: {tried}"))
 }
 
+fn resolve_runtime_report_bin() -> Result<PathBuf, String> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("newdb_runtime_report.exe"));
+            candidates.push(dir.join("newdb_runtime_report"));
+            candidates.push(dir.join("bin/newdb_runtime_report.exe"));
+            candidates.push(dir.join("bin/newdb_runtime_report"));
+            candidates.push(dir.join("../bin/newdb_runtime_report.exe"));
+            candidates.push(dir.join("../bin/newdb_runtime_report"));
+            candidates.push(dir.join("resources/newdb_runtime_report.exe"));
+            candidates.push(dir.join("resources/newdb_runtime_report"));
+            candidates.push(dir.join("../resources/newdb_runtime_report.exe"));
+            candidates.push(dir.join("../resources/newdb_runtime_report"));
+            candidates.push(dir.join("../newdb_runtime_report.exe"));
+            candidates.push(dir.join("../newdb_runtime_report"));
+        }
+    }
+    candidates.push(PathBuf::from("newdb_runtime_report.exe"));
+    candidates.push(PathBuf::from("newdb_runtime_report"));
+    candidates.push(PathBuf::from("../build_shared/newdb_runtime_report.exe"));
+    candidates.push(PathBuf::from("../build/newdb_runtime_report.exe"));
+    candidates.push(PathBuf::from("../build_all/newdb_runtime_report.exe"));
+    candidates.push(PathBuf::from("../../build_shared/newdb_runtime_report.exe"));
+    candidates.push(PathBuf::from("../../build/newdb_runtime_report.exe"));
+
+    for p in &candidates {
+        if p.exists() {
+            return Ok(p.clone());
+        }
+    }
+
+    let tried = candidates
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    Err(format!("newdb_runtime_report not found; tried: {tried}"))
+}
+
 fn resolve_script_path(script_name: &str) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -1431,6 +1471,10 @@ struct RuntimeArtifactInfo {
     gui_exe_modified: String,
     demo_path: String,
     demo_modified: String,
+    perf_path: String,
+    perf_modified: String,
+    runtime_report_path: String,
+    runtime_report_modified: String,
     dll_path: String,
     dll_modified: String,
 }
@@ -1450,12 +1494,18 @@ fn format_modified_time(path: &Path) -> String {
 fn runtime_artifact_info() -> RuntimeArtifactInfo {
     let gui_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("unknown"));
     let demo = resolve_demo_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
+    let perf = resolve_perf_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
+    let runtime_report = resolve_runtime_report_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let dll = resolve_newdb_dll();
     RuntimeArtifactInfo {
         gui_exe_path: gui_exe.display().to_string(),
         gui_exe_modified: format_modified_time(&gui_exe),
         demo_path: demo.display().to_string(),
         demo_modified: format_modified_time(&demo),
+        perf_path: perf.display().to_string(),
+        perf_modified: format_modified_time(&perf),
+        runtime_report_path: runtime_report.display().to_string(),
+        runtime_report_modified: format_modified_time(&runtime_report),
         dll_path: dll.display().to_string(),
         dll_modified: format_modified_time(&dll),
     }
@@ -1530,6 +1580,7 @@ pub fn self_check() -> Result<(), String> {
     // 1) Ensure we can resolve binaries/scripts using current layout heuristics.
     let _demo = resolve_demo_bin().ok();
     let _perf = resolve_perf_bin().ok();
+    let _runtime_report = resolve_runtime_report_bin().ok();
     let _soak = resolve_script_path("soak/nightly_soak_runner.ps1").ok();
 
     // 2) Exercise DLL detection path; CI can optionally require it.

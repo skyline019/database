@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -20,6 +21,21 @@ def _is_num_or_none(v: object) -> bool:
 
 def _is_str_or_none(v: object) -> bool:
     return v is None or isinstance(v, str)
+
+
+def _parse_ts(ts: object) -> datetime | None:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def main() -> int:
@@ -43,7 +59,7 @@ def main() -> int:
     if not isinstance(data.get("generated_at"), str) or not data["generated_at"]:
         return fail("generated_at must be non-empty string")
 
-    for key in ("sources", "overview", "nightly_status", "runtime_metrics"):
+    for key in ("sources", "overview", "nightly_status", "runtime_metrics", "data_quality"):
         if not isinstance(data.get(key), dict):
             return fail(f"{key} must be object")
     if not isinstance(data.get("recent_runs"), list):
@@ -55,6 +71,11 @@ def main() -> int:
             return fail(f"nightly_status.{k} must be non-negative int")
     if not _is_num_or_none(ns.get("pass_rate")):
         return fail("nightly_status.pass_rate must be number or null")
+    dq = data["data_quality"]
+    if not isinstance(dq.get("has_nightly_samples"), bool):
+        return fail("data_quality.has_nightly_samples must be bool")
+    if not _is_num_or_none(dq.get("latest_nightly_age_hours")):
+        return fail("data_quality.latest_nightly_age_hours must be number or null")
 
     rm = data["runtime_metrics"]
     for series_name in (
@@ -72,6 +93,7 @@ def main() -> int:
             if not _is_num_or_none(s.get(k)):
                 return fail(f"runtime_metrics.{series_name}.{k} must be number or null")
 
+    parsed_ts: list[datetime] = []
     for idx, row in enumerate(data["recent_runs"], start=1):
         if not isinstance(row, dict):
             return fail(f"recent_runs[{idx}] must be object")
@@ -80,6 +102,9 @@ def main() -> int:
             return fail(f"recent_runs[{idx}].source must be test_loop|nightly")
         if not _is_str_or_none(row.get("timestamp")):
             return fail(f"recent_runs[{idx}].timestamp must be string or null")
+        dt = _parse_ts(row.get("timestamp"))
+        if dt is not None:
+            parsed_ts.append(dt)
         if not _is_str_or_none(row.get("runtime_run_id")):
             return fail(f"recent_runs[{idx}].runtime_run_id must be string or null")
         if not _is_str_or_none(row.get("status")):
@@ -92,6 +117,10 @@ def main() -> int:
         ):
             if not _is_num_or_none(row.get(field)):
                 return fail(f"recent_runs[{idx}].{field} must be number or null")
+
+    for i in range(1, len(parsed_ts)):
+        if parsed_ts[i] < parsed_ts[i - 1]:
+            return fail("recent_runs timestamps must be non-decreasing when parseable")
 
     print(f"RUNTIME_TREND_DASHBOARD_VALID: {path}")
     return 0

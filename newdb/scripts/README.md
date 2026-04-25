@@ -83,6 +83,9 @@ WAL 压缩触发强度。
 - `soak/runtime_trend_rollup.py` 会把 `test_loop_trend.jsonl` 与 `nightly_soak_trend.jsonl`
   聚合为 `runtime_trend_dashboard.json`（schema: `newdb.runtime_trend_dashboard.v1`），并输出
   `recent_runs`（默认最近 30 条，可用 `--recent-limit` 调整）方便前端直接绘制趋势线。
+  P12 起 `recent_runs` 先按时间归并排序后再截断，并补充 `data_quality`（nightly 覆盖度）。
+  支持 `--require-nightly-samples` 与 `--max-latest-nightly-age-hours` 质量门禁参数。
+  `nightly_soak_runner.ps1` 会把该门禁结果写回 trend（`dashboard_quality_gate_status/reason`）。
 
 ---
 

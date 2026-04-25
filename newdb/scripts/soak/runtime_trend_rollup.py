@@ -46,6 +46,21 @@ def _to_float(x: Any) -> float | None:
     return None
 
 
+def _parse_ts(ts: Any) -> datetime | None:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _recent_entries(test_rows: list[dict[str, Any]], nightly_rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     for row in test_rows:
@@ -76,6 +91,7 @@ def _recent_entries(test_rows: list[dict[str, Any]], nightly_rows: list[dict[str
         )
     if limit < 1:
         return []
+    merged.sort(key=lambda x: (_parse_ts(x.get("timestamp")) is None, _parse_ts(x.get("timestamp")) or datetime.min.replace(tzinfo=timezone.utc)))
     return merged[-limit:]
 
 
@@ -85,6 +101,8 @@ def main() -> int:
     p.add_argument("--nightly-trend", required=True)
     p.add_argument("--output", required=True)
     p.add_argument("--recent-limit", type=int, default=30)
+    p.add_argument("--require-nightly-samples", action="store_true")
+    p.add_argument("--max-latest-nightly-age-hours", type=float, default=-1.0)
     args = p.parse_args()
 
     test_path = Path(args.test_loop_trend)
@@ -114,6 +132,10 @@ def main() -> int:
     nightly_passed = sum(1 for r in nightly_rows if r.get("status") == "passed")
     nightly_failed = sum(1 for r in nightly_rows if r.get("status") == "failed")
     pass_rate = (float(nightly_passed) / float(nightly_total)) if nightly_total > 0 else None
+    latest_nightly_dt = _parse_ts(nightly_rows[-1].get("timestamp")) if nightly_rows else None
+    nightly_age_hours = None
+    if latest_nightly_dt is not None:
+        nightly_age_hours = (datetime.now(timezone.utc) - latest_nightly_dt).total_seconds() / 3600.0
 
     dashboard = {
         "schema_version": "newdb.runtime_trend_dashboard.v1",
@@ -139,6 +161,10 @@ def main() -> int:
             "failed": nightly_failed,
             "pass_rate": pass_rate,
         },
+        "data_quality": {
+            "has_nightly_samples": nightly_total > 0,
+            "latest_nightly_age_hours": nightly_age_hours,
+        },
         "runtime_metrics": {
             "vacuum_efficiency_p50": _series(vac_p50),
             "conflict_rate_p95": _series(conf_p95),
@@ -150,6 +176,20 @@ def main() -> int:
 
     out_path.write_text(json.dumps(dashboard, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"RUNTIME_TREND_DASHBOARD_WRITTEN: {out_path}")
+    if args.require_nightly_samples and nightly_total == 0:
+        print("RUNTIME_TREND_QUALITY_GATE_FAILED: nightly samples required but none found")
+        return 4
+    if args.max_latest_nightly_age_hours >= 0.0 and nightly_age_hours is not None:
+        if nightly_age_hours > args.max_latest_nightly_age_hours:
+            print(
+                "RUNTIME_TREND_QUALITY_GATE_FAILED: "
+                f"latest nightly age {nightly_age_hours:.3f}h exceeds "
+                f"threshold {args.max_latest_nightly_age_hours:.3f}h"
+            )
+            return 5
+    if args.max_latest_nightly_age_hours >= 0.0 and nightly_age_hours is None:
+        print("RUNTIME_TREND_QUALITY_GATE_FAILED: latest nightly age unavailable")
+        return 6
     return 0
 
 

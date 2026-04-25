@@ -39,6 +39,10 @@ type RuntimeArtifactInfo = {
   guiExeModified: string;
   demoPath: string;
   demoModified: string;
+  perfPath: string;
+  perfModified: string;
+  runtimeReportPath: string;
+  runtimeReportModified: string;
   dllPath: string;
   dllModified: string;
 };
@@ -133,6 +137,7 @@ const validationErrors = ref<Record<string, boolean>>({});
 const activeTab = ref<"data" | "mdb">("data");
 const busy = ref(false);
 const dll = ref<DllInfo>({ loaded: false, version: "n/a", path: "", message: "" });
+const runtimeArtifacts = ref<RuntimeArtifactInfo | null>(null);
 const undoStack = ref<OperationRecord[]>([]);
 const redoStack = ref<OperationRecord[]>([]);
 const showHelp = ref(false);
@@ -763,8 +768,13 @@ async function refreshDllInfo() {
   dll.value = await invoke<DllInfo>("dll_info");
 }
 
+async function refreshRuntimeArtifacts() {
+  runtimeArtifacts.value = await invoke<RuntimeArtifactInfo>("runtime_artifact_info");
+}
+
 async function openDllStatusModal() {
   await refreshDllInfo();
+  await refreshRuntimeArtifacts();
   showDllModal.value = true;
 }
 
@@ -1659,8 +1669,11 @@ onMounted(async () => {
   await refreshDllInfo();
   try {
     const rt = await invoke<RuntimeArtifactInfo>("runtime_artifact_info");
+    runtimeArtifacts.value = rt;
     logLine(`[RUNTIME] gui=${rt.guiExePath} mtime=${rt.guiExeModified}`);
     logLine(`[RUNTIME] demo=${rt.demoPath} mtime=${rt.demoModified}`);
+    logLine(`[RUNTIME] perf=${rt.perfPath} mtime=${rt.perfModified}`);
+    logLine(`[RUNTIME] runtime_report=${rt.runtimeReportPath} mtime=${rt.runtimeReportModified}`);
     logLine(`[RUNTIME] dll=${rt.dllPath} mtime=${rt.dllModified}`);
   } catch (e) {
     logLine(`[RUNTIME][ERROR] ${String(e)}`);
@@ -2130,9 +2143,16 @@ onUnmounted(() => {
       <div><strong>版本：</strong>{{ dll.version }}</div>
       <div><strong>路径：</strong>{{ dll.path }}</div>
       <div class="dll-message"><strong>详情：</strong>{{ dll.message }}</div>
+      <template v-if="runtimeArtifacts">
+        <div style="margin-top: 10px"><strong>GUI EXE：</strong>{{ runtimeArtifacts.guiExePath }} (mtime={{ runtimeArtifacts.guiExeModified }})</div>
+        <div><strong>Demo EXE：</strong>{{ runtimeArtifacts.demoPath }} (mtime={{ runtimeArtifacts.demoModified }})</div>
+        <div><strong>Perf EXE：</strong>{{ runtimeArtifacts.perfPath }} (mtime={{ runtimeArtifacts.perfModified }})</div>
+        <div><strong>Runtime Report EXE：</strong>{{ runtimeArtifacts.runtimeReportPath }} (mtime={{ runtimeArtifacts.runtimeReportModified }})</div>
+        <div><strong>Core DLL：</strong>{{ runtimeArtifacts.dllPath }} (mtime={{ runtimeArtifacts.dllModified }})</div>
+      </template>
       <template #footer>
         <el-button @click="showDllModal = false">关闭</el-button>
-        <el-button type="primary" @click="refreshDllInfo">刷新状态</el-button>
+        <el-button type="primary" @click="openDllStatusModal">刷新状态</el-button>
       </template>
     </el-dialog>
 

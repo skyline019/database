@@ -34,6 +34,11 @@
 namespace {
 std::mutex g_write_intent_mu;
 std::unordered_map<std::string, std::uint64_t> g_write_intent_owner;
+std::atomic<std::int64_t> g_txn_id_seed{
+    static_cast<std::int64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count())};
 }
 
 TxnCoordinator::TxnCoordinator() {
@@ -62,10 +67,9 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
         return Result<bool>::Err("已有活跃事务");
     }
     
-    // 生成新事务ID (基于时间戳)
-    auto now = std::chrono::system_clock::now();
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
-    m_txn_id.store(ms);
+    // 生成进程内唯一事务ID；仅用毫秒时间戳在并发 begin 时会碰撞。
+    const std::int64_t next_txn_id = g_txn_id_seed.fetch_add(1, std::memory_order_relaxed) + 1;
+    m_txn_id.store(next_txn_id, std::memory_order_relaxed);
     
     m_state.store(TxnState::Active);
     m_txn_records.clear();

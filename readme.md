@@ -1,32 +1,30 @@
-# waterfall
+# database
 
-日照香炉生紫烟，遥看瀑布挂前川。
-飞流直下三千尺，疑是银河落九天。
+[English](README.en.md) | 中文
 
-## 源码编译
+一个以教学与工程实践为导向的数据库实验仓库，包含：
 
-为避免生成的中间文件污染源码目录，不允许在源码目录直接编译。当build目录为空，使用如下命令执行编译：
+- `waterfall/`：底层存储与基础模块
+- `newdb/`：数据库引擎（Heap Page / WAL / MVCC）、CLI、测试体系与 Rust GUI
 
-```bash
-cd build
-make -f ../Makefile
-```
+## 为什么值得看
 
-如果在build目录下已经编译过，则可以直接make即可。
+- **端到端链路完整**：从页存储、日志恢复、事务可见性到 GUI 操作与趋势看板
+- **工程化闭环**：有回归测试、CI 工作流、脚本化压测与运行时质量门禁
+- **可读文档齐全**：提供按模块拆解的源码解析与复评文档
 
-## 目录组织
+## 快速入口
 
-waterfall根目录主要是4个子目录：waterfall、build、third、rules，分别是源码目录、编译目录、三方库目录、Makefile规则目录。
+- 项目源码：`newdb/`
+- 图形界面：`newdb/rust_gui/`
+- 深度文档（PDF）：`newdb/intro/out/newdb-intro.pdf`
+- 开发者手册：`docs/dev-guide.md`
 
-在源码目录下，按照模块划分各个子目录，一个模块对应一个子目录。每个模块目录下直接放头文件，src目录放源码、test目录放单元测试程序、doc目录放文档。
+## 文档导航
 
-源码的组织以模块为中心，所有制品都放在该模块的目录下，构建和测试由Makefile负责。
+- 源码解析工程：`newdb/intro/`
+- 开发与构建说明：`docs/dev-guide.md`
 
-## docker
+## 仓库地址
 
-在fedora环境下，需安装如下软件包：
-
-```
-gcc clang++ gdb libasan libubsan cmake clang-tools-extra gtest-devel mimalloc-devel
-texlive texlive-xecjk texlive-lipsum texlive-pdfcrop texlive-ps2eps latexmk
-```
+- GitHub: [skyline019/database](https://github.com/skyline019/database)

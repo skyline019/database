@@ -1,0 +1,10 @@
+$pdf_mode = 1;
+$out_dir  = 'out';
+
+$xelatex = 'xelatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
+$latex   = $xelatex;
+$pdflatex = 'pdflatex -interaction=nonstopmode -halt-on-error -file-line-error %O %S';
+
+# Always use XeLaTeX for Chinese via ctex.
+$pdf_previewer = 'start';
+

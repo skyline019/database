@@ -1,0 +1,116 @@
+\section{中层解析 I：demo（CLI、命令分发、业务编排）}
+
+\subsection{模块定位}
+
+\fpath{demo/} 是“用户入口层 + 中层业务编排层”：
+
+\begin{itemize}
+  \item \textbf{入口}：\fpath{demo/demo_main.cc} 解析 CLI 并决定执行模式；
+  \item \textbf{命令分发}：\fpath{demo/demo_commands.cc} 负责交互命令解析与路由；
+  \item \textbf{查询中间层}：\fpath{demo/where.cc,h} 管理条件解析、候选集构建、策略限流与查询缓存；
+  \item \textbf{事务协调}：\fpath{demo/txn_manager.h,cc} 封装 Txn + WAL + 文件锁 + vacuum 触发；
+  \item \textbf{运行编排}：\fpath{demo/demo_runner.cc} 对接 batch/exec/import/mdb 等模式。
+\end{itemize}
+
+\subsection{关键数据结构（中层）}
+
+\subsubsection{ShellState（会话上下文聚合）}
+
+\begin{lstlisting}[language=C++,caption={ShellState（节选）}]
+struct ShellState {
+    newdb::Session session;
+    std::optional<newdb::Session::HeapAccess> session_heap_guard;
+    TxnCoordinator txn;
+    std::string log_file_path{"demo_log.bin"};
+    std::string data_dir;
+    bool encrypt_log{false};
+    bool verbose{false};
+    WhereQueryContext where_ctx;
+};
+\end{lstlisting}
+
+说明：
+\begin{itemize}
+  \item \texttt{session\_heap\_guard} 是核心：在单条命令执行期内持有 \texttt{Session::mut\_}，保证缓存表指针有效；
+  \item \texttt{where\_ctx} 保存查询缓存/LRU/策略状态/统计，避免每次 WHERE 都“冷启动”。
+\end{itemize}
+
+\subsubsection{DemoCliInvocation（一次 CLI 调用的完整语义）}
+
+\begin{lstlisting}[language=C++,caption={DemoCliInvocation（节选）}]
+struct DemoCliInvocation {
+    DemoCliWorkspace ws;
+    bool encrypt_log{false};
+    bool verbose{false};
+    DemoPrimaryAction primary{CliInteractive{}};
+    std::string error;
+};
+\end{lstlisting}
+
+它把“参数解析结果”标准化为 \texttt{workspace + flags + exactly one primary action}，后续 runner 可按 variant 分发。
+
+\subsubsection{WhereQueryContext（查询缓存与策略状态）}
+
+\begin{lstlisting}[language=C++,caption={WhereQueryContext（节选）}]
+struct WhereQueryContext {
+    std::unordered_map<std::string, std::vector<std::size_t>> query_cache;
+    std::list<std::string> query_cache_lru;
+    std::atomic<std::uint64_t> cache_hits{0};
+    std::atomic<std::uint64_t> policy_rejects{0};
+    WherePolicyState policy{};
+    mutable std::mutex mu;
+};
+\end{lstlisting}
+
+其作用是把“WHERE 的性能状态”与“策略限流状态”显式挂在会话层，而不是分散在静态全局变量中。
+
+\subsection{核心流程}
+
+\subsubsection{A. 入口主流程（demo\_main）}
+\begin{enumerate}
+  \item 解析 CLI：\texttt{demo\_parse\_invocation(argc, argv, inv)}
+  \item 初始化运行上下文：\texttt{demo\_init\_session\_logging(app, ...)}
+  \item 执行终端 phase（exec/batch/import/mdb）：
+    \texttt{demo\_try\_run\_terminal\_phase(...)}
+  \item 若无提前结束，进入交互 shell。
+\end{enumerate}
+
+\subsubsection{B. 命令处理主链（process\_command\_line）}
+\begin{lstlisting}[language=C++,caption={命令分发主链（节选）}]
+bool process_command_line(ShellState& st, const char* input_line) {
+    // trim + logging + session commands
+    if (handle_txn_commands(...)) return true;
+    if (handle_workspace_admin_commands(...)) return true;
+    if (handle_import_defattr_commands(...)) return true;
+    if (handle_schema_catalog_commands(...)) return true;
+    if (handle_ddl_create_use_commands(...)) return true;
+    if (handle_ddl_alter_rename_commands(...)) return true;
+    if (handle_schema_show_commands(...)) return true;
+    if (handle_dml_insert_command(...)) return true;
+    // fallback to cached HeapTable path
+}
+\end{lstlisting}
+
+这条链的特点是“先高层语义命令、后表级缓存路径”，减少不必要的 heap 装载与解码。
+
+\subsection{算法与复杂度（中层视角）}
+
+\begin{itemize}
+  \item \textbf{CLI 分发}：参数扫描主要是 \(O(argc)\)；
+  \item \textbf{命令路由}：按 handler 顺序匹配，最坏近似 \(O(H)\)（H=handler 数）；
+  \item \textbf{WHERE}：
+    \begin{itemize}
+      \item id/索引命中接近 \(O(1)\) 或 \(O(\log n)\)（取决于底层结构）；
+      \item fallback 全扫描路径为 \(O(n)\)；
+      \item 缓存命中后可将重复查询候选构建降到接近 \(O(1)\)（不计输出）。
+    \end{itemize}
+\end{itemize}
+
+\subsection{中层风险与优化建议}
+
+\begin{itemize}
+  \item \textbf{handler 链增长风险}：\texttt{process\_command\_line} 已较长，建议后续拆成“命令注册表 + 表驱动分发”。
+  \item \textbf{会话锁持有时长}：\texttt{session\_heap\_guard} 设计正确，但需警惕重 I/O 命令在持锁期间阻塞。
+  \item \textbf{策略可观测性}：可把 \texttt{WhereQueryContext} 的原子计数接入统一诊断命令，形成运行期画像。
+\end{itemize}
+

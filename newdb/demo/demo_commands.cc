@@ -368,15 +368,42 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
     }
     // SHOW TUNING - 输出写路径调优状态
     if (strcasecmp_ascii(line, "SHOW TUNING") == 0 || strcasecmp_ascii(line, "SHOW STATUS") == 0) {
+        const TxnRuntimeStats stats = st.txn.runtimeStats();
         const auto mode = st.txn.walSyncMode();
         const char* mode_s = (mode == newdb::WalSyncMode::Off) ? "off" :
                              (mode == newdb::WalSyncMode::Normal) ? "normal" : "full";
         log_and_print(log_file,
-                      "[TUNING] WALSYNC=%s normal_interval_ms=%llu AUTOVACUUM=%s ops_threshold=%zu\n",
+                      "[TUNING] WALSYNC=%s normal_interval_ms=%llu AUTOVACUUM=%s ops_threshold=%zu min_interval_sec=%zu trigger_count=%llu execute_count=%llu cooldown_skips=%llu write_conflicts=%llu\n",
                       mode_s,
                       static_cast<unsigned long long>(st.txn.walNormalSyncIntervalMs()),
                       st.txn.vacuumRunning() ? "on" : "off",
-                      st.txn.vacuumOpsThreshold());
+                      st.txn.vacuumOpsThreshold(),
+                      st.txn.vacuumMinIntervalSec(),
+                      static_cast<unsigned long long>(stats.vacuum_trigger_count),
+                      static_cast<unsigned long long>(stats.vacuum_execute_count),
+                      static_cast<unsigned long long>(stats.vacuum_cooldown_skip_count),
+                      static_cast<unsigned long long>(stats.write_conflict_count));
+        return true;
+    }
+    if (strcasecmp_ascii(line, "SHOW TUNING JSON") == 0 || strcasecmp_ascii(line, "SHOW STATUS JSON") == 0) {
+        const TxnRuntimeStats stats = st.txn.runtimeStats();
+        const auto mode = st.txn.walSyncMode();
+        const char* mode_s = (mode == newdb::WalSyncMode::Off) ? "off" :
+                             (mode == newdb::WalSyncMode::Normal) ? "normal" : "full";
+        log_and_print(log_file,
+                      "{\"walsync\":\"%s\",\"normal_interval_ms\":%llu,\"autovacuum\":%s,"
+                      "\"vacuum_ops_threshold\":%zu,\"vacuum_min_interval_sec\":%zu,"
+                      "\"vacuum_trigger_count\":%llu,\"vacuum_execute_count\":%llu,"
+                      "\"vacuum_cooldown_skip_count\":%llu,\"write_conflicts\":%llu}\n",
+                      mode_s,
+                      static_cast<unsigned long long>(st.txn.walNormalSyncIntervalMs()),
+                      st.txn.vacuumRunning() ? "true" : "false",
+                      st.txn.vacuumOpsThreshold(),
+                      st.txn.vacuumMinIntervalSec(),
+                      static_cast<unsigned long long>(stats.vacuum_trigger_count),
+                      static_cast<unsigned long long>(stats.vacuum_execute_count),
+                      static_cast<unsigned long long>(stats.vacuum_cooldown_skip_count),
+                      static_cast<unsigned long long>(stats.write_conflict_count));
         return true;
     }
     if (strcasecmp_ascii(line, "SHOW STORAGE") == 0) {
@@ -454,13 +481,25 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
                 } catch (...) {
                     log_and_print(log_file, "[VACUUM] invalid threshold: %s\n", threshold_token.c_str());
                 }
+            } else if (mode == "interval") {
+                if (threshold_token.empty()) {
+                    log_and_print(log_file, "[VACUUM] usage: AUTOVACUUM interval <sec>\n");
+                    return true;
+                }
+                try {
+                    st.txn.setVacuumMinIntervalSec(static_cast<std::size_t>(std::stoull(threshold_token)));
+                    log_and_print(log_file, "[VACUUM] min interval set to %zu sec\n", st.txn.vacuumMinIntervalSec());
+                } catch (...) {
+                    log_and_print(log_file, "[VACUUM] invalid interval: %s\n", threshold_token.c_str());
+                }
             } else {
-                log_and_print(log_file, "[VACUUM] usage: AUTOVACUUM [0|1|on|off] [ops_threshold] | AUTOVACUUM threshold <ops>\n");
+                log_and_print(log_file, "[VACUUM] usage: AUTOVACUUM [0|1|on|off] [ops_threshold] | AUTOVACUUM threshold <ops> | AUTOVACUUM interval <sec>\n");
             }
         } else {
-            log_and_print(log_file, "[VACUUM] auto=%s ops_threshold=%zu\n",
+            log_and_print(log_file, "[VACUUM] auto=%s ops_threshold=%zu min_interval_sec=%zu\n",
                           st.txn.vacuumRunning() ? "on" : "off",
-                          st.txn.vacuumOpsThreshold());
+                          st.txn.vacuumOpsThreshold(),
+                          st.txn.vacuumMinIntervalSec());
         }
         return true;
     }
@@ -1036,6 +1075,13 @@ bool handle_dml_insert_command(ShellState& st,
                     continue;
                 }
             }
+            if (st.txn.inTransaction()) {
+                std::string conflict_reason;
+                if (!st.txn.tryReserveWriteKey(current_table, id, &conflict_reason)) {
+                    ++failed;
+                    continue;
+                }
+            }
             pending_rows.push_back(std::move(row));
         }
         const auto prep_done_t = std::chrono::steady_clock::now();
@@ -1189,6 +1235,13 @@ bool handle_dml_insert_command(ShellState& st,
             log_and_print(log_file,
                           "[INSERT] duplicate primary key %s=%s, insert rejected.\n",
                           st.session.schema.primary_key.c_str(), itpk->second.c_str());
+            return true;
+        }
+    }
+    if (st.txn.inTransaction()) {
+        std::string conflict_reason;
+        if (!st.txn.tryReserveWriteKey(current_table, id, &conflict_reason)) {
+            log_and_print(log_file, "[INSERT] %s\n", conflict_reason.c_str());
             return true;
         }
     }
@@ -1362,6 +1415,13 @@ bool handle_dml_update_delete_commands(ShellState& st,
                 return true;
             }
         }
+        if (st.txn.inTransaction()) {
+            std::string conflict_reason;
+            if (!st.txn.tryReserveWriteKey(current_table, id, &conflict_reason)) {
+                log_and_print(log_file, "[UPDATE] %s\n", conflict_reason.c_str());
+                return true;
+            }
+        }
         if (newdb::io::append_row(eff_data.c_str(), new_row).failed()) {
             log_and_print(log_file, "[UPDATE] failed to append row for table '%s'.\n", current_table.c_str());
             return true;
@@ -1425,6 +1485,13 @@ bool handle_dml_update_delete_commands(ShellState& st,
         newdb::Row tomb;
         tomb.id = id;
         tomb.attrs["__deleted"] = "1";
+        if (st.txn.inTransaction()) {
+            std::string conflict_reason;
+            if (!st.txn.tryReserveWriteKey(current_table, id, &conflict_reason)) {
+                log_and_print(log_file, "[DELETE] %s\n", conflict_reason.c_str());
+                return true;
+            }
+        }
         if (newdb::io::append_row(eff_data.c_str(), tomb).failed()) {
             log_and_print(log_file, "[DELETE] failed to append tombstone for table '%s'.\n", current_table.c_str());
             return true;
@@ -1491,6 +1558,13 @@ bool handle_dml_update_delete_commands(ShellState& st,
         newdb::Row tomb;
         tomb.id = id_to_delete;
         tomb.attrs["__deleted"] = "1";
+        if (st.txn.inTransaction()) {
+            std::string conflict_reason;
+            if (!st.txn.tryReserveWriteKey(current_table, id_to_delete, &conflict_reason)) {
+                log_and_print(log_file, "[DELETEPK] %s\n", conflict_reason.c_str());
+                return true;
+            }
+        }
         if (newdb::io::append_row(eff_data.c_str(), tomb).failed()) {
             log_and_print(log_file, "[DELETEPK] failed to append tombstone for table '%s'.\n", current_table.c_str());
             return true;
@@ -1615,6 +1689,13 @@ bool handle_dml_attr_commands(ShellState& st,
             }
             newdb::Row new_row = tbl.rows[i];
             new_row.attrs[key_str] = value_to_set;
+            if (st.txn.inTransaction()) {
+                std::string conflict_reason;
+                if (!st.txn.tryReserveWriteKey(current_table, id, &conflict_reason)) {
+                    log_and_print(log_file, "[SETATTR] %s\n", conflict_reason.c_str());
+                    return true;
+                }
+            }
             if (newdb::io::append_row(eff_data.c_str(), new_row).failed()) {
                 log_and_print(log_file, "[SETATTR] failed to append row for table '%s'.\n", current_table.c_str());
                 return true;
@@ -2236,20 +2317,17 @@ bool handle_workspace_admin_commands(ShellState& st,
             log_and_print(log_file, "[VACUUM] no table selected. Use CREATE TABLE or USE first.\n");
             return true;
         }
-        newdb::HeapTable* tbl_ptr = get_cached_table(st);
-        if (!tbl_ptr) return true;
-        newdb::HeapTable& tbl = *tbl_ptr;
-        const newdb::Status zst = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
-        if (!zst.ok) {
-            log_and_print(log_file, "[VACUUM] %s\n", zst.message.c_str());
-            return true;
-        }
-        if (newdb::io::create_heap_file(eff_data.c_str(), tbl.rows)) {
-            newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+        std::size_t rows_after = 0;
+        const newdb::Status vst =
+            newdb::io::compact_heap_file(eff_data.c_str(), current_table, st.session.schema, &rows_after);
+        if (vst.ok) {
+            (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
             log_and_print(log_file, "[VACUUM] compacted table '%s' (file=%s), rows=%zu.\n",
-                          current_table.c_str(), current_file.c_str(), tbl.rows.size());
+                          current_table.c_str(), current_file.c_str(), rows_after);
         } else {
-            log_and_print(log_file, "[VACUUM] failed to compact table '%s'.\n", current_table.c_str());
+            log_and_print(log_file, "[VACUUM] failed to compact table '%s': %s\n",
+                          current_table.c_str(),
+                          vst.message.c_str());
         }
         shell_invalidate_session_table(st);
         return true;

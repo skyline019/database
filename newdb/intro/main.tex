@@ -1,0 +1,67 @@
+\documentclass[UTF8, a4paper]{ctexart}
+
+\usepackage{geometry}
+\geometry{margin=2.2cm}
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\usepackage{xurl} % better URL/path line breaks
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{seqsplit} % split long identifiers
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  columns=fullflexible,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  rulecolor=\color{black!20},
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{black!60},
+  stringstyle=\color{red!60!black},
+  showstringspaces=false,
+  tabsize=2
+}
+
+% Helpers for long identifiers / file paths in text.
+\newcommand{\id}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\fpath}[1]{\path{#1}}
+
+\title{newdb 源码解析（数据结构 / 算法 / 性能）}
+\author{newdb/intro}
+\date{\today}
+
+\begin{document}
+\sloppy
+\setlength{\emergencystretch}{2em}
+\maketitle
+\tableofcontents
+\newpage
+
+% 约定：每个模块一个文件夹，内容写在 section.tex（不带 .tex 后缀）
+\input{01-overview/section}
+\input{02-heap-page/section}
+\input{03-heap-io/section}
+\input{04-heap-table/section}
+\input{05-mvcc/section}
+\input{06-wal/section}
+\input{07-session-capi/section}
+\input{09-demo-mid/section}
+\input{10-include-mid/section}
+\input{11-tests-mid/section}
+\input{12-tools-mid/section}
+\appendix
+\input{08-compare-leveldb-innodb/section}
+
+\end{document}
+

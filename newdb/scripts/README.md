@@ -19,7 +19,10 @@
   覆盖率阈值检查。
 
 - `ci/ci_bench_gate.py`  
-  CI 轻量压测门禁。
+  CI 轻量压测门禁；支持可选 `--runtime-jsonl` + 阈值参数
+  （`--min-vacuum-efficiency` / `--max-conflict-rate`）调用 `newdb_runtime_report`
+  做运行时统计趋势门禁。额外支持 `--runtime-last-n` 与
+  `--runtime-label-prefix`，用于单次窗口隔离与标签过滤。
 
 ## 2) 性能与压测脚本（scripts/bench）
 
@@ -30,6 +33,12 @@
 - `bench/txn_write_bench.ps1`
 - `bench/eq_sidecar_cache_bench.ps1`
 - `bench/eq_sidecar_invalidation_bench.ps1`
+
+其中 `bench/concurrent_pressure_bench.ps1` 已支持：
+- 每次运行默认独立 `runtime_stats_concurrent_pressure_<timestamp>.jsonl`
+- `-AppendRuntimeJsonl`（显式开启后才追加）
+- `-RunRuntimeGate` + 阈值参数（内部调用 `newdb_runtime_report --last-n 2`）
+- `-RuntimePressureBatches` / `-RuntimePressureBatchSize`（控制同生命周期采样负载强度）
 
 相关输入模板：
 - `query_bench.mdb`

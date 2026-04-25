@@ -1,0 +1,75 @@
+\section{中层解析 IV：tools（基准与烟测工具链）}
+
+\subsection{工具集定位}
+
+\fpath{tools/} 的三个程序构成“性能-并发-冒烟”闭环：
+
+\begin{itemize}
+  \item \fpath{newdb_perf.cpp}：调用 PowerShell 基准脚本，跑大规模场景；
+  \item \fpath{newdb_concurrent_perf.cpp}：直接压 WAL 并发写入吞吐；
+  \item \fpath{newdb_smoke.cpp}：最小命令集（create/load/append）用于快速健康检查。
+\end{itemize}
+
+\subsection{关键结构与流程}
+
+\subsubsection{A. newdb\_perf：脚本编排器}
+\begin{lstlisting}[language=C++,caption={newdb\_perf 参数与执行（节选）}]
+struct PerfArgs {
+  std::string demo_exe{"newdb_demo.exe"};
+  std::string sizes_csv{"1000000"};
+  int query_loops{1};
+  int txn_per_mode{60};
+};
+cmd += "powershell -ExecutionPolicy Bypass -File ...million_scale_bench.ps1";
+cmd += " -DemoExe " + quote_ps(args.demo_exe);
+std::system(cmd.c_str());
+\end{lstlisting}
+
+它本质上是“参数整形 + 外部脚本调用”，将复杂基准逻辑留在脚本层，二进制工具只负责稳定入口。
+
+\subsubsection{B. newdb\_concurrent\_perf：并发 WAL 压测}
+\begin{lstlisting}[language=C++,caption={并发写压测主循环（节选）}]
+for (int t = 0; t < args.threads; ++t) {
+  threads.emplace_back([&, t, cnt]() {
+    for (int i = 0; i < cnt; ++i) {
+      wal.append_record(txn, newdb::WalOp::INSERT, "users", &r);
+      wal.commit_transaction(txn);
+      done.fetch_add(1);
+    }
+  });
+}
+wal.flush();
+\end{lstlisting}
+
+关键点：
+\begin{itemize}
+  \item 默认 \texttt{WalSyncMode::Off} 评估“纯吞吐上限”；
+  \item 可选 \texttt{--verify} 调 \texttt{read\_all\_records()} 校验 INSERT/COMMIT 计数一致性；
+  \item 输出 \texttt{tps/wal\_bytes/elapsed\_ms} 便于 CI 横向比较。
+\end{itemize}
+
+\subsubsection{C. newdb\_smoke：最小可用性验证}
+\begin{lstlisting}[language=C++,caption={newdb\_smoke 主命令（节选）}]
+if (cmd == "load")   se.reload();
+if (cmd == "create") newdb::io::create_heap_file(...), save_schema_text(...);
+if (cmd == "append") newdb::io::append_row(...);
+\end{lstlisting}
+
+它用于开发早期与部署后“快速确认引擎活着且链路通”的场景。
+
+\subsection{工具层评价与优化建议}
+
+\begin{itemize}
+  \item \textbf{优点}：
+    \begin{itemize}
+      \item 工具职责边界清晰，便于脚本/CI 组合；
+      \item 并发压测工具直接命中 WAL 热路径，定位性能回归很有效。
+    \end{itemize}
+  \item \textbf{建议}：
+    \begin{itemize}
+      \item 为三工具统一输出 JSON 模式（便于自动采集）；
+      \item 把 sync mode、segment 大小、verify 粒度统一成可复用参数约定；
+      \item 增加跨平台 runner（目前 \fpath{newdb_perf.cpp} 偏 Windows PowerShell）。
+    \end{itemize}
+\end{itemize}
+

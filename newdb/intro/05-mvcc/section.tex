@@ -1,0 +1,104 @@
+\section{MVCC：快照可见性与事务水位线}
+
+对应实现：\fpath{newdb/src/mvcc.cpp}（快照与管理器）、\fpath{newdb/src/page_io.cpp}（元数据提取）、\fpath{newdb/src/heap_table.cpp}（可见性应用）
+
+\subsection{关键代码段：可见性函数 is\_visible}
+
+\begin{lstlisting}[language=C++,caption={MVCCSnapshot::is\_visible 的判定顺序（节选）}]
+// Created after snapshot? Not visible
+if (created_lsn > snapshot_lsn) return false;
+
+// Deleted before or at snapshot? Not visible
+if (deleted_lsn != 0 && deleted_lsn <= snapshot_lsn) return false;
+
+// Creator transaction not yet committed at snapshot time?
+if (active_txns.find(creator_txn) != active_txns.end()) {
+    return false;
+}
+return true;
+\end{lstlisting}
+
+解读与推论：
+
+\begin{itemize}
+  \item \textbf{判定顺序很重要}：先比较 LSN，再看活跃事务集合，使得“快照之后创建”的版本无条件不可见。
+  \item \textbf{deleted\_lsn 的闭区间}：使用 \(\le\) 表示“在快照时刻已删除”的版本不可见；这把删除视作在某个 LSN 上生效。
+  \item \textbf{active\_txns 的语义}：若创建事务仍在 active 集合里，即使 created\_lsn 早于 snapshot，也不可见（避免读到未提交写）。
+\end{itemize}
+
+\subsection{可见性判定}
+
+对一条记录（版本）而言，其元数据可抽象为三元组：
+
+\[
+(\text{created\_lsn}, \text{deleted\_lsn}, \text{creator\_txn})
+\]
+
+快照由：
+
+\[
+(\text{snapshot\_lsn}, \text{active\_txns})
+\]
+
+组成。当前实现的可见性规则是：
+
+\begin{itemize}
+  \item 若 \(\text{created\_lsn} > \text{snapshot\_lsn}\)：不可见（快照后创建）；
+  \item 若 \(\text{deleted\_lsn} \neq 0 \land \text{deleted\_lsn} \le \text{snapshot\_lsn}\)：不可见（快照时已删除）；
+  \item 若 \(\text{creator\_txn} \in \text{active\_txns}\)：不可见（创建事务未提交）；
+  \item 其他情况：可见。
+\end{itemize}
+
+\subsection{MVCCManager：事务集合与 watermarks}
+
+\texttt{MVCCManager} 在互斥锁保护下维护：
+
+\begin{itemize}
+  \item \textbf{active\_txns\_}：活跃事务集合；
+  \item \textbf{committed\_txn\_lsn\_}：提交事务到 commit lsn 的映射（可用于 purge）；
+  \item \textbf{min\_visible\_lsn\_}：简化版本的水位线（当前实现以 \(\max\) commit lsn 更新）。
+\end{itemize}
+
+创建快照时使用 WAL 的 \texttt{current\_lsn()} 作为 \texttt{snapshot\_lsn}，并复制 active 集合。
+
+\subsection{关键代码段：begin/commit 与 min\_visible\_lsn 更新}
+
+\begin{lstlisting}[language=C++,caption={MVCCManager 的事务状态变迁（节选）}]
+uint64_t begin_transaction() {
+    lock_guard lg(mut_);
+    uint64_t txn_id = next_txn_id_++;
+    active_txns_.insert(txn_id);
+    return txn_id;
+}
+
+void commit_transaction(uint64_t txn_id, uint64_t commit_lsn) {
+    lock_guard lg(mut_);
+    active_txns_.erase(txn_id);
+    committed_txn_lsn_[txn_id] = commit_lsn;
+    min_visible_lsn_ = std::max(min_visible_lsn_, commit_lsn);
+}
+\end{lstlisting}
+
+这里的 \texttt{min\_visible\_lsn\_} 更新是“简化水位线”：它记录目前见过的最大 commit lsn。
+如果未来要用它做 GC/截断，需要改成“系统中所有活跃快照的最小值”一类更严格的定义。
+
+\subsection{与 HeapTable 的衔接}
+
+Heap 文件装载时会从 Row 内部字段提取 \texttt{RecordMetadata}，并与 slot 对齐存放。
+HeapTable 在：
+
+\begin{itemize}
+  \item 建索引（\texttt{rebuild\_indexes}）
+  \item 排序（\texttt{sorted\_indices}）
+  \item 查找（\texttt{find\_by\_id}）
+\end{itemize}
+
+等路径上调用 \texttt{is\_row\_visible} 做过滤，从而把 MVCC 变成“对外一致的逻辑视图”。
+
+\subsection{实现特征与注意点}
+
+\begin{itemize}
+  \item 这套 MVCC 更偏向“快照时刻的读可见性”，而不是完整的多版本存储引擎（例如缺少 undo/版本链）。
+  \item \texttt{min\_visible\_lsn} 的更新策略目前是简化版，若后续要做更严格的 GC/compaction，需要更精确的全局最小快照 lsn 跟踪。
+\end{itemize}
+

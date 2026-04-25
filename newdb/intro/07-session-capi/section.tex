@@ -1,0 +1,107 @@
+\section{Session / C API：缓存加载、快照设置与输出约束}
+
+对应实现：\fpath{newdb/src/session.cpp}、\fpath{newdb/src/c_api.cpp}、\fpath{newdb/src/schema_io.cpp}、\fpath{newdb/src/error_format.cpp}
+
+\subsection{关键代码段：Session 如何确保已装载（ensure\_loaded）}
+
+\begin{lstlisting}[language=C++,caption={Session::ensure\_loaded 的核心逻辑（节选）}]
+if (s.data_path.empty()) {
+    return Status::Fail("no table selected");
+}
+if (s.cache_valid) {
+    return Status::Ok();
+}
+return session_reload_impl(s);
+\end{lstlisting}
+
+含义：
+
+\begin{itemize}
+  \item \textbf{强约束：必须先选表}：\texttt{data\_path} 为空会直接失败；上层应先设置 table/data 目录。
+  \item \textbf{cache\_valid 是核心开关}：一旦 cache 有效，后续读路径不会重复扫描 heap 文件。
+\end{itemize}
+
+\subsection{关键代码段：reload 时的 schema sidecar + lazy 开关}
+
+\begin{lstlisting}[language=C++,caption={session\_reload\_impl：.attr + NEWDB\_LAZY\_HEAP（节选）}]
+const std::string sidecar = schema_sidecar_path_for_data_file(s.data_path);
+Status s1 = load_schema_text(sidecar, s.schema);
+HeapLoadOptions load_opts{};
+if (std::getenv("NEWDB_LAZY_HEAP") == "1") {
+    load_opts.lazy_decode = true;
+}
+Status s2 = io::load_heap_file(s.data_path.c_str(), s.table_name, s.schema, s.table, load_opts);
+s.cache_valid = s2.ok;
+\end{lstlisting}
+
+这里把“schema 与数据装载”绑定在一起，保证 \texttt{HeapTable} 的索引/排序比较使用的是最新 schema 语义。
+
+\subsection{Session：cache\_valid 与按需重载}
+
+\texttt{Session} 持有：
+
+\begin{itemize}
+  \item \texttt{data\_path}：当前表的数据文件路径（\texttt{.bin}）
+  \item \texttt{schema}：当前表 schema（来自 \texttt{.attr} sidecar）
+  \item \texttt{table}：HeapTable 缓存
+  \item \texttt{cache\_valid}：是否已装载且可复用
+\end{itemize}
+
+装载逻辑为：
+
+\begin{enumerate}
+  \item \texttt{load\_schema\_text(.attr)}：sidecar 缺失也视为“合法”，调用方采用默认 schema；
+  \item 读取环境变量 \texttt{NEWDB\_LAZY\_HEAP=1} 决定是否启用懒解码；
+  \item \texttt{io::load\_heap\_file(.bin)}：构建 HeapTable；
+  \item 成功后置 \texttt{cache\_valid=true}。
+\end{enumerate}
+
+\subsection{快照设置：影响索引与排序}
+
+\texttt{set\_snapshot(snapshot)} 会把 snapshot 下发给 HeapTable，并立即 \texttt{rebuild\_indexes(schema)}。
+这意味着快照切换会触发一次索引重建（时间与数据量相关），但能保证之后所有读路径都遵循该快照视图。
+
+\subsection{关键代码段：C API 通过读取日志 tail 获取输出}
+
+\begin{lstlisting}[language=C++,caption={newdb\_session\_execute：tail 读取与错误码（节选）}]
+auto before = file_size(ptr->log_path);
+process_command_line(ptr->shell, command_line);
+TailReadResult tail = read_file_tail(ptr->log_path, before);
+out = tail.data;
+if (output_indicates_business_error(out)) {
+    ptr->last_error = NEWDB_ERR_EXECUTION_FAILED;
+    rc = 0;
+}
+prepend_capi_error_line(out, ptr->last_error);
+\end{lstlisting}
+
+设计权衡：
+
+\begin{itemize}
+  \item \textbf{优点}：C ABI 输出缓冲区无需承载复杂结构，上层得到“与 CLI 一致”的文本输出。
+  \item \textbf{风险}：错误判定依赖文本特征（\texttt{output\_indicates\_business\_error}），可能出现误判或漏判；日志 IO 出错会导致执行失败。
+\end{itemize}
+
+\subsection{错误格式：结构化单行输出}
+
+\texttt{format\_error\_line(domain, code, message)} 输出：
+
+\begin{lstlisting}
+[ERR] domain=<domain> code=<code> message="<escaped>"
+\end{lstlisting}
+
+其中 message 会做必要的转义（反斜杠、双引号、换行/回车/制表符）。
+
+\subsection{C API：以日志尾部作为输出通道}
+
+\texttt{newdb\_session\_execute} 的输出策略是：
+
+\begin{itemize}
+  \item 命令执行前记录 log 文件大小；
+  \item 执行命令后读取 log 的 tail（新增部分）作为输出；
+  \item 若输出包含特征性错误文本，则返回业务失败码；
+  \item 最终把 \texttt{[CAPI\_ERROR] ...} 前缀插入输出开头（便于上层解析）。
+\end{itemize}
+
+该设计的优点是：C ABI 无需传递复杂结构即可获得“近似完整”的命令输出；缺点是对日志 IO 有依赖，且错误判定依赖文本特征（需要注意误判/漏判）。
+

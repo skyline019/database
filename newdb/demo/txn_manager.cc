@@ -31,12 +31,18 @@
 #endif
 #include <sys/stat.h>
 
+namespace {
+std::mutex g_write_intent_mu;
+std::unordered_map<std::string, std::uint64_t> g_write_intent_owner;
+}
+
 TxnCoordinator::TxnCoordinator() {
     // 构造函数
 }
 
 TxnCoordinator::~TxnCoordinator() {
     stopVacuumThread();
+    clearWriteIntents();
     std::vector<std::string> locked_copy;
     {
         std::lock_guard<std::mutex> lk(m_lock_mutex);
@@ -63,6 +69,7 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
     
     m_state.store(TxnState::Active);
     m_txn_records.clear();
+    m_reserved_write_keys.clear();
     
     m_active_table = table_name;
     const std::string bin_file = resolveDataFilePath(table_name);
@@ -78,6 +85,8 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
 }
 
 Result<bool> TxnCoordinator::commit() {
+    std::string committed_table;
+    bool should_trigger_vacuum = false;
     {
         std::lock_guard<std::mutex> lk(m_txn_mutex);
         
@@ -97,12 +106,26 @@ Result<bool> TxnCoordinator::commit() {
             (void)releaseLock(f);
         }
         
+        committed_table = m_active_table;
         m_state.store(TxnState::Committed);
+        clearWriteIntents();
         m_txn_records.clear();
         m_locked_files.clear();
         m_active_table.clear();
+
+        if (m_vacuum_running.load()) {
+            const std::size_t threshold = m_vacuum_ops_threshold.load();
+            const std::size_t count = m_vacuum_op_counter.load();
+            if (threshold > 0 && count >= threshold && !committed_table.empty()) {
+                m_vacuum_op_counter.store(0);
+                should_trigger_vacuum = true;
+            }
+        }
     }
     maybeCompactWalAfterCommit();
+    if (should_trigger_vacuum) {
+        triggerVacuum(committed_table);
+    }
     return Result<bool>::Ok(true);
 }
 
@@ -179,6 +202,7 @@ Result<bool> TxnCoordinator::rollback() {
     }
     
     m_state.store(TxnState::RolledBack);
+    clearWriteIntents();
     m_txn_records.clear();
     m_locked_files.clear();
     m_active_table.clear();
@@ -314,9 +338,13 @@ void TxnCoordinator::loadVacuumConfig() {
         return;
     }
     std::size_t threshold = 0;
-    in >> threshold;
+    std::size_t min_interval = 0;
+    in >> threshold >> min_interval;
     if (threshold > 0) {
         m_vacuum_ops_threshold.store(threshold);
+    }
+    if (min_interval > 0) {
+        m_vacuum_min_interval_sec.store(min_interval);
     }
 }
 
@@ -325,7 +353,7 @@ void TxnCoordinator::persistVacuumConfig() const {
     if (!out) {
         return;
     }
-    out << m_vacuum_ops_threshold.load() << "\n";
+    out << m_vacuum_ops_threshold.load() << " " << m_vacuum_min_interval_sec.load() << "\n";
 }
 
 bool TxnCoordinator::loadWalSyncConfig(newdb::WalManager& wm) const {
@@ -462,13 +490,48 @@ void TxnCoordinator::recordOperation(const std::string& operation, const std::st
     writeWAL(operation, table, key, old_val, new_val);
 
     if (m_vacuum_running.load()) {
-        const std::size_t threshold = m_vacuum_ops_threshold.load();
-        const std::size_t count = m_vacuum_op_counter.fetch_add(1) + 1;
-        if (threshold > 0 && count >= threshold) {
-            m_vacuum_op_counter.store(0);
-            triggerVacuum(table.empty() ? m_active_table : table);
+        (void)m_vacuum_op_counter.fetch_add(1);
+    }
+}
+
+bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int id, std::string* reason) {
+    if (m_state.load() != TxnState::Active) {
+        return true;
+    }
+    if (table_name.empty()) {
+        return true;
+    }
+    const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
+    const std::string key = table_name + "#" + std::to_string(id);
+    {
+        std::lock_guard<std::mutex> lk(g_write_intent_mu);
+        const auto it = g_write_intent_owner.find(key);
+        if (it != g_write_intent_owner.end() && it->second != txn) {
+            m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+            if (reason != nullptr) {
+                *reason = "write conflict on " + key + " (held by another active transaction)";
+            }
+            return false;
+        }
+        g_write_intent_owner[key] = txn;
+    }
+    m_reserved_write_keys.insert(key);
+    return true;
+}
+
+void TxnCoordinator::clearWriteIntents() {
+    if (m_reserved_write_keys.empty()) {
+        return;
+    }
+    const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
+    std::lock_guard<std::mutex> lk(g_write_intent_mu);
+    for (const auto& key : m_reserved_write_keys) {
+        const auto it = g_write_intent_owner.find(key);
+        if (it != g_write_intent_owner.end() && it->second == txn) {
+            g_write_intent_owner.erase(it);
         }
     }
+    m_reserved_write_keys.clear();
 }
 
 void TxnCoordinator::persistWalsnHighWaterUnlocked(newdb::WalManager* wm) {
@@ -705,6 +768,9 @@ void TxnCoordinator::startVacuumThread() {
     
     m_vacuum_running.store(true);
     m_vacuum_op_counter.store(0);
+    m_vacuum_trigger_count.store(0);
+    m_vacuum_execute_count.store(0);
+    m_vacuum_cooldown_skip_count.store(0);
     
     m_vacuum_thread = std::thread([this]() {
         while (m_vacuum_running.load()) {
@@ -733,6 +799,8 @@ void TxnCoordinator::startVacuumThread() {
                 }
                 
                 lk.lock();
+                m_vacuum_last_run[table] = std::chrono::steady_clock::now();
+                m_vacuum_execute_count.fetch_add(1, std::memory_order_relaxed);
             }
         }
     });
@@ -757,9 +825,22 @@ void TxnCoordinator::triggerVacuum(const std::string& table_name) {
     if (table_name.empty()) {
         return;
     }
+    const auto now = std::chrono::steady_clock::now();
+    const std::size_t min_interval = m_vacuum_min_interval_sec.load();
+    const auto it_last = m_vacuum_last_run.find(table_name);
+    if (it_last != m_vacuum_last_run.end() && min_interval > 0) {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::seconds>(now - it_last->second).count();
+        if (elapsed >= 0 && static_cast<std::size_t>(elapsed) < min_interval) {
+            m_vacuum_cooldown_skip_count.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
     if (!m_vacuum_pending.insert(table_name).second) {
         return;
     }
+    m_vacuum_last_run[table_name] = now;
+    m_vacuum_trigger_count.fetch_add(1, std::memory_order_relaxed);
     m_vacuum_queue.push_back(table_name);
     m_vacuum_cv.notify_one();
 }
@@ -773,7 +854,21 @@ void TxnCoordinator::setVacuumOpsThreshold(const std::size_t threshold) {
     persistVacuumConfig();
 }
 
+void TxnCoordinator::setVacuumMinIntervalSec(const std::size_t sec) {
+    m_vacuum_min_interval_sec.store(sec);
+    persistVacuumConfig();
+}
+
 void TxnCoordinator::set_workspace_root(std::string path) {
     m_workspace_root = std::move(path);
     loadVacuumConfig();
+}
+
+TxnRuntimeStats TxnCoordinator::runtimeStats() const {
+    TxnRuntimeStats s{};
+    s.vacuum_trigger_count = m_vacuum_trigger_count.load(std::memory_order_relaxed);
+    s.vacuum_execute_count = m_vacuum_execute_count.load(std::memory_order_relaxed);
+    s.vacuum_cooldown_skip_count = m_vacuum_cooldown_skip_count.load(std::memory_order_relaxed);
+    s.write_conflict_count = m_write_conflict_count.load(std::memory_order_relaxed);
+    return s;
 }

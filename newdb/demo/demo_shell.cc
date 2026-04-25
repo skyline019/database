@@ -187,9 +187,10 @@ void interactive_shell(ShellState& st, const char* data_file, const char* table_
     log_and_print(log_file, "  BEGIN           # start transaction (with table name)\n");
     log_and_print(log_file, "  COMMIT          # commit transaction\n");
     log_and_print(log_file, "  ROLLBACK        # rollback transaction\n");
-    log_and_print(log_file, "  AUTOVACUUM [0|1|on|off] [ops_threshold] | AUTOVACUUM threshold <ops> | AUTOVACUUM\n");
+    log_and_print(log_file, "  AUTOVACUUM [0|1|on|off] [ops_threshold] | AUTOVACUUM threshold <ops> | AUTOVACUUM interval <sec> | AUTOVACUUM\n");
     log_and_print(log_file, "  WALSYNC [full|normal [interval_ms]|off]  # configure WAL durability\n");
     log_and_print(log_file, "  SHOW TUNING      # print WALSYNC + AUTOVACUUM status\n");
+    log_and_print(log_file, "  SHOW TUNING JSON # print structured tuning/runtime stats JSON\n");
     log_and_print(log_file, "  SHOW STORAGE     # demodb.wal size, demodb.wal_lsn, total *.bin size\n");
     log_and_print(log_file, "  HELP\n");
     log_and_print(log_file, "  EXIT\n");

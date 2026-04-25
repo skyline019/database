@@ -1,0 +1,101 @@
+\section{Heap Page：页结构、校验与记录切片遍历}
+
+对应实现：\fpath{newdb/src/heap_page_waterfall.cpp}
+
+\subsection{关键代码段：追加记录（slot 表 + free space）}
+
+追加一条记录的核心逻辑是“payload 向前增长 + slot 表向后增长”，并用 header 维护两者之间的空洞：
+
+\begin{lstlisting}[language=C++,caption={append\_encoded\_record 的关键步骤（节选）}]
+const std::size_t need = rec_len + sizeof(std::uint16_t);
+if (cur_free_size < need) {
+    return false;
+}
+const unsigned short rec_offset = cur_free_space;
+std::memcpy(page + rec_offset, encoded, rec_len);
+
+const unsigned short new_num = cur_num + 1;
+std::uint16_t* new_slot = slot_ptr(page, new_num);
+*new_slot = rec_offset;
+
+const unsigned short slot_region_begin =
+    static_cast<unsigned short>(reinterpret_cast<unsigned char*>(new_slot) - page);
+const unsigned short new_free_space = static_cast<unsigned short>(rec_offset + rec_len);
+const unsigned short new_free_size =
+    static_cast<unsigned short>(slot_region_begin - new_free_space);
+
+header->set_num_records(new_num);
+header->set_free_space(new_free_space);
+header->set_free_size(new_free_size);
+\end{lstlisting}
+
+细节解读：
+
+\begin{itemize}
+  \item \textbf{为何 need 要加 2 字节}：每条记录除了 payload，还要在 slot 表写入一个 \texttt{uint16\_t} 的偏移值。
+  \item \textbf{slot\_ptr 的语义}：slot 表位于页尾，\texttt{slot\_ptr(page, n)} 返回“n 条记录时，新 slot 应写入的位置”。
+  \item \textbf{free\_size 的计算}：用“slot 表起始地址”减去“payload 已写到的位置”，保持两端不相撞。
+\end{itemize}
+
+\subsection{页内布局（逻辑视图）}
+
+Heap Page 使用 Waterfall 的 \texttt{page\_header\_t}，并维护三类区域：
+
+\begin{itemize}
+  \item \textbf{Header}：记录页类型、record 数、free space 指针、free size、CRC32 等；
+  \item \textbf{Payload 区}：自前向后增长，连续写入每条 record 的 payload（不显式存长度）；
+  \item \textbf{Slot 表}：自页尾向前增长，每新增一条记录，写入一个 \texttt{uint16\_t} 的 payload 偏移。
+\end{itemize}
+
+新增记录时，需要的空间为：
+
+\[
+\text{need} = \text{payload\_len} + \text{sizeof(uint16\_t)}
+\]
+
+若 \texttt{free\_size < need} 则追加失败，调用方通常会新开一页再试。
+
+\subsection{CRC32 校验}
+
+页校验由 \texttt{page\_base::compute\_checksum()} 计算，header 保存的 \texttt{crc32} 与之相等则通过。
+装载时校验失败的页会被跳过（容错策略），写入时每次落盘前会更新 CRC32。
+
+\subsection{记录遍历：为什么要对 slot 排序}
+
+Slot 表中记录的“slot 下标顺序”与 payload 的“物理偏移升序”并不一致（例如新写入的 slot 在更靠近页尾的位置）。
+而 record 的长度并未显式存储，因此遍历时必须按 payload 偏移升序来恢复每条记录长度：
+
+\begin{enumerate}
+  \item 读取 header 的 record 数 \texttt{num} 与 free space 指针 \texttt{free\_space}；
+  \item 取到 slot 表全部偏移数组 \texttt{all\_slots[0..num-1]}；
+  \item 构造 \texttt{order}，按 \texttt{all\_slots[order[k]]} 升序排序；
+  \item 第 \(k\) 条 record 的起点为 \(\text{all\_slots[order[k]]}\)，终点为下一条起点（或 \texttt{free\_space}），长度为两者差。
+\end{enumerate}
+
+该算法的时间复杂度为 \(O(num \log num)\)（页内排序），但页内 record 数通常受限于页大小，因此在整体扫描中表现稳定。
+
+\subsection{关键代码段：walk\_record\_slices 的“排序 + 差分求长度”}
+
+\begin{lstlisting}[language=C++,caption={walk\_record\_slices 的核心思路（节选）}]
+// 1) order = [0..num-1]
+std::sort(order.begin(), order.end(), [&](unsigned short a, unsigned short b) {
+    return all_slots[a] < all_slots[b];
+});
+
+// 2) rec_len = next_offset - rec_offset
+const unsigned short rec_offset = all_slots[slot_index];
+const unsigned short next_offset =
+    (k + 1 < num) ? all_slots[order[k + 1]] : free_space;
+const std::size_t rec_len = static_cast<std::size_t>(next_offset - rec_offset);
+slice.payload = page + rec_offset;
+slice.payload_length = rec_len;
+\end{lstlisting}
+
+为什么这个设计很关键：
+
+\begin{itemize}
+  \item \textbf{不存长度，靠差分恢复}：页内不为每条记录保存长度，节省空间，但要求遍历时能从“偏移序列”恢复长度。
+  \item \textbf{必须排序}：如果直接按 slot 下标遍历，\texttt{next\_offset} 不一定比当前 offset 大，差分会变负或越界。
+  \item \textbf{边界使用 free\_space}：最后一条记录的终点就是 header 维护的 free space 指针。
+\end{itemize}
+

@@ -1,0 +1,74 @@
+\section{中层解析 II：include（公共 API 与契约层）}
+
+\subsection{模块定位}
+
+\fpath{include/newdb/*.h} 是工程的“公共契约层”：
+
+\begin{itemize}
+  \item 向 \fpath{demo/}、\fpath{tests/}、\fpath{tools/} 暴露稳定接口；
+  \item 隐藏 \fpath{src/} 的实现细节（例如文件布局、线程模型、平台差异）；
+  \item 通过注释与类型设计明确线程边界、生命周期与错误传播方式。
+\end{itemize}
+
+\subsection{头文件分层（建议理解顺序）}
+
+\begin{enumerate}
+  \item \textbf{基础类型层}：\fpath{error.h}、\fpath{row.h}、\fpath{schema.h}
+  \item \textbf{存储抽象层}：\fpath{heap_page.h}、\fpath{heap_storage.h}、\fpath{heap_file_read_view.h}
+  \item \textbf{表与会话层}：\fpath{heap_table.h}、\fpath{session.h}、\fpath{catalog.h}
+  \item \textbf{日志与并发层}：\fpath{wal_manager.h}、\fpath{mvcc.h}、\fpath{session_history.h}
+  \item \textbf{编解码与 sidecar 层}：\fpath{tuple_codec.h}、\fpath{wal_codec.h}、\fpath{schema_io.h}
+  \item \textbf{外部 ABI 层}：\fpath{c_api.h}
+\end{enumerate}
+
+\subsection{关键契约示例}
+
+\subsubsection{Status：统一错误传播约定}
+\begin{lstlisting}[language=C++,caption={error.h（节选）}]
+struct Status {
+    bool ok{true};
+    std::string message;
+    static Status Ok();
+    static Status Fail(std::string msg);
+    explicit operator bool() const { return ok; }
+};
+\end{lstlisting}
+
+工程层面价值：减少异常跨模块传播的不确定性，形成一致的 \texttt{if (!st.ok) return st;} 风格。
+
+\subsubsection{Session：并发边界写在接口注释里}
+\begin{lstlisting}[language=C++,caption={session.h（节选）}]
+struct Session {
+    class HeapAccess { ... }; // scoped lock holder
+    HeapTable table;
+    bool cache_valid{false};
+    mutable std::mutex mut_;
+    [[nodiscard]] HeapAccess lock_heap(const char* log_file);
+    HeapTable* mutable_heap(const char* log_file);
+};
+\end{lstlisting}
+
+\texttt{lock\_heap} 与 \texttt{mutable\_heap} 的并存体现了“安全优先路径”与“便捷路径”分层，调用方需明确线程模型。
+
+\subsubsection{WAL 管理接口：功能完整但实现可替换}
+\begin{lstlisting}[language=C++,caption={wal\_manager.h（节选）}]
+class WalManager {
+public:
+    Status open();
+    Status append_record(...);
+    Status flush();
+    Status recover(HeapTable* out_table, const TableSchema& schema, WalRecoveryStats* stats);
+    std::optional<WalRecoveryStats> last_recovery_stats() const;
+};
+\end{lstlisting}
+
+这层接口把“可观测恢复”变成一等能力（不仅仅是 recover 成功/失败二值）。
+
+\subsection{中层设计评估}
+
+\begin{itemize}
+  \item \textbf{优点}：接口清晰，注释含线程/生命周期语义，便于跨目录协作；
+  \item \textbf{不足}：部分头文件体积较大（例如 \fpath{wal_manager.h}），后续可拆“配置/统计/事务包装”子头；
+  \item \textbf{建议}：增加一份“include 层稳定性等级”文档（稳定 ABI/内部 API/实验 API）降低演进风险。
+\end{itemize}
+

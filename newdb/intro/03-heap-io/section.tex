@@ -1,0 +1,139 @@
+\section{Heap 文件装载：指纹合并、懒加载与物化}
+
+对应实现：\fpath{newdb/src/page_io.cpp}、\fpath{newdb/src/heap_file_read_view.cpp}
+
+\subsection{关键代码段：合并一页到 latest fingers（逻辑）}
+
+装载的核心是：扫描所有 record，按 \texttt{row.id} 合并出“最新的物理位置（finger）”，并处理 tombstone 删除。
+下面是 \texttt{merge\_one\_page\_into\_fingers} 的关键逻辑（做了少量重排以便阅读）：
+
+\begin{lstlisting}[language=C++,caption={merge\_one\_page\_into\_fingers（节选）}]
+if (!heap_page::verify_checksum(page_base, psz)) {
+    return Status::Ok(); // checksum mismatch: skip page
+}
+
+heap_page::walk_record_slices(page_base, psz, [&](const RecordSlice& slice) {
+    Row row;
+    if (!codec::decode_heap_payload_to_row(slice.payload, slice.payload_length, row)) {
+        return true; // skip bad record
+    }
+    Status vst = validate_storage_row(schema, row);
+    if (!vst.ok) { fatal = vst; return false; }
+
+    const RecordMetadata meta = extract_record_metadata(row, ++lsn_counter);
+    if (row.attrs["__deleted"] == "1") {
+        latest.erase(row.id);
+        latest_meta.erase(row.id);
+        return true;
+    }
+
+    HeapRowFinger finger{};
+    finger.page_no = page_no;
+    finger.byte_off_in_page = off_in_page;
+    finger.payload_len = slice.payload_length;
+    latest[row.id] = finger;
+    latest_meta[row.id] = meta;
+    return true;
+});
+\end{lstlisting}
+
+关键点解释：
+
+\begin{itemize}
+  \item \textbf{checksum mismatch 的策略}：直接跳过页（容错）；这会导致数据“可能缺行”，但能尽量从坏文件中恢复出可用子集。
+  \item \textbf{以 row.id 为合并键}：同 id 的后写入版本会覆盖 \texttt{latest[id]}，形成“最后写入赢”的视图。
+  \item \textbf{tombstone 的语义}：遇到 \texttt{\_\_deleted=1} 会删除 \texttt{latest} 中该 id，等价于“最新版本是删除”。
+  \item \textbf{LSN 的来源}：若 row 自带 \texttt{\_\_mvcc\_created\_lsn} 则用它，否则用装载过程的递增计数作为 fallback（保证可比较但不等同于 WAL LSN）。
+\end{itemize}
+
+\subsection{目标：把“追加式历史”变成“最新版本视图”}
+
+堆文件是追加式写入：同一个 \texttt{row.id} 可能在文件中出现多次（更新/删除后写入新版本或 tombstone）。
+装载过程的核心任务是扫描所有 record，并为每个 \texttt{row.id} 选择一个“最新”位置：
+
+\begin{itemize}
+  \item \textbf{latest}：\(\texttt{row.id} \rightarrow \texttt{HeapRowFinger}\)
+  \item \textbf{latest\_meta}：\(\texttt{row.id} \rightarrow \texttt{RecordMetadata}\)
+\end{itemize}
+
+\subsection{合并规则（merge one page）}
+
+对每一页：
+
+\begin{enumerate}
+  \item 若页 CRC32 校验失败，跳过该页（非 fatal）；
+  \item 遍历页内所有 record slice，解码为 \texttt{Row}；
+  \item 校验存储值与 schema 的可解析性（例如 int/double/bool 等）；
+  \item 若 \texttt{\_\_deleted=1}：从 \texttt{latest/latest\_meta} 移除该 \texttt{id}；
+  \item 否则写入/覆盖：
+    \(\texttt{latest[id] = (page\_no, offset, len)}\)，并保存解析出的 MVCC 元数据。
+\end{enumerate}
+
+备注：装载过程内部维护一个自增的 \texttt{lsn\_counter} 作为 fallback 的 created\_lsn（当行内没带 \texttt{\_\_mvcc\_created\_lsn} 时使用）。
+
+\subsection{懒加载（lazy\_decode）}
+
+若启用懒加载，系统会尝试构造一个只读视图 \texttt{HeapFileReadView}：
+
+\begin{itemize}
+  \item 支持平台上可直接 mmap 整个 heap 文件，\texttt{page\_data(page\_no)} 返回指向映射内存的指针；
+  \item 在不支持 mmap 或无法映射时，保持路径与页大小信息，按需用 \texttt{read\_page\_copy} 读页。
+\end{itemize}
+
+随后 \texttt{HeapTable} 只保存：
+
+\begin{itemize}
+  \item 排好序的 \texttt{ids}（按 \(\texttt{page\_no}\) 再按 \(\texttt{id}\)）
+  \item 与 ids 对齐的 \texttt{fingers} 与 \texttt{row\_meta}
+  \item 只读视图指针
+\end{itemize}
+
+查询时按 slot 解码：定位页、取 payload、调用 tuple codec 解码成 Row。
+
+\subsection{关键代码段：HeapFileReadView 的 mmap/stdio 双模式}
+
+\begin{lstlisting}[language=C++,caption={HeapFileReadView::page\_data 与 read\_page\_copy（节选）}]
+const unsigned char* HeapFileReadView::page_data(size_t page_no) const {
+    if (mapped_ == nullptr || page_no >= num_pages_) return nullptr;
+    return static_cast<const unsigned char*>(mapped_) + page_no * psz_;
+}
+
+bool HeapFileReadView::read_page_copy(size_t page_no, unsigned char* buf) const {
+    if (mapped_ != nullptr) {
+        std::memcpy(buf, base + page_no * psz_, psz_);
+        return true;
+    }
+    FILE* fp = std::fopen(path_.c_str(), "rb");
+    std::fseek(fp, page_no * psz_, SEEK_SET);
+    std::fread(buf, 1, psz_, fp);
+    std::fclose(fp);
+    return true;
+}
+\end{lstlisting}
+
+这意味着懒加载查询路径在“能 mmap 的平台”上很像纯内存访问；在 Windows/不可 mmap 情况下则会退化为按需读页拷贝（可通过 HeapTable 的单页缓存减轻抖动，见下一章）。
+
+\subsection{物化（finalize / materialize）}
+
+若不启用懒加载，则会对排序后的 ids 逐个：
+
+\begin{enumerate}
+  \item 按 finger 定位到页；
+  \item 验证页 CRC；
+  \item 解码 payload 得到 Row，剥离 MVCC 内部字段；
+  \item 校验 schema；
+  \item push 到 \texttt{HeapTable::rows}，并把 \texttt{RecordMetadata} push 到 \texttt{row\_meta}；
+  \item 最后 \texttt{rebuild\_indexes(schema)}。
+\end{enumerate}
+
+\subsection{复杂度与局部性}
+
+设总记录数为 \(N\)，去重后的 id 数为 \(M\)：
+
+\begin{itemize}
+  \item 扫描与解码：\(O(N)\)（每条 record 至多解码一次）
+  \item 构建并排序 ids：\(O(M \log M)\)
+\end{itemize}
+
+按 \((page\_no, id)\) 排序的目的，是让后续物化时尽量顺序访问同一页，提高缓存命中与 I/O 局部性。
+

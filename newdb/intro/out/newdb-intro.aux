@@ -1,0 +1,178 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand*\HyPL@Entry[1]{}
+\HyPL@Entry{0<</S/D>>}
+\@writefile{toc}{\contentsline {section}{\numberline {1}整体架构与数据流}{5}{section.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}核心对象关系}{5}{subsection.1.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}关键数据结构总览（字段语义 / 不变量 / 生命周期）}{5}{subsection.1.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.1}Row：逻辑行（内存表示）}{5}{subsubsection.1.2.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {1}Row（原型）}{5}{lstlisting.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.2}HeapRowFinger：物理定位（懒加载的核心索引单元）}{6}{subsubsection.1.2.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {2}HeapRowFinger（原型）}{6}{lstlisting.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.3}RecordMetadata：MVCC 元数据（与 slot 对齐存放）}{6}{subsubsection.1.2.3}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {3}RecordMetadata（原型）}{6}{lstlisting.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.4}TableSchema：会话级 schema（类型与比较语义的来源）}{7}{subsubsection.1.2.4}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {4}TableSchema（核心字段节选）}{7}{lstlisting.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.5}HeapTable：逻辑表（双形态 + 多索引 + 可见性过滤）}{7}{subsubsection.1.2.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.6}WAL 相关：WalRecordHeader / QueuedWalOp}{7}{subsubsection.1.2.6}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {5}WalRecordHeader（原型）}{7}{lstlisting.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.7}WalDecodedRecord：WAL 解码后的“统一记录视图”（用于读取/调试）}{8}{subsubsection.1.2.7}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {6}WalDecodedRecord（原型）}{8}{lstlisting.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.8}WalRecoveryStats：恢复过程的可观测性指标（性能/正确性排查入口）}{8}{subsubsection.1.2.8}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {7}WalRecoveryStats（字段节选）}{8}{lstlisting.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.9}WalTxn：事务 RAII（保证异常路径也能 rollback）}{9}{subsubsection.1.2.9}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {8}WalTxn（原型）}{9}{lstlisting.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.10}MVCCSnapshot：读视图的载体（被 HeapTable 消费的关键对象）}{10}{subsubsection.1.2.10}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {9}MVCCSnapshot（原型）}{10}{lstlisting.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.11}HeapFileReadView：只读堆文件视图（mmap/stdio 抽象）}{10}{subsubsection.1.2.11}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {10}HeapFileReadView（接口节选）}{10}{lstlisting.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.12}HeapLoadOptions：装载策略开关}{11}{subsubsection.1.2.12}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {11}HeapLoadOptions（原型）}{11}{lstlisting.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.13}heap\_page::RecordSlice：页内记录切片（无需拷贝）}{11}{subsubsection.1.2.13}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {12}RecordSlice（原型）}{11}{lstlisting.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.14}Status：显式错误载体（跨层传播的“最小公约数”）}{12}{subsubsection.1.2.14}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {13}Status（原型）}{12}{lstlisting.13}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.15}Session：会话对象（线程安全边界明确）}{12}{subsubsection.1.2.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {1.2.16}Catalog：数据库目录的文件系统视图}{12}{subsubsection.1.2.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}读路径（加载与查询）}{12}{subsection.1.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4}写路径（heap 与 WAL）}{13}{subsection.1.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Heap Page：页结构、校验与记录切片遍历}{13}{section.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}关键代码段：追加记录（slot 表 + free space）}{13}{subsection.2.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {14}append\_encoded\_record 的关键步骤（节选）}{13}{lstlisting.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}页内布局（逻辑视图）}{14}{subsection.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}CRC32 校验}{14}{subsection.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}记录遍历：为什么要对 slot 排序}{14}{subsection.2.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}关键代码段：walk\_record\_slices 的“排序 + 差分求长度”}{14}{subsection.2.5}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {15}walk\_record\_slices 的核心思路（节选）}{14}{lstlisting.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {3}Heap 文件装载：指纹合并、懒加载与物化}{15}{section.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}关键代码段：合并一页到 latest fingers（逻辑）}{15}{subsection.3.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {16}merge\_one\_page\_into\_fingers（节选）}{15}{lstlisting.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}目标：把“追加式历史”变成“最新版本视图”}{16}{subsection.3.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}合并规则（merge one page）}{16}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}懒加载（lazy\_decode）}{16}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}关键代码段：HeapFileReadView 的 mmap/stdio 双模式}{17}{subsection.3.5}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {17}HeapFileReadView::page\_data 与 read\_page\_copy（节选）}{17}{lstlisting.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.6}物化（finalize / materialize）}{17}{subsection.3.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.7}复杂度与局部性}{17}{subsection.3.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}HeapTable：索引、排序缓存与懒解码}{17}{section.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}关键代码段：decode\_heap\_slot 的缓存与解码}{18}{subsection.4.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {18}decode\_heap\_slot：mmap 命中或单页缓存（节选）}{18}{lstlisting.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}两种内部形态}{18}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}可见性过滤（MVCC + tombstone）}{18}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}索引结构}{18}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}sorted\_indices：排序缓存与“解码一次”优化}{19}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}关键代码段：sorted\_indices 的“排序 key 缓存”}{19}{subsection.4.6}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {19}sorted\_indices：先解码一次再排序（节选）}{19}{lstlisting.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7}find\_by\_id：热路径行为}{19}{subsection.4.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}MVCC：快照可见性与事务水位线}{19}{section.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}关键代码段：可见性函数 is\_visible}{20}{subsection.5.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {20}MVCCSnapshot::is\_visible 的判定顺序（节选）}{20}{lstlisting.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}可见性判定}{20}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}MVCCManager：事务集合与 watermarks}{20}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}关键代码段：begin/commit 与 min\_visible\_lsn 更新}{21}{subsection.5.4}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {21}MVCCManager 的事务状态变迁（节选）}{21}{lstlisting.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}与 HeapTable 的衔接}{21}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}实现特征与注意点}{21}{subsection.5.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}WAL：记录格式、写入线程、分段与恢复}{21}{section.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}关键代码段：append\_record 如何分配 LSN 并计算校验}{21}{subsection.6.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {22}append\_record：构造 header + payload + checksum（节选）}{21}{lstlisting.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}记录组成：Header + Payload + Checksum}{22}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Payload 编码：table + row fields}{22}{subsection.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.3.1}关键代码段：payload 编码（table + row id + row payload）}{22}{subsubsection.6.3.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {23}walcodec::build\_payload 的布局（节选）}{22}{lstlisting.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.4}写入模型：队列 + writer thread}{23}{subsection.6.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.4.1}关键代码段：enqueue\_and\_wait（同步等待写入结果）}{23}{subsubsection.6.4.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {24}入队并等待 writer 返回 Status（节选）}{23}{lstlisting.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.5}刷盘策略（durability）}{23}{subsection.6.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.5.1}关键代码段：Normal 模式的节流刷盘}{23}{subsubsection.6.5.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {25}flush\_durable：Normal 模式的时间间隔判断（节选）}{23}{lstlisting.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.6}分段（segment rotate）}{24}{subsection.6.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.7}恢复（recovery）}{24}{subsection.6.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {6.7.1}关键代码段：按事务聚合，commit 时统一 apply}{24}{subsubsection.6.7.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {26}recover：PendingTxnOps + COMMIT apply（节选）}{24}{lstlisting.26}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Session / C API：缓存加载、快照设置与输出约束}{24}{section.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}关键代码段：Session 如何确保已装载（ensure\_loaded）}{25}{subsection.7.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {27}Session::ensure\_loaded 的核心逻辑（节选）}{25}{lstlisting.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}关键代码段：reload 时的 schema sidecar + lazy 开关}{25}{subsection.7.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {28}session\_reload\_impl：.attr + NEWDB\_LAZY\_HEAP（节选）}{25}{lstlisting.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Session：cache\_valid 与按需重载}{25}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.4}快照设置：影响索引与排序}{26}{subsection.7.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.5}关键代码段：C API 通过读取日志 tail 获取输出}{26}{subsection.7.5}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {29}newdb\_session\_execute：tail 读取与错误码（节选）}{26}{lstlisting.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.6}错误格式：结构化单行输出}{26}{subsection.7.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.7}C API：以日志尾部作为输出通道}{26}{subsection.7.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}中层解析 I：demo（CLI、命令分发、业务编排）}{27}{section.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}模块定位}{27}{subsection.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}关键数据结构（中层）}{27}{subsection.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {8.2.1}ShellState（会话上下文聚合）}{27}{subsubsection.8.2.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {30}ShellState（节选）}{27}{lstlisting.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {8.2.2}DemoCliInvocation（一次 CLI 调用的完整语义）}{27}{subsubsection.8.2.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {31}DemoCliInvocation（节选）}{27}{lstlisting.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {8.2.3}WhereQueryContext（查询缓存与策略状态）}{28}{subsubsection.8.2.3}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {32}WhereQueryContext（节选）}{28}{lstlisting.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.3}核心流程}{28}{subsection.8.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {8.3.1}A. 入口主流程（demo\_main）}{28}{subsubsection.8.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {8.3.2}B. 命令处理主链（process\_command\_line）}{28}{subsubsection.8.3.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {33}命令分发主链（节选）}{28}{lstlisting.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.4}算法与复杂度（中层视角）}{28}{subsection.8.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.5}中层风险与优化建议}{29}{subsection.8.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}中层解析 II：include（公共 API 与契约层）}{29}{section.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}模块定位}{29}{subsection.9.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}头文件分层（建议理解顺序）}{29}{subsection.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}关键契约示例}{29}{subsection.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {9.3.1}Status：统一错误传播约定}{29}{subsubsection.9.3.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {34}error.h（节选）}{29}{lstlisting.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {9.3.2}Session：并发边界写在接口注释里}{30}{subsubsection.9.3.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {35}session.h（节选）}{30}{lstlisting.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {9.3.3}WAL 管理接口：功能完整但实现可替换}{30}{subsubsection.9.3.3}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {36}wal\_manager.h（节选）}{30}{lstlisting.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.4}中层设计评估}{30}{subsection.9.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}中层解析 III：tests（验证策略与质量护栏）}{30}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.1}测试分层概览}{30}{subsection.10.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.2}代表性测试样例}{31}{subsection.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {10.2.1}A. WHERE 语义与策略（test\_demo\_where.cpp）}{31}{subsubsection.10.2.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {37}WHERE 多条件与策略拒绝（节选）}{31}{lstlisting.37}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {10.2.2}B. 页 IO 容错与懒加载（test\_page\_io.cpp）}{31}{subsubsection.10.2.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {38}坏页跳过 + lazy decode 物化（节选）}{31}{lstlisting.38}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {10.2.3}C. WAL 并发正确性（test\_wal\_concurrency.cpp）}{31}{subsubsection.10.2.3}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {39}多线程 append + commit（节选）}{31}{lstlisting.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.3}测试策略评价}{31}{subsection.10.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}中层解析 IV：tools（基准与烟测工具链）}{32}{section.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.1}工具集定位}{32}{subsection.11.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.2}关键结构与流程}{32}{subsection.11.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.2.1}A. newdb\_perf：脚本编排器}{32}{subsubsection.11.2.1}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {40}newdb\_perf 参数与执行（节选）}{32}{lstlisting.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.2.2}B. newdb\_concurrent\_perf：并发 WAL 压测}{32}{subsubsection.11.2.2}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {41}并发写压测主循环（节选）}{32}{lstlisting.41}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {11.2.3}C. newdb\_smoke：最小可用性验证}{33}{subsubsection.11.2.3}\protected@file@percent }
+\@writefile{lol}{\contentsline {lstlisting}{\numberline {42}newdb\_smoke 主命令（节选）}{33}{lstlisting.42}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.3}工具层评价与优化建议}{33}{subsection.11.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {A}附录：与 LevelDB / InnoDB 底层结构对比}{33}{appendix.A}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}一图总览（结构定位）}{33}{subsection.A.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}1) 存储组织（Data Layout）}{34}{subsection.A.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.2.1}newdb}{34}{subsubsection.A.2.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.2.2}LevelDB}{34}{subsubsection.A.2.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.2.3}InnoDB}{34}{subsubsection.A.2.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}2) 索引与查询路径}{34}{subsection.A.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.4}3) WAL / Redo 与恢复模型}{34}{subsection.A.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.4.1}newdb}{34}{subsubsection.A.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.4.2}LevelDB}{34}{subsubsection.A.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.4.3}InnoDB}{34}{subsubsection.A.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.5}4) 并发控制与 MVCC 深度}{35}{subsection.A.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.6}5) 空间回收与长期运行形态}{35}{subsection.A.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.7}6) 写放大 / 读放大（工程后果）}{35}{subsection.A.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.8}7) 对 newdb 的演进启发（可落地）}{35}{subsection.A.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.9}8) 结论（结构层面）}{35}{subsection.A.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.10}9) 优劣评价（工程决策视角）}{36}{subsection.A.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.10.1}newdb}{36}{subsubsection.A.10.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.10.2}LevelDB}{36}{subsubsection.A.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.10.3}InnoDB}{36}{subsubsection.A.10.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.10.4}按场景选型建议}{37}{subsubsection.A.10.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.11}10) 纳入中层（demo/include/tests/tools）后的再评估}{37}{subsection.A.11}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.11.1}A. 架构完整性：从“内核原型”提升为“可用小系统”}{37}{subsubsection.A.11.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.11.2}B. 与 LevelDB/InnoDB 的差距重述（中层视角）}{37}{subsubsection.A.11.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.11.3}C. 工程风险再分级（加入中层后）}{37}{subsubsection.A.11.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.11.4}D. 选型建议修订（纳入中层能力）}{37}{subsubsection.A.11.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsubsection}{\numberline {A.11.5}E. 下一阶段优先级（基于中层现状）}{38}{subsubsection.A.11.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.12}Executive Summary（1 页决策速览，面向评审会）}{38}{subsection.A.12}\protected@file@percent }
+\gdef \@abspage@last{38}

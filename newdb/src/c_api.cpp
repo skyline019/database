@@ -12,6 +12,8 @@
 #include <memory>
 #include <exception>
 #include <string>
+#include <sstream>
+#include <chrono>
 
 namespace {
 
@@ -112,6 +114,58 @@ void prepend_capi_error_line(std::string& out, int code) {
     const std::string prefix =
         std::string("[CAPI_ERROR] code=") + newdb_error_code_string(code) + " numeric=" + std::to_string(code) + "\n";
     out.insert(0, prefix);
+}
+
+std::string build_runtime_stats_json(const CApiSession& s) {
+    const auto stats = s.shell.txn.runtimeStats();
+    std::ostringstream oss;
+    oss << "{"
+        << "\"vacuum_trigger_count\":" << stats.vacuum_trigger_count << ","
+        << "\"vacuum_execute_count\":" << stats.vacuum_execute_count << ","
+        << "\"vacuum_cooldown_skip_count\":" << stats.vacuum_cooldown_skip_count << ","
+        << "\"write_conflicts\":" << stats.write_conflict_count << ","
+        << "\"vacuum_running\":" << (s.shell.txn.vacuumRunning() ? "true" : "false") << ","
+        << "\"vacuum_ops_threshold\":" << s.shell.txn.vacuumOpsThreshold() << ","
+        << "\"vacuum_min_interval_sec\":" << s.shell.txn.vacuumMinIntervalSec()
+        << "}";
+    return oss.str();
+}
+
+std::string json_escape_local(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '\"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[7];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(c));
+                    out += buf;
+                } else {
+                    out.push_back(static_cast<char>(c));
+                }
+        }
+    }
+    return out;
+}
+
+std::string build_runtime_snapshot_jsonl_line(const CApiSession& s, const std::string& label) {
+    const auto now = std::chrono::system_clock::now();
+    const auto ts_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    std::ostringstream oss;
+    oss << "{"
+        << "\"ts_ms\":" << ts_ms << ","
+        << "\"label\":\"" << json_escape_local(label) << "\","
+        << "\"stats\":" << build_runtime_stats_json(s)
+        << "}";
+    return oss.str();
 }
 
 }  // namespace
@@ -261,6 +315,50 @@ int newdb_session_execute(newdb_session_handle handle,
     std::memcpy(output_buf, out.data(), copy_len);
     output_buf[copy_len] = '\0';
     return rc;
+}
+
+int newdb_session_runtime_stats(newdb_session_handle handle,
+                                char* output_buf,
+                                size_t output_buf_size) {
+    auto* ptr = static_cast<CApiSession*>(handle);
+    if (ptr == nullptr || output_buf == nullptr || output_buf_size == 0) {
+        set_last_error(ptr, ptr == nullptr ? NEWDB_ERR_INVALID_HANDLE : NEWDB_ERR_INVALID_ARGUMENT);
+        return 0;
+    }
+    const std::string out = build_runtime_stats_json(*ptr) + "\n";
+    const size_t copy_len = (out.size() < output_buf_size - 1) ? out.size() : (output_buf_size - 1);
+    std::memcpy(output_buf, out.data(), copy_len);
+    output_buf[copy_len] = '\0';
+    set_last_error(ptr, NEWDB_OK);
+    return 1;
+}
+
+int newdb_session_append_runtime_snapshot(newdb_session_handle handle,
+                                          const char* output_jsonl_path,
+                                          const char* label) {
+    auto* ptr = static_cast<CApiSession*>(handle);
+    if (ptr == nullptr) {
+        set_last_error(ptr, NEWDB_ERR_INVALID_HANDLE);
+        return 0;
+    }
+    if (output_jsonl_path == nullptr || output_jsonl_path[0] == '\0') {
+        set_last_error(ptr, NEWDB_ERR_INVALID_ARGUMENT);
+        return 0;
+    }
+    const std::string label_s = (label == nullptr) ? std::string() : std::string(label);
+    const std::string line = build_runtime_snapshot_jsonl_line(*ptr, label_s) + "\n";
+    std::ofstream out(output_jsonl_path, std::ios::out | std::ios::app);
+    if (!out.good()) {
+        set_last_error(ptr, NEWDB_ERR_LOG_IO);
+        return 0;
+    }
+    out << line;
+    if (!out.good()) {
+        set_last_error(ptr, NEWDB_ERR_LOG_IO);
+        return 0;
+    }
+    set_last_error(ptr, NEWDB_OK);
+    return 1;
 }
 
 }  // extern "C"

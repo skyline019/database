@@ -26,6 +26,12 @@ Status append_rows(const char* path, const std::vector<Row>& rows);
 // Create (truncate) a heap file from seed rows.
 Status create_heap_file(const char* path, const std::vector<Row>& rows);
 
+// Compact one heap file by rewriting only logical latest rows (drops old versions/tombstones).
+Status compact_heap_file(const char* path,
+                         const std::string& table_name,
+                         const TableSchema& schema,
+                         std::size_t* out_rows_after = nullptr);
+
 // Debug / ad-hoc scan of raw pages (stdout).
 void scan_heap_file(const char* path);
 

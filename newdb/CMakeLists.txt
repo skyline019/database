@@ -100,6 +100,9 @@ add_executable(newdb_concurrent_perf tools/newdb_concurrent_perf.cpp)
 target_link_libraries(newdb_concurrent_perf PRIVATE newdb_core)
 newdb_force_include_waterfall_config(newdb_concurrent_perf)
 
+add_executable(newdb_runtime_report tools/newdb_runtime_report.cpp)
+newdb_force_include_waterfall_config(newdb_runtime_report)
+
 set(NEWDB_DEMO_LIB_SOURCES
     demo/demo_runner.cc
     demo/demo_diag.cc
@@ -152,6 +155,11 @@ if(MINGW)
         ${NEWDB_STATIC_WINPTHREAD_FLAG}
     )
     target_link_options(newdb_perf PRIVATE
+        -static-libgcc
+        -static-libstdc++
+        ${NEWDB_STATIC_WINPTHREAD_FLAG}
+    )
+    target_link_options(newdb_runtime_report PRIVATE
         -static-libgcc
         -static-libstdc++
         ${NEWDB_STATIC_WINPTHREAD_FLAG}
@@ -232,6 +240,8 @@ if(NEWDB_BUILD_TESTS)
         tests/test_wal_concurrency.cpp
         tests/test_wal_recovery_indexed.cpp
         tests/test_txn_file_lock.cpp
+        tests/test_txn_autovacuum.cpp
+        tests/test_txn_write_conflict.cpp
         tests/test_sidecar_wal_lsn_stress.cpp
         tests/test_visibility_checkpoint_sidecar.cpp
         tests/test_covering_index_sidecar.cpp

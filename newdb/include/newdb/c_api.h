@@ -19,7 +19,7 @@ extern "C" {
 #endif
 
 #define NEWDB_C_API_VERSION_MAJOR 0
-#define NEWDB_C_API_VERSION_MINOR 3
+#define NEWDB_C_API_VERSION_MINOR 5
 #define NEWDB_C_API_VERSION_PATCH 0
 #define NEWDB_C_API_ABI_VERSION 1
 
@@ -65,6 +65,12 @@ NEWDB_API int newdb_session_execute(newdb_session_handle handle,
                                     const char* command_line,
                                     char* output_buf,
                                     size_t output_buf_size);
+NEWDB_API int newdb_session_runtime_stats(newdb_session_handle handle,
+                                          char* output_buf,
+                                          size_t output_buf_size);
+NEWDB_API int newdb_session_append_runtime_snapshot(newdb_session_handle handle,
+                                                    const char* output_jsonl_path,
+                                                    const char* label);
 
 #ifdef __cplusplus
 }  // extern "C"

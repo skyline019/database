@@ -1,0 +1,76 @@
+\section{中层解析 III：tests（验证策略与质量护栏）}
+
+\subsection{测试分层概览}
+
+\fpath{tests/} 基本可分为四层：
+
+\begin{itemize}
+  \item \textbf{单模块语义测试}：如 \fpath{test_schema.cpp}、\fpath{test_tuple_codec.cpp}、\fpath{test_error_format.cpp}
+  \item \textbf{存储链路测试}：如 \fpath{test_page_io.cpp}、\fpath{test_heap_table.cpp}、\fpath{test_mvcc_visibility.cpp}
+  \item \textbf{日志/并发/恢复测试}：如 \fpath{test_wal_concurrency.cpp}、\fpath{test_wal_segment.cpp}、\fpath{test_wal_recovery_indexed.cpp}
+  \item \textbf{demo/C API 集成测试}：如 \fpath{test_demo_where.cpp}、\fpath{test_c_api.cpp}、\fpath{test_demo_mdb_stop.cpp}
+\end{itemize}
+
+\subsection{代表性测试样例}
+
+\subsubsection{A. WHERE 语义与策略（test\_demo\_where.cpp）}
+\begin{lstlisting}[language=C++,caption={WHERE 多条件与策略拒绝（节选）}]
+std::vector<WhereCond> conds;
+conds.push_back({"balance", CondOp::Ge, "15", ""});
+conds.push_back({"balance", CondOp::Le, "25", "AND"});
+const auto idx = query_with_index(tbl, schema, conds);
+
+_putenv_s("NEWDB_WHERE_POLICY_MODE", "reject");
+const auto blocked = query_with_index(tbl, schema, conds);
+EXPECT_TRUE(blocked.empty());
+EXPECT_TRUE(where_policy_last_blocked());
+\end{lstlisting}
+
+价值：不仅验证“结果是否正确”，还验证“策略路径是否按预期触发”。
+
+\subsubsection{B. 页 IO 容错与懒加载（test\_page\_io.cpp）}
+\begin{lstlisting}[language=C++,caption={坏页跳过 + lazy decode 物化（节选）}]
+bad[idx] ^= 0x5A;
+ASSERT_FALSE(newdb::heap_page::verify_checksum(bad.data(), bad.size()));
+ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "mix", schema, tbl).ok);
+
+newdb::HeapLoadOptions opts; opts.lazy_decode = true;
+ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "lazy", schema, tbl, opts).ok);
+ASSERT_TRUE(tbl.is_heap_storage_backed());
+ASSERT_TRUE(tbl.materialize_all_rows(schema).ok);
+\end{lstlisting}
+
+价值：覆盖“真实线上常见异常”（坏页/半页/缺文件）与“性能路径切换”（lazy→materialize）。
+
+\subsubsection{C. WAL 并发正确性（test\_wal\_concurrency.cpp）}
+\begin{lstlisting}[language=C++,caption={多线程 append + commit（节选）}]
+for (int t = 0; t < kThreads; ++t) {
+  workers.emplace_back([&, t]() {
+    for (int i = 0; i < kOpsPerThread; ++i) {
+      wal.append_record(txn, newdb::WalOp::INSERT, "users", &r);
+      wal.commit_transaction(txn);
+    }
+  });
+}
+wal.read_all_records(schema, records);
+EXPECT_EQ(insert_count, kThreads * kOpsPerThread);
+\end{lstlisting}
+
+价值：验证 writer 队列与 LSN 递增在高并发下不会破坏可读性与计数一致性。
+
+\subsection{测试策略评价}
+
+\begin{itemize}
+  \item \textbf{优点}：
+    \begin{itemize}
+      \item 覆盖范围较广：语义、容错、并发、恢复、CLI/C API 都有触达；
+      \item 场景设计贴近真实风险（checksum 损坏、策略拒绝、并发压测）。
+    \end{itemize}
+  \item \textbf{可优化点}：
+    \begin{itemize}
+      \item 增加“属性/随机测试”（fuzz）覆盖解析与编解码边界；
+      \item 对性能基线测试设更清晰预算与波动容忍区间；
+      \item 增加跨平台差异测试（Windows/WSL/Linux 文件锁与路径语义）。
+    \end{itemize}
+\end{itemize}
+

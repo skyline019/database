@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <cstddef>
+#include <chrono>
 #include <unordered_map>
 
 #include <newdb/wal_manager.h>
@@ -35,6 +36,13 @@ struct TxnRecord {
     std::string old_value; // 修改前的值 (用于回滚)
     std::string new_value; // 修改后的值
     int64_t timestamp;
+};
+
+struct TxnRuntimeStats {
+    std::uint64_t vacuum_trigger_count{0};
+    std::uint64_t vacuum_execute_count{0};
+    std::uint64_t vacuum_cooldown_skip_count{0};
+    std::uint64_t write_conflict_count{0};
 };
 
 // 事务管理器（嵌入 ShellState，无全局单例）
@@ -71,6 +79,7 @@ public:
     // 记录事务操作 (用于回滚)
     void recordOperation(const std::string& operation, const std::string& table,
                          const std::string& key, const std::string& old_val, const std::string& new_val);
+    bool tryReserveWriteKey(const std::string& table_name, int id, std::string* reason = nullptr);
     
     // 后台 VACUUM
     void startVacuumThread();
@@ -79,6 +88,13 @@ public:
     void setVacuumCallback(std::function<void(const std::string&)> cb);
     void setVacuumOpsThreshold(std::size_t threshold);
     std::size_t vacuumOpsThreshold() const { return m_vacuum_ops_threshold.load(); }
+    void setVacuumMinIntervalSec(std::size_t sec);
+    std::size_t vacuumMinIntervalSec() const { return m_vacuum_min_interval_sec.load(); }
+    std::uint64_t vacuumTriggerCount() const { return m_vacuum_trigger_count.load(); }
+    std::uint64_t vacuumExecuteCount() const { return m_vacuum_execute_count.load(); }
+    std::uint64_t vacuumCooldownSkipCount() const { return m_vacuum_cooldown_skip_count.load(); }
+    std::uint64_t writeConflictCount() const { return m_write_conflict_count.load(); }
+    TxnRuntimeStats runtimeStats() const;
     bool vacuumRunning() const { return m_vacuum_running.load(); }
 
     // Prefix for <table>.bin lock paths (same as ShellState::data_dir). Empty => cwd-relative names.
@@ -106,6 +122,7 @@ private:
     newdb::WalManager* ensureWal();
     void maybeCompactWalAfterCommit();
     void persistWalsnHighWaterUnlocked(newdb::WalManager* wm);
+    void clearWriteIntents();
     std::uint64_t wal_compact_max_bytes{4ull * 1024ull * 1024ull};
     
     // 事务状态
@@ -134,8 +151,15 @@ private:
     std::unordered_set<std::string> m_vacuum_pending;
     std::function<void(const std::string&)> m_vacuum_callback;
     std::atomic<std::size_t> m_vacuum_ops_threshold{300};
+    std::atomic<std::size_t> m_vacuum_min_interval_sec{30};
     std::atomic<std::size_t> m_vacuum_op_counter{0};
+    std::atomic<std::uint64_t> m_vacuum_trigger_count{0};
+    std::atomic<std::uint64_t> m_vacuum_execute_count{0};
+    std::atomic<std::uint64_t> m_vacuum_cooldown_skip_count{0};
+    std::atomic<std::uint64_t> m_write_conflict_count{0};
+    std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_vacuum_last_run;
 
     std::string m_workspace_root;
     std::string m_active_table;
+    std::unordered_set<std::string> m_reserved_write_keys;
 };

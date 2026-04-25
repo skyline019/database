@@ -1,0 +1,167 @@
+\section{WAL：记录格式、写入线程、分段与恢复}
+
+对应实现：\fpath{newdb/src/wal_manager.cpp}、\fpath{newdb/src/wal_codec.cpp}
+
+\subsection{关键代码段：append\_record 如何分配 LSN 并计算校验}
+
+\begin{lstlisting}[language=C++,caption={append\_record：构造 header + payload + checksum（节选）}]
+hdr.magic = 0x57414C30;
+hdr.lsn = next_lsn_.fetch_add(1) + 1;
+hdr.txn_id = txn_id;
+hdr.payload_len = (uint32_t)payload.size();
+hdr.type = (uint8_t)op;
+hdr.checksum = compute_checksum(&hdr, payload.data(), (uint32_t)payload.size());
+\end{lstlisting}
+
+要点：
+
+\begin{itemize}
+  \item \textbf{LSN 分配是并发安全的}：\texttt{next\_lsn\_} 是原子计数器，多线程调用也能得到全序 LSN。
+  \item \textbf{checksum 覆盖范围}：header（除 checksum 字段）+ payload。恢复时先读 header/payload，再验证 checksum，失败则停止回放并报错。
+\end{itemize}
+
+\subsection{记录组成：Header + Payload + Checksum}
+
+每条 WAL 记录由固定头与可选 payload 组成：
+
+\begin{itemize}
+  \item \textbf{magic}：常量 \texttt{0x57414C30}，用于快速识别；
+  \item \textbf{lsn}：单调递增的日志序列号；
+  \item \textbf{txn\_id}：事务 id；
+  \item \textbf{payload\_len}：payload 长度；
+  \item \textbf{type}：操作类型（INSERT/UPDATE/DELETE/COMMIT/ROLLBACK/CHECKPOINT/...）；
+  \item \textbf{checksum}：CRC16-CCITT，覆盖 header(除 checksum 字段) 与 payload。
+\end{itemize}
+
+其中 checksum 计算使用 CCITT 多项式，作为轻量一致性检查。
+
+\subsection{Payload 编码：table + row fields}
+
+payload 的二进制布局由 \texttt{wal\_codec} 定义：
+
+\begin{itemize}
+  \item \texttt{u16 table\_name\_len} + table name bytes
+  \item 若为行操作（INSERT/UPDATE/DELETE）：
+    \begin{itemize}
+      \item \texttt{u32 row\_id}
+      \item \texttt{u32 row\_payload\_len}
+      \item row payload bytes（由 tuple codec 编码得到）
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{关键代码段：payload 编码（table + row id + row payload）}
+
+\begin{lstlisting}[language=C++,caption={walcodec::build\_payload 的布局（节选）}]
+append_u16_le((uint16_t)table.size(), out);
+out.insert(out.end(), table.begin(), table.end());
+if (row_id != nullptr) {
+    append_u32_le(*row_id, out);
+    append_u32_le((uint32_t)row_payload->size(), out);
+    out.insert(out.end(), row_payload->begin(), row_payload->end());
+}
+\end{lstlisting}
+
+这说明 WAL payload 是“轻量自描述”的：只编码 table name 与可选的 row 字段；row 的内部结构由 heap payload（tuple codec）负责。
+
+\subsection{写入模型：队列 + writer thread}
+
+\texttt{WalManager::open()} 会启动 writer 线程：
+
+\begin{itemize}
+  \item 前台线程调用 \texttt{append\_record}/\texttt{flush}/\texttt{commit}/\texttt{rollback}；
+  \item 操作被封装为 \texttt{QueuedWalOp} 进入队列；
+  \item writer 线程串行写入文件，并通过 promise/future 把结果返回给调用方。
+\end{itemize}
+
+这样做的好处是：写入顺序天然序列化，且调用方可以同步等待“写入完成/刷盘完成”的结果。
+
+\subsubsection{关键代码段：enqueue\_and\_wait（同步等待写入结果）}
+
+\begin{lstlisting}[language=C++,caption={入队并等待 writer 返回 Status（节选）}]
+auto done = std::make_shared<std::promise<Status>>();
+auto fut = done->get_future();
+op.done = done;
+{
+    std::lock_guard<std::mutex> lk(queue_mu_);
+    queue_.push_back(std::move(op));
+}
+queue_cv_.notify_one();
+return fut.get();
+\end{lstlisting}
+
+该模式把 writer 线程内部错误（例如 \texttt{fwrite} 失败）可靠地传播到调用方，避免“写入失败但上层以为成功”。
+
+\subsection{刷盘策略（durability）}
+
+\texttt{flush\_durable} 支持不同 sync 模式：
+
+\begin{itemize}
+  \item \textbf{Off}：仅 \texttt{fflush}；
+  \item \textbf{Normal}：按时间间隔节流 \texttt{fsync}/\texttt{\_commit}；
+\end{itemize}
+
+在 Windows 上使用 \texttt{\_commit(\_fileno(fp))}，在类 Unix 上使用 \texttt{fsync(fileno(fp))}。
+
+\subsubsection{关键代码段：Normal 模式的节流刷盘}
+
+\begin{lstlisting}[language=C++,caption={flush\_durable：Normal 模式的时间间隔判断（节选）}]
+if (sync_mode_ == WalSyncMode::Normal) {
+    uint64_t now_ms = monotonic_ms();
+    if (last_durable_flush_ms_ != 0 &&
+        now_ms - last_durable_flush_ms_ < normal_sync_interval_ms_) {
+        return Status::Ok();
+    }
+    last_durable_flush_ms_ = now_ms;
+}
+\end{lstlisting}
+
+这是一种“吞吐优先”策略：在高频写入下减少 \texttt{fsync/\_commit} 次数，但会扩大崩溃丢失窗口（取决于 interval）。
+
+\subsection{分段（segment rotate）}
+
+当 WAL 文件大小超过阈值时，自动滚动到新段：
+
+\begin{itemize}
+  \item 基础段为 \texttt{db.wal}
+  \item 后续段为 \texttt{db.wal.000001}、\texttt{db.wal.000002} ...
+\end{itemize}
+
+阈值通过环境变量 \texttt{NEWDB\_WAL\_SEGMENT\_BYTES} 设置。
+
+\subsection{恢复（recovery）}
+
+恢复逻辑的关键点：
+
+\begin{itemize}
+  \item 可为每个段建立稀疏 offset 索引（每 128 条采样）以支持按最小 LSN seek；
+  \item 按事务聚合：同一事务内同一 \texttt{row\_id} 的多次写覆盖保存最后一次；
+  \item COMMIT 时统一 apply 到 \texttt{HeapTable}，ROLLBACK 则丢弃；
+  \item 最终 \texttt{rebuild\_indexes(schema)} 以获得查询索引。
+\end{itemize}
+
+\subsubsection{关键代码段：按事务聚合，commit 时统一 apply}
+
+\begin{lstlisting}[language=C++,caption={recover：PendingTxnOps + COMMIT apply（节选）}]
+// 事务内对同一 row_id 的操作，保留最后一次
+PendingTxnOps& pending = txn_ops[hdr.txn_id];
+pending.by_row_id[row.id] = { op, std::move(row) };
+
+// COMMIT：对该 txn 的所有最终行操作执行 apply
+for (auto& [row_id, op_row] : it->second.by_row_id) {
+    WalOp op = op_row.first;
+    Row& row = op_row.second;
+    if (op == INSERT || op == UPDATE) { upsert_into_table(row); }
+    if (op == DELETE) { append_tombstone(row.id); }
+}
+txn_ops.erase(it);
+\end{lstlisting}
+
+该实现的含义是：\textbf{事务原子性通过“commit 时才生效”实现}；在 commit 之前读到 WAL 的中间状态也不会被 apply 到表中。
+
+可用环境变量：
+
+\begin{itemize}
+  \item \texttt{NEWDB\_RECOVER\_ENABLE\_OFFSET\_SEEK=1}
+  \item \texttt{NEWDB\_RECOVER\_MIN\_LSN=<u64>}
+\end{itemize}
+

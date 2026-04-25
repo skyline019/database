@@ -1,0 +1,430 @@
+\section{整体架构与数据流}
+
+本章节给出一个从“字节落盘”到“可查询表”的全链路视图，帮助后续章节把局部实现放回整体语境。
+
+\subsection{核心对象关系}
+
+\begin{itemize}
+  \item \textbf{Heap Page}：固定大小页，保存多条 record 的 payload，并带 CRC32 校验。
+  \item \textbf{Heap File（.bin）}：由一系列 Heap Page 组成；写入时追加 record 到最后一页，满页则新增页。
+  \item \textbf{Row}：逻辑行（\texttt{id} + \texttt{attrs}），payload 编码为一组 \texttt{key=value} tuple。
+  \item \textbf{HeapRowFinger}：行的物理定位（页号 + 页内偏移 + payload 长度），用于懒加载/快速定位。
+  \item \textbf{RecordMetadata}：从 Row 的内部字段解析出的 MVCC 元数据（created/deleted lsn, txn id）。
+  \item \textbf{HeapTable}：内存态表，既可承载物化 rows，也可承载懒加载视图 + fingers。
+  \item \textbf{WAL}：按 LSN 追加的二进制日志，支持 commit/rollback/checkpoint 控制记录与恢复回放。
+  \item \textbf{Session / C API}：对外会话层，负责 schema sidecar 装载、heap 缓存、快照设置与命令执行封装。
+\end{itemize}
+
+\subsection{关键数据结构总览（字段语义 / 不变量 / 生命周期）}
+
+本小节集中回答“每个结构体到底有什么字段、字段代表什么、哪些约束必须满足”，避免在后续章节里碎片化理解。
+
+\subsubsection{Row：逻辑行（内存表示）}
+
+定义见 \fpath{newdb/include/newdb/row.h}：
+
+\begin{lstlisting}[language=C++,caption={Row（原型）}]
+struct Row {
+    int id{0};
+    std::unordered_map<std::string, std::string> attrs;
+    std::vector<std::string> values;
+};
+\end{lstlisting}
+
+字段解释与不变量：
+
+\begin{itemize}
+  \item \textbf{id}：逻辑主键的默认选择。大量路径把 \texttt{id==0} 视作“无效/未初始化”（例如解码失败或空 row），因此业务侧应避免使用 0 作为合法 id。
+  \item \textbf{attrs}：稀疏的键值属性表（\texttt{string->string}）。既承载用户字段，也承载系统内部字段（例如 \texttt{\_\_deleted}、\texttt{\_\_mvcc\_*}）。
+  \item \textbf{values}：按 schema 的列序缓存（“列式缓存”）。它不是存储真源：由 \texttt{HeapTable::rebuild\_indexes(schema)} 从 \texttt{attrs} 填充，用于排序/投影时减少 map 查找与字符串构造。
+\end{itemize}
+
+性能含义：
+
+\begin{itemize}
+  \item \texttt{attrs} 的哈希表适合稀疏字段，但频繁访问某个列会产生重复 hash 查找；
+  \item \texttt{values} 把热点列访问降为数组下标，但需要维护 \texttt{attr\_index} 与 schema 一致性（见 HeapTable 章节）。
+\end{itemize}
+
+\subsubsection{HeapRowFinger：物理定位（懒加载的核心索引单元）}
+
+定义见 \fpath{newdb/include/newdb/heap_storage.h}：
+
+\begin{lstlisting}[language=C++,caption={HeapRowFinger（原型）}]
+struct HeapRowFinger {
+    std::uint64_t page_no{};
+    std::uint32_t byte_off_in_page{};
+    std::uint32_t payload_len{};
+};
+\end{lstlisting}
+
+语义与约束：
+
+\begin{itemize}
+  \item \textbf{page\_no}：页号（从 0 开始），必须满足 \(\texttt{page\_no} < \texttt{num\_pages}\)。
+  \item \textbf{byte\_off\_in\_page}：页内 payload 起始偏移。
+  \item \textbf{payload\_len}：payload 长度。
+  \item \textbf{边界约束}：必须满足 \(\texttt{byte\_off\_in\_page} + \texttt{payload\_len} \le \texttt{page\_size}\)，否则解码会越界。
+\end{itemize}
+
+它相当于“堆文件里某一条 record 的物理地址”。\texttt{page\_io::load\_heap\_file} 扫描文件时会对同一个 \texttt{row.id} 不断覆盖 finger，从而形成“最新版本视图”。
+
+\subsubsection{RecordMetadata：MVCC 元数据（与 slot 对齐存放）}
+
+定义见 \fpath{newdb/include/newdb/mvcc.h}：
+
+\begin{lstlisting}[language=C++,caption={RecordMetadata（原型）}]
+struct RecordMetadata {
+    uint64_t created_lsn = 0;
+    uint64_t deleted_lsn = 0;
+    uint64_t txn_id = 0;
+    bool is_tombstone = false;
+};
+\end{lstlisting}
+
+字段解释：
+
+\begin{itemize}
+  \item \textbf{created\_lsn}：该版本创建时的逻辑时间（与 snapshot lsn 比较）。
+  \item \textbf{deleted\_lsn}：删除生效的逻辑时间；0 表示未删除。
+  \item \textbf{txn\_id}：创建该版本的事务 id；用于“读不见未提交写”。
+  \item \textbf{is\_tombstone}：是否墓碑行；通常由 \texttt{\_\_deleted=1} 推导。
+\end{itemize}
+
+生命周期与对齐方式：
+
+\begin{itemize}
+  \item 物化形态：\texttt{HeapTable::row\_meta[i]} 与 \texttt{rows[i]} 对齐；
+  \item 懒加载形态：\texttt{HeapTable::row\_meta[slot]} 与 \texttt{heap\_fingers\_[slot]} 对齐。
+\end{itemize}
+
+\subsubsection{TableSchema：会话级 schema（类型与比较语义的来源）}
+
+定义见 \fpath{newdb/include/newdb/schema.h}：
+
+\begin{lstlisting}[language=C++,caption={TableSchema（核心字段节选）}]
+struct TableSchema {
+    std::string table_label;
+    std::vector<AttrMeta> attrs;
+    std::string primary_key{"id"};
+    std::uint32_t heap_format_version{0};
+};
+\end{lstlisting}
+
+关键语义：
+
+\begin{itemize}
+  \item \textbf{attrs}：声明型字段列表（名字 + 类型）。注意：存储层允许出现“schema 未声明的额外 attrs”（\texttt{validate\_storage\_row} 只校验已声明字段能否解析）。
+  \item \textbf{primary\_key}：主键字段名；若无效会回退到 \texttt{id}。
+  \item \textbf{compare\_attr}：排序/谓词比较的权威入口。对 int/double/bool 会尝试数值化比较，失败则回退到字符串比较。
+\end{itemize}
+
+\subsubsection{HeapTable：逻辑表（双形态 + 多索引 + 可见性过滤）}
+
+定义见 \fpath{newdb/include/newdb/heap_table.h}。最关键的是它同时承载两种表示：
+
+\begin{itemize}
+  \item \textbf{物化}：\texttt{rows} 非空，索引值指向 \texttt{rows} 下标；
+  \item \textbf{懒加载}：\texttt{heap\_file\_ != nullptr} 且 \texttt{rows} 为空，索引值指向 \texttt{heap\_fingers\_} slot，需要 \texttt{decode\_heap\_slot} 才能得到 Row。
+\end{itemize}
+
+因此对外“看起来都是表”，对内“既可能是内存表也可能是磁盘表视图”。这一点直接决定了很多函数的分支与性能特征（详见 HeapTable 章节）。
+
+\subsubsection{WAL 相关：WalRecordHeader / QueuedWalOp}
+
+\texttt{WalRecordHeader} 定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+
+\begin{lstlisting}[language=C++,caption={WalRecordHeader（原型）}]
+struct WalRecordHeader {
+    uint32_t magic = 0x57414C30;  // "WAL0"
+    uint64_t lsn = 0;
+    uint64_t txn_id = 0;
+    uint32_t payload_len = 0;
+    uint16_t checksum = 0;
+    uint8_t  type = 0;  // WalOp
+    uint8_t  flags = 0;
+} __attribute__((packed));
+\end{lstlisting}
+
+注意点：
+
+\begin{itemize}
+  \item \textbf{packed}：为确保 on-disk layout 稳定，header 被打包；这要求读写时严格按该结构体大小序列化。
+  \item \textbf{checksum 的覆盖范围}：实现里会跳过 checksum 字段本身，覆盖 header 其余部分与 payload。
+  \item \textbf{type/flags}：\texttt{type} 存 \texttt{WalOp}，\texttt{flags} 预留（方便未来扩展）。
+\end{itemize}
+
+\texttt{QueuedWalOp} 是 \texttt{WalManager} 的内部队列单元（同一头 + payload + flush 标记 + promise）：
+它决定了 WAL 写入天然串行，并能把 writer 线程错误同步回传给调用方（见 WAL 章节）。
+
+\subsubsection{WalDecodedRecord：WAL 解码后的“统一记录视图”（用于读取/调试）}
+
+定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+
+\begin{lstlisting}[language=C++,caption={WalDecodedRecord（原型）}]
+struct WalDecodedRecord {
+    uint64_t lsn{0};
+    uint64_t txn_id{0};
+    WalOp op{WalOp::CHECKPOINT};
+    std::string table;
+    Row row;
+    bool has_row{false};
+};
+\end{lstlisting}
+
+生命周期（在哪填充/消费）：
+
+\begin{itemize}
+  \item \textbf{填充}：\texttt{WalManager::read\_all\_records(schema, out)} 遍历所有 WAL segment，
+    逐条读取 header+payload、校验 checksum、解码 table/row 字段，构造 \texttt{WalDecodedRecord} push 到 \texttt{out}。
+  \item \textbf{消费}：主要用于“把 WAL 当成可读流”输出/调试/回放检查；它不是恢复主路径的中间表示（恢复主路径用 PendingTxnOps 聚合）。
+\end{itemize}
+
+设计要点：
+
+\begin{itemize}
+  \item \textbf{has\_row} 把控制记录与行记录区分开：COMMIT/ROLLBACK/CHECKPOINT 等控制记录不带 row payload。
+  \item \textbf{row 的 schema 语义}：row 的 payload 解码不强依赖 schema（tuple codec 是 key=value），但某些上层展示/校验可能用 schema 做类型解释。
+\end{itemize}
+
+\subsubsection{WalRecoveryStats：恢复过程的可观测性指标（性能/正确性排查入口）}
+
+定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+
+\begin{lstlisting}[language=C++,caption={WalRecoveryStats（字段节选）}]
+struct WalRecoveryStats {
+    std::uint64_t records_read{0};
+    std::uint64_t checksum_failures{0};
+    std::uint64_t decode_failures{0};
+    std::uint64_t apply_count{0};
+    std::uint64_t scanned_segments{0};
+    std::uint64_t skipped_segments{0};
+    std::uint64_t indexed_records{0};
+    std::uint64_t indexed_segments{0};
+    std::uint64_t indexed_offsets{0};
+    std::uint64_t seek_skipped_records{0};
+    std::uint64_t begin_ms{0};
+    std::uint64_t end_ms{0};
+    std::uint64_t elapsed_ms() const { ... }
+};
+\end{lstlisting}
+
+生命周期（在哪填充/消费）：
+
+\begin{itemize}
+  \item \textbf{填充}：\texttt{WalManager::recover(out\_table, schema, stats)} 在恢复全流程中持续更新统计值：
+    \begin{itemize}
+      \item 索引阶段：为 segment 构建稀疏 offset 索引时更新 \texttt{indexed\_*}；
+      \item 扫描阶段：逐段读取记录时更新 \texttt{records\_read/scanned\_segments}；
+      \item 异常与容错：checksum/解码失败分别累加，并可能导致提前失败返回；
+      \item apply 阶段：提交事务时更新 \texttt{apply\_count}。
+    \end{itemize}
+  \item \textbf{消费}：调用方可通过 \texttt{last\_recovery\_stats()} 取到最近一次恢复的 stats，用于判断“恢复慢在哪 / 哪类失败最多 / offset seek 是否生效”。
+\end{itemize}
+
+优化与诊断价值：
+
+\begin{itemize}
+  \item \textbf{records\_read vs apply\_count}：若差距巨大，可能意味着大量控制记录/回滚事务/被过滤 table 的记录；
+  \item \textbf{indexed\_offsets / seek\_skipped\_records}：用于评估 offset seek 的收益（尤其是设置了 \texttt{NEWDB\_RECOVER\_MIN\_LSN} 时）。
+\end{itemize}
+
+\subsubsection{WalTxn：事务 RAII（保证异常路径也能 rollback）}
+
+定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+
+\begin{lstlisting}[language=C++,caption={WalTxn（原型）}]
+class WalTxn {
+public:
+    WalTxn(WalManager& wal, uint64_t txn_id);
+    ~WalTxn();
+    void commit();
+    void rollback();
+    uint64_t txn_id() const;
+private:
+    WalManager* wal_;
+    uint64_t txn_id_;
+    bool active_;
+};
+\end{lstlisting}
+
+生命周期（在哪填充/消费）：
+
+\begin{itemize}
+  \item \textbf{创建}：业务侧在开始事务时构造 \texttt{WalTxn}（内部会调用 \texttt{wal.begin\_transaction(txn\_id)}）。
+  \item \textbf{提交}：调用 \texttt{commit()} 追加 COMMIT 记录并令 \texttt{active\_=false}。
+  \item \textbf{异常路径}：若对象析构时仍 \texttt{active\_==true}，析构函数会自动 \texttt{rollback}（追加 ROLLBACK 记录）。
+\end{itemize}
+
+不变量与误用风险：
+
+\begin{itemize}
+  \item \textbf{单次提交/回滚}：\texttt{commit/rollback} 之后 \texttt{active\_} 变 false，应避免二次调用造成重复控制记录。
+  \item \textbf{作用域即事务边界}：这要求调用方把 WalTxn 放在“事务应结束”的同一作用域内，避免长生命周期导致锁/资源长期占用（取决于上层实现）。
+\end{itemize}
+
+\subsubsection{MVCCSnapshot：读视图的载体（被 HeapTable 消费的关键对象）}
+
+定义见 \fpath{newdb/include/newdb/mvcc.h}：
+
+\begin{lstlisting}[language=C++,caption={MVCCSnapshot（原型）}]
+struct MVCCSnapshot {
+    uint64_t snapshot_lsn = 0;
+    uint64_t min_visible_lsn = 0;
+    std::unordered_set<uint64_t> active_txns;
+    bool is_visible(uint64_t created_lsn, uint64_t deleted_lsn, uint64_t creator_txn) const;
+    bool is_visible(const RecordMetadata& meta) const;
+};
+\end{lstlisting}
+
+生命周期（在哪填充/消费）：
+
+\begin{itemize}
+  \item \textbf{填充}：\texttt{MVCCManager::create\_snapshot()} 持锁复制 \texttt{active\_txns\_}，
+    并用 \texttt{wal.current\_lsn()} 作为 \texttt{snapshot\_lsn}（再带上 \texttt{min\_visible\_lsn} 水位线）。
+  \item \textbf{消费}：
+    \begin{itemize}
+      \item \texttt{Session::set\_snapshot(snapshot)} 把快照写入 \texttt{HeapTable::active\_snapshot}；
+      \item \texttt{HeapTable::is\_row\_visible(slot,row)} 读取 \texttt{row\_meta[slot]} 并调用 \texttt{snapshot.is\_visible(meta)}；
+      \item 因此“建索引/排序/查找”等读路径都会受到该快照的过滤影响。
+    \end{itemize}
+  \item \textbf{销毁}：快照是值对象（包含一个 \texttt{unordered\_set} 拷贝），通常随 session/调用栈生命周期结束自动释放。
+\end{itemize}
+
+性能含义：
+
+\begin{itemize}
+  \item \textbf{active\_txns 的拷贝成本}：创建快照是 \(O(|active\_txns|)\) 的（复制集合）。
+    若未来活跃事务数大，可能需要更紧凑表示（例如 epoch/位图/范围）或共享结构。
+  \item \textbf{可见性检查的热度}：\texttt{is\_row\_visible} 会在建索引、排序、扫描中被大量调用，
+    这要求 \texttt{row\_meta} 与 slot 对齐且访问尽量 cache-friendly。
+\end{itemize}
+
+\subsubsection{HeapFileReadView：只读堆文件视图（mmap/stdio 抽象）}
+
+定义见 \fpath{newdb/include/newdb/heap_file_read_view.h}：
+
+\begin{lstlisting}[language=C++,caption={HeapFileReadView（接口节选）}]
+class HeapFileReadView {
+public:
+    static std::shared_ptr<HeapFileReadView> try_open(const char* path);
+    std::size_t page_size() const;
+    std::size_t num_pages() const;
+    const unsigned char* page_data(std::size_t page_no) const; // nullptr if not mmap-backed
+    bool read_page_copy(std::size_t page_no, unsigned char* buf) const; // always works in range
+};
+\end{lstlisting}
+
+关键语义：
+
+\begin{itemize}
+  \item \textbf{两种后端统一}：如果平台支持且映射成功，\texttt{page\_data} 直接返回映射指针；否则返回 \texttt{nullptr}，上层改用 \texttt{read\_page\_copy}。
+  \item \textbf{对 HeapTable 的影响}：懒加载形态下，\texttt{decode\_heap\_slot} 会优先走 \texttt{page\_data}（零拷贝），否则走单页缓存 + \texttt{read\_page\_copy}（每页一次 I/O）。
+  \item \textbf{生命周期}：这是只读视图，析构时会 unmap（若曾映射）；因此持有它的 \texttt{shared\_ptr} 必须覆盖整个“懒加载表”的使用期。
+\end{itemize}
+
+\subsubsection{HeapLoadOptions：装载策略开关}
+
+定义见 \fpath{newdb/include/newdb/heap_storage.h}：
+
+\begin{lstlisting}[language=C++,caption={HeapLoadOptions（原型）}]
+struct HeapLoadOptions {
+    bool lazy_decode{false};
+};
+\end{lstlisting}
+
+它把 \texttt{load\_heap\_file} 的行为切成两种模式：
+
+\begin{itemize}
+  \item \textbf{lazy\_decode=false（默认）}：物化所有 Row 到 \texttt{HeapTable::rows}；
+  \item \textbf{lazy\_decode=true}：只构建 finger + 元数据，并用 \texttt{HeapFileReadView} 提供按需解码。
+\end{itemize}
+
+\subsubsection{heap\_page::RecordSlice：页内记录切片（无需拷贝）}
+
+定义见 \fpath{newdb/include/newdb/heap_page.h}：
+
+\begin{lstlisting}[language=C++,caption={RecordSlice（原型）}]
+struct RecordSlice {
+    unsigned slot_index{};
+    const unsigned char* payload{nullptr};
+    std::size_t payload_length{0};
+};
+\end{lstlisting}
+
+它代表“页内某条 record 的视图”，而不是拷贝：
+
+\begin{itemize}
+  \item \textbf{payload 指针生命周期}：只在访问该页缓冲（或 mmap 映射）有效期间有效；回调不能把指针保存到页之外长期使用。
+  \item \textbf{slot\_index}：是 slot 表中的逻辑编号，不保证与 payload 偏移有序；遍历实现会按偏移排序后回调（见 Heap Page 章节）。
+\end{itemize}
+
+\subsubsection{Status：显式错误载体（跨层传播的“最小公约数”）}
+
+定义见 \fpath{newdb/include/newdb/error.h}：
+
+\begin{lstlisting}[language=C++,caption={Status（原型）}]
+struct Status {
+    bool ok{true};
+    std::string message;
+    static Status Ok();
+    static Status Fail(std::string msg);
+    explicit operator bool() const { return ok; }
+};
+\end{lstlisting}
+
+设计意图：
+
+\begin{itemize}
+  \item \textbf{无异常依赖}：底层 I/O/解码/校验都用 \texttt{Status} 返回，避免异常跨 ABI/线程边界。
+  \item \textbf{调用习惯统一}：\texttt{if (!st.ok) return st;} 这种风格贯穿 heap/WAL/session。
+\end{itemize}
+
+\subsubsection{Session：会话对象（线程安全边界明确）}
+
+定义见 \fpath{newdb/include/newdb/session.h}。它的“关键点”不是字段数量，而是并发语义：
+
+\begin{itemize}
+  \item \textbf{mut\_ 保护范围}：保护 \texttt{cache\_valid}、schema 重载副作用、以及 \texttt{table} 的一致视图。
+  \item \textbf{mutable\_heap 的危险性}：它只在函数调用期间持锁，返回的 \texttt{HeapTable*} 不能跨并发 \texttt{reload/reset/invalidate} 安全使用。
+  \item \textbf{lock\_heap 的正确用法}：返回 RAII 的 \texttt{HeapAccess}，持锁直到对象析构，从而保证指针在作用域内安全。
+\end{itemize}
+
+这实际上是“把并发边界写进类型系统/注释契约里”，避免误用。
+
+\subsubsection{Catalog：数据库目录的文件系统视图}
+
+定义见 \fpath{newdb/include/newdb/catalog.h}：
+
+\begin{itemize}
+  \item \textbf{root\_}：数据库根目录（可为空则用当前目录回退）；
+  \item \textbf{current\_db\_}：当前选中的数据库名；
+  \item \textbf{.dbinfo}：以 sidecar 文件标记“这是一个 db 目录”（见实现）。
+\end{itemize}
+
+它不是存储引擎核心热路径，但决定了“数据文件与工作区”的组织方式，是上层命令/工具正确工作的前提。
+
+\subsection{读路径（加载与查询）}
+
+\begin{enumerate}
+  \item 读取 \texttt{.attr} sidecar 得到 \texttt{TableSchema}（字段类型、主键、heap 格式版本）。
+  \item 扫描 \texttt{.bin}：逐页 CRC 校验、逐 record 解码，按 \texttt{row.id} 合并出“最新版本”的 \texttt{HeapRowFinger}。
+  \item 生成 \texttt{HeapTable}：
+    \begin{itemize}
+      \item 懒加载：保留只读视图（可 mmap）+ fingers + 元数据；
+      \item 物化：一次性解码所有 payload 成 rows，然后构建索引。
+    \end{itemize}
+  \item 查询：走 \texttt{index\_by\_id} / \texttt{index\_by\_pk\_value} 或排序缓存；在关键路径上应用 MVCC 可见性过滤。
+\end{enumerate}
+
+\subsection{写路径（heap 与 WAL）}
+
+当前代码中存在两条可并行理解的写入机制：
+
+\begin{itemize}
+  \item \textbf{直接写 heap 文件}：把 Row 编码后追加到最后一页（满则新页），并更新页校验。
+  \item \textbf{写 WAL}：把行操作编码到 WAL payload，按事务聚合，在恢复时回放到 HeapTable。
+\end{itemize}
+
+两者可组合为“WAL 保障持久性 + heap 作为主存储”（是否已完整打通取决于上层 demo/命令层如何调用）。
+

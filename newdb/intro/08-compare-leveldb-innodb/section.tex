@@ -1,0 +1,265 @@
+\section{附录：与 LevelDB / InnoDB 底层结构对比}
+
+本附录从“存储组织、索引结构、日志与恢复、并发控制、空间管理、读写放大”六个维度，对比
+\textbf{newdb}、\textbf{LevelDB}、\textbf{InnoDB} 的底层结构差异。目标不是简单判断优劣，而是帮助定位：
+当前 newdb 的工程形态更接近哪些设计取舍，以及后续演进时可借鉴的方向。
+
+\subsection{一图总览（结构定位）}
+
+\begin{itemize}
+  \item \textbf{newdb}：页式 heap 文件 + append 风格记录版本 + 可选懒加载 + WAL + 基础 MVCC 快照过滤。
+  \item \textbf{LevelDB}：LSM-Tree（MemTable + Immutable MemTable + SSTable 多层合并）+ WAL。
+  \item \textbf{InnoDB}：B+Tree 聚簇存储（Clustered Index）+ 二级索引 + Redo/Undo + Buffer Pool + 完整事务系统。
+\end{itemize}
+
+\subsection{1) 存储组织（Data Layout）}
+
+\subsubsection{newdb}
+\begin{itemize}
+  \item 主数据是 \fpath{.bin} heap 文件，按固定页（Waterfall page）组织。
+  \item 页内用 header + payload + slot 表管理记录，不为每条记录显式存长度（通过 offset 差分恢复）。
+  \item 同一 \texttt{row.id} 的新版本以追加方式写入，装载时合并为“最新视图”。
+\end{itemize}
+
+\subsubsection{LevelDB}
+\begin{itemize}
+  \item 写入先进入 MemTable（跳表），随后刷成 SSTable（不可变有序文件）。
+  \item 多层 SSTable 通过 compaction 合并，形成典型 LSM 分层结构。
+  \item 逻辑删除依赖 tombstone 与 compaction 清理，不是“原地删除”。
+\end{itemize}
+
+\subsubsection{InnoDB}
+\begin{itemize}
+  \item 以页为单位管理表空间，主数据组织在聚簇索引 B+Tree 中。
+  \item 数据行按主键顺序存放；二级索引叶子保存主键值回表。
+  \item Buffer Pool 承担页缓存与脏页管理，刷盘由后台线程调度。
+\end{itemize}
+
+\subsection{2) 索引与查询路径}
+
+\begin{itemize}
+  \item \textbf{newdb}：内存态 hash 索引（\texttt{index\_by\_id} / \texttt{index\_by\_pk\_value}）+ 排序缓存；
+    懒加载时索引值指向 slot，需要二次解码。
+  \item \textbf{LevelDB}：查询路径是 MemTable + Immutable + 多层 SSTable（Bloom Filter + 索引块 + 数据块）；
+    范围查询友好，点查性能受层数与 compaction 状态影响。
+  \item \textbf{InnoDB}：B+Tree 原生支持点查/范围查；有自适应哈希索引等优化，整体查询语义最完整。
+\end{itemize}
+
+\subsection{3) WAL / Redo 与恢复模型}
+
+\subsubsection{newdb}
+\begin{itemize}
+  \item WAL 记录头（LSN/txn/type/checksum）+ payload（table + row fields）。
+  \item writer 线程串行写入，支持 sync mode 与 segment rotate。
+  \item 恢复时按事务聚合，COMMIT 才 apply；提供 recovery stats 便于诊断。
+\end{itemize}
+
+\subsubsection{LevelDB}
+\begin{itemize}
+  \item WAL 主要保障 MemTable 崩溃恢复；重启时先重放 WAL，再恢复到可服务状态。
+  \item 核心一致性更多依赖 LSM 不可变文件与 manifest 元数据维护。
+\end{itemize}
+
+\subsubsection{InnoDB}
+\begin{itemize}
+  \item Redo Log（物理/生理日志）保证持久性；Undo Log 支持回滚与 MVCC 可见性。
+  \item Checkpoint、Doublewrite、Crash Recovery 机制成熟，恢复语义最完整。
+\end{itemize}
+
+\subsection{4) 并发控制与 MVCC 深度}
+
+\begin{itemize}
+  \item \textbf{newdb}：有 \texttt{MVCCSnapshot} 与可见性判断（created/deleted/active\_txns），
+    但整体更偏“读视图过滤”，尚未形成 InnoDB 那种完整 undo 版本链体系。
+  \item \textbf{LevelDB}：以单机 KV 引擎语义为主，事务与复杂隔离级别不是其核心目标。
+  \item \textbf{InnoDB}：完整事务隔离（RC/RR 等）、行锁/间隙锁、undo 版本链，MVCC 与锁协作成熟。
+\end{itemize}
+
+\subsection{5) 空间回收与长期运行形态}
+
+\begin{itemize}
+  \item \textbf{newdb}：append + tombstone 模式下，历史版本可能膨胀；当前主要靠装载合并与逻辑过滤。
+  \item \textbf{LevelDB}：依赖 compaction 回收冗余版本与 tombstone，是系统常态机制。
+  \item \textbf{InnoDB}：页分裂/合并、purge、后台线程协同管理，空间回收策略复杂但长期稳定。
+\end{itemize}
+
+\subsection{6) 写放大 / 读放大（工程后果）}
+
+\begin{itemize}
+  \item \textbf{newdb}：
+    \begin{itemize}
+      \item 写放大较低（追加写友好）；
+      \item 若缺少周期性 compact，读路径可能因历史版本/解码变慢。
+    \end{itemize}
+  \item \textbf{LevelDB}：
+    \begin{itemize}
+      \item 写放大来自 compaction；
+      \item 通过顺序写与批量合并换取高吞吐。
+    \end{itemize}
+  \item \textbf{InnoDB}：
+    \begin{itemize}
+      \item 写路径复杂（redo + page flush + 二级索引维护）；
+      \item 换来更强事务语义与更均衡的通用查询能力。
+    \end{itemize}
+\end{itemize}
+
+\subsection{7) 对 newdb 的演进启发（可落地）}
+
+\begin{itemize}
+  \item \textbf{借鉴 LevelDB}：补“后台 compact/merge”机制，减少 tombstone 与历史版本堆积。
+  \item \textbf{借鉴 InnoDB}：若目标走 OLTP，需补全 undo 版本链、锁管理与更强恢复语义。
+  \item \textbf{保持 newdb 特色}：继续强化懒加载 + 页级顺序访问 + 轻量 WAL 的可观测性（stats），
+    适配教学/实验/中小负载场景。
+\end{itemize}
+
+\subsection{8) 结论（结构层面）}
+
+\begin{itemize}
+  \item newdb 当前更像“\textbf{页式存储 + LSM/OLTP 中间态}”：
+    已有 WAL、快照、页布局与懒加载，但尚未形成 InnoDB 级完整事务存储栈，也未引入 LevelDB 式系统性 compaction。
+  \item 若追求简单可控与可读性，现结构非常适合继续迭代；
+    若追求长期高并发生产语义，需要在“版本回收 + 事务子系统 + 后台调度”上补关键能力。
+\end{itemize}
+
+\subsection{9) 优劣评价（工程决策视角）}
+
+\subsubsection{newdb}
+\textbf{优势}
+\begin{itemize}
+  \item 结构清晰、可读性高：页结构、WAL、快照可见性链路短，便于教学与快速实验。
+  \item 追加写友好：直接 append 到 heap 页，写路径相对轻量。
+  \item 可观测性不错：WAL 恢复统计（stats）和显式状态返回有助于排障。
+\end{itemize}
+\textbf{劣势}
+\begin{itemize}
+  \item 缺少系统化后台 compact/purge，长期运行可能出现历史版本与 tombstone 堆积。
+  \item 事务与并发控制深度不足，距离完整 OLTP 引擎还有明显差距。
+  \item 索引体系偏“内存态辅助索引”，对超大规模数据与复杂查询支持有限。
+\end{itemize}
+
+\subsubsection{LevelDB}
+\textbf{优势}
+\begin{itemize}
+  \item LSM 结构对写入吞吐非常友好，顺序写特性突出。
+  \item 实现成熟、工程经验丰富，嵌入式 KV 场景稳定可靠。
+  \item Bloom Filter + 分层 SSTable 设计，在典型 KV 负载下性价比高。
+\end{itemize}
+\textbf{劣势}
+\begin{itemize}
+  \item compaction 带来的写放大与尾延迟需要精细调参。
+  \item 原生事务/隔离能力弱，不适合直接承担复杂关系型事务语义。
+  \item 范围查询与点查性能会受层级状态和 compaction 节奏影响。
+\end{itemize}
+
+\subsubsection{InnoDB}
+\textbf{优势}
+\begin{itemize}
+  \item 事务、MVCC、锁管理、恢复体系完整，适合通用 OLTP 生产场景。
+  \item B+Tree 结构对点查和范围查询都较均衡，SQL 生态完备。
+  \item 长期运行治理能力强（purge/checkpoint/buffer pool 等机制成熟）。
+\end{itemize}
+\textbf{劣势}
+\begin{itemize}
+  \item 架构复杂，学习和调优成本高。
+  \item 写路径与后台机制多，系统开销和维护门槛明显高于轻量引擎。
+  \item 在纯 KV 高写吞吐场景下，不一定优于专门的 LSM 引擎。
+\end{itemize}
+
+\subsubsection{按场景选型建议}
+\begin{itemize}
+  \item \textbf{教学/实验/原型验证}：优先 newdb（可控、可读、易改造）。
+  \item \textbf{单机嵌入式 KV 高写吞吐}：优先 LevelDB（LSM 体系成熟）。
+  \item \textbf{通用事务型业务（SQL + 强一致事务）}：优先 InnoDB。
+\end{itemize}
+
+\subsection{10) 纳入中层（demo/include/tests/tools）后的再评估}
+
+前文 1)\textasciitilde9) 主要基于底层结构。将中层模块纳入后，newdb 的工程画像需要做一次修正：
+
+\subsubsection{A. 架构完整性：从“内核原型”提升为“可用小系统”}
+\begin{itemize}
+  \item \fpath{demo/} 提供了从 CLI 到命令分发、事务协调、查询策略的完整入口链路；
+  \item \fpath{include/} 提供公共契约层（Status/Session/WAL/C API），使模块边界更清晰；
+  \item \fpath{tools/} 补齐了基准与冒烟工具，\fpath{tests/} 补齐了回归与并发护栏。
+\end{itemize}
+结论：newdb 不再只是“底层存储实验”，而是具备了可验证、可演示、可持续迭代的最小数据库工程闭环。
+
+\subsubsection{B. 与 LevelDB/InnoDB 的差距重述（中层视角）}
+\begin{itemize}
+  \item \textbf{相对 LevelDB}：newdb 在“可读性、可教学、可改造”上优势明显；但在大规模长期运行治理（compaction 体系化、尾延迟控制）仍弱。
+  \item \textbf{相对 InnoDB}：newdb 在架构透明度与学习曲线方面更友好；但事务隔离深度、锁子系统、后台调度完整性仍有代际差距。
+\end{itemize}
+换言之，中层增强主要提升了“工程可用性”，并未改变底层机制成熟度的代差结论。
+
+\subsubsection{C. 工程风险再分级（加入中层后）}
+\begin{itemize}
+  \item \textbf{已明显下降的风险}：接口失配风险（include 统一契约）、回归风险（tests 覆盖）、使用门槛风险（demo/tooling）。
+  \item \textbf{仍高的核心风险}：版本回收与空间膨胀、复杂并发语义、长期稳定性与运维自动化。
+\end{itemize}
+
+\subsubsection{D. 选型建议修订（纳入中层能力）}
+\begin{itemize}
+  \item \textbf{newdb 适用边界上移}：从“课程/实验”上移到“教学 + 原型 + 中小规模内部工具型负载（可控场景）”。
+  \item \textbf{仍不建议直接替代}：在高并发强事务生产核心链路上，不建议直接替代 InnoDB；
+    在超大规模嵌入式 KV 连续写场景，不建议直接替代成熟 LSM（如 LevelDB/RocksDB）。
+  \item \textbf{最佳定位}：作为“可解释数据库内核 + 工程化脚手架”平台最有价值，
+    适合做算法验证、课程实验、定制化功能孵化。
+\end{itemize}
+
+\subsubsection{E. 下一阶段优先级（基于中层现状）}
+\begin{enumerate}
+  \item 建立后台 compact/purge 主线，降低历史版本与 tombstone 积累；
+  \item 在事务子系统补齐冲突检测与更明确隔离语义；
+  \item 将 tools/tests 与性能预算绑定，形成持续性能回归基线。
+\end{enumerate}
+
+\subsection{Executive Summary（1 页决策速览，面向评审会）}
+
+\textbf{一句话结论}
+\begin{itemize}
+  \item newdb 目前已从“可读的底层原型”升级为“可演示、可验证、可迭代的小型数据库系统”，
+  但底层成熟度仍处于 LevelDB/InnoDB 之下，短期定位应是“教学/原型/内部可控负载”，而非生产核心替代。
+\end{itemize}
+
+\textbf{当前定位（纳入中层后）}
+\begin{itemize}
+  \item \textbf{技术形态}：heap 页存储 + WAL + 快照可见性 + 中层 CLI/契约/测试/工具闭环。
+  \item \textbf{工程能力}：可快速迭代、可回归验证、可做性能观测（含并发压测与恢复统计）。
+  \item \textbf{核心短板}：版本回收体系、事务隔离深度、长期运行治理能力。
+\end{itemize}
+
+\textbf{与对标系统的决策差异}
+\begin{itemize}
+  \item \textbf{对 LevelDB}：newdb 更易解释和改造；LevelDB 在大规模写入与长期 compaction 治理更成熟。
+  \item \textbf{对 InnoDB}：newdb 学习曲线更低；InnoDB 在事务、锁、恢复、运维体系上显著领先。
+  \item \textbf{决策含义}：newdb 的竞争力来自“可控性/可解释性/可定制性”，不是“极限成熟度”。
+\end{itemize}
+
+\textbf{建议选型边界}
+\begin{itemize}
+  \item \textbf{推荐}：课程教学、算法实验、功能原型、内部中小规模工具型场景（可控 SLA）。
+  \item \textbf{谨慎}：中高并发且对隔离语义敏感的业务链路。
+  \item \textbf{不建议直接替代}：生产核心 OLTP（InnoDB 目标域）与超大规模高写 KV 主战场（LevelDB/RocksDB 目标域）。
+\end{itemize}
+
+\textbf{未来 2 个里程碑（建议）}
+\begin{enumerate}
+  \item \textbf{M1：稳定性里程碑}（先可长期跑）
+  \begin{itemize}
+    \item 上线 compact/purge 主线，控制版本堆积；
+    \item 固化性能预算（吞吐/延迟/恢复时间）并接入 CI 回归。
+  \end{itemize}
+  \item \textbf{M2：事务能力里程碑}（再可承载更严肃业务）
+  \begin{itemize}
+    \item 补齐事务冲突检测与隔离语义边界；
+    \item 强化并发一致性测试矩阵与故障注入恢复测试。
+  \end{itemize}
+\end{enumerate}
+
+\textbf{评审会可直接使用的决策建议}
+\begin{itemize}
+  \item \textbf{立项建议}：继续投入，定位“数据库内核教学与原型孵化平台”。
+  \item \textbf{资源建议}：优先投向 compact/purge 与事务语义，不优先追求 SQL 面扩张。
+  \item \textbf{验收建议}：以“长期运行稳定性 + 回归可测性 + 性能基线达标”作为阶段性 Gate。
+\end{itemize}
+

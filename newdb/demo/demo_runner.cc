@@ -7,7 +7,6 @@
 
 #include <newdb/page_io.h>
 #include <newdb/error_format.h>
-#include <newdb/schema_io.h>
 #include <newdb/session.h>
 
 #include "demo_cli.h"
@@ -53,6 +52,16 @@ bool row_at_slot_read_local(const newdb::HeapTable& tbl, const std::size_t i, ne
     }
     r = tbl.rows[i];
     return true;
+}
+
+newdb::Status compact_table_file_local(const ShellState& app, const std::string& table_name) {
+    if (table_name.empty()) {
+        return newdb::Status::Fail("empty table name");
+    }
+    const std::string data_file = resolve_table_file(app, table_name + ".bin");
+    newdb::TableSchema schema;
+    (void)newdb::load_schema_text(newdb::schema_sidecar_path_for_data_file(data_file), schema);
+    return newdb::io::compact_heap_file(data_file.c_str(), table_name, schema);
 }
 
 void print_page_json(const newdb::TableSchema& schema,
@@ -114,6 +123,14 @@ void demo_init_session_logging(ShellState& app,
     app.verbose = verbose;
     logging_bind_shell(&app);
     app.txn.set_workspace_root(app.data_dir);
+    app.txn.setVacuumCallback([&app](const std::string& table_name) {
+        const newdb::Status st = compact_table_file_local(app, table_name);
+        if (st.ok) {
+            logging_console_printf("[AUTOVACUUM] compacted table '%s'\n", table_name.c_str());
+        } else {
+            logging_console_printf("[AUTOVACUUM] table '%s' failed: %s\n", table_name.c_str(), st.message.c_str());
+        }
+    });
     (void)app.txn.recoverFromWAL();
     {
         const std::string hist = load_log_file_text(app.log_file_path.c_str());

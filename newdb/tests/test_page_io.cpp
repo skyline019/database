@@ -184,6 +184,25 @@ TEST(PageIo, TombstoneDeletesRow) {
     EXPECT_TRUE(tbl.rows.empty());
 }
 
+TEST(PageIo, CompactHeapFileKeepsOnlyLatestLogicalRows) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_compact");
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "compact.bin").string();
+    ASSERT_TRUE(newdb::io::create_heap_file(path.c_str(), {Row{1, {{"name", "old"}}, {}}, Row{2, {{"name", "b"}}, {}}}).ok);
+    ASSERT_TRUE(newdb::io::append_row(path.c_str(), Row{1, {{"name", "new"}}, {}}).ok);
+    ASSERT_TRUE(newdb::io::append_row(path.c_str(), Row{2, {{"__deleted", "1"}, {"name", "b"}}, {}}).ok);
+
+    std::size_t rows_after = 0;
+    ASSERT_TRUE(newdb::io::compact_heap_file(path.c_str(), "compact", minimal_schema(), &rows_after).ok);
+    EXPECT_EQ(rows_after, 1u);
+
+    HeapTable tbl;
+    ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "compact", minimal_schema(), tbl).ok);
+    ASSERT_EQ(tbl.rows.size(), 1u);
+    EXPECT_EQ(tbl.rows[0].id, 1);
+    EXPECT_EQ(tbl.rows[0].attrs.at("name"), "new");
+}
+
 TEST(PageIo, ScanHeapFileAndQueryHelpersRun) {
     const auto dir = newdb::test::unique_temp_subdir("newdb_scan_query");
     std::filesystem::create_directories(dir);

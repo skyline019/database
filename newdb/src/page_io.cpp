@@ -611,6 +611,25 @@ Status create_heap_file(const char* path, const std::vector<Row>& rows) {
     return Status::Ok();
 }
 
+Status compact_heap_file(const char* path,
+                         const std::string& table_name,
+                         const TableSchema& schema,
+                         std::size_t* out_rows_after) {
+    HeapTable tbl;
+    const Status lst = load_heap_file(path, table_name, schema, tbl);
+    if (!lst.ok) {
+        return lst;
+    }
+    const Status cst = create_heap_file(path, tbl.rows);
+    if (!cst.ok) {
+        return cst;
+    }
+    if (out_rows_after != nullptr) {
+        *out_rows_after = tbl.rows.size();
+    }
+    return Status::Ok();
+}
+
 void scan_heap_file(const char* path) {
     const auto path_mutex = mutex_for_heap_path(path);
     std::lock_guard<std::mutex> io_lock(*path_mutex);

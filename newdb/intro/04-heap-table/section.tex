@@ -1,0 +1,110 @@
+\section{HeapTable：索引、排序缓存与懒解码}
+
+对应实现：\fpath{newdb/src/heap_table.cpp}
+
+\subsection{关键代码段：decode\_heap\_slot 的缓存与解码}
+
+懒加载形态下的“按 slot 解码”是很多读路径的基础，它做了一个非常关键的优化：\textbf{单页缓存}。
+
+\begin{lstlisting}[language=C++,caption={decode\_heap\_slot：mmap 命中或单页缓存（节选）}]
+const unsigned char* page_ptr = file->page_data(f.page_no);
+if (page_ptr == nullptr) {
+    if (heap_cached_page_no_ != f.page_no || heap_cached_page_buf_.size() != psz) {
+        heap_cached_page_buf_.resize(psz);
+        file->read_page_copy(f.page_no, heap_cached_page_buf_.data());
+        heap_cached_page_no_ = f.page_no;
+    }
+    page_ptr = heap_cached_page_buf_.data();
+}
+codec::decode_heap_payload_to_row(page_ptr + f.byte_off_in_page, f.payload_len, out);
+strip_mvcc_internal_attrs(out);
+\end{lstlisting}
+
+解释：
+
+\begin{itemize}
+  \item \textbf{mmap 命中}：\texttt{page\_data} 直接给出指针，不产生额外 I/O 与拷贝。
+  \item \textbf{mmap 未命中}：通过 \texttt{read\_page\_copy} 把页读入 \texttt{heap\_cached\_page\_buf\_}，并记住 \texttt{heap\_cached\_page\_no\_}。
+  \item \textbf{为什么单页缓存有效}：很多扫描/排序会局部访问同一页内的多个 slot，单页缓存能把“每行一次读页”降为“每页一次读页”。
+\end{itemize}
+
+\subsection{两种内部形态}
+
+\begin{itemize}
+  \item \textbf{物化形态}：\texttt{rows} 持有所有 Row；查询主要在内存数组 + hash 索引上完成。
+  \item \textbf{懒加载形态}：\texttt{heap\_file\_} + \texttt{heap\_fingers\_} 保存物理定位；访问时解码 slot。
+\end{itemize}
+
+这两种形态共享同一套逻辑接口，但性能特征差异明显：懒加载更省内存，物化更稳定更快。
+
+\subsection{可见性过滤（MVCC + tombstone）}
+
+\texttt{is\_row\_visible(slot,row)} 同时处理：
+
+\begin{itemize}
+  \item tombstone（\texttt{\_\_deleted=1}）不可见；
+  \item 若未设置 snapshot，则默认可见；
+  \item 若设置 snapshot，则用 \texttt{RecordMetadata} 的 created/deleted/txn id 做可见性判断。
+\end{itemize}
+
+因此任何“构建索引/排序/查找”的结果都必须经过该过滤，才能对外呈现一致视图。
+
+\subsection{索引结构}
+
+\begin{itemize}
+  \item \textbf{index\_by\_id}：\(\texttt{id} \rightarrow \texttt{slot/index}\)，平均 \(O(1)\)；
+  \item \textbf{index\_by\_pk\_value}：主键非 \texttt{id} 时构建 \(\texttt{pk\_value} \rightarrow \texttt{slot}\)；
+  \item \textbf{attr\_index}：字段名到列序号的映射（用于 \texttt{values} 向量快速取值）。
+\end{itemize}
+
+注意：懒加载形态下会根据 schema 的主键策略选择性构建 \texttt{index\_by\_pk\_value}，避免不必要的解码与内存开销。
+
+\subsection{sorted\_indices：排序缓存与“解码一次”优化}
+
+\texttt{sorted\_indices(schema, order\_key, dir)} 会返回一个 slot/index 列表引用，并按 \texttt{order\_key} 排序：
+
+\begin{itemize}
+  \item 结果按 \texttt{order\_key} 进行缓存（升序/降序各一份）；
+  \item 缓存 key 数量上限为 16，避免无界增长；
+  \item 懒加载且 \texttt{order\_key != id} 时，先为候选 slot 计算并缓存排序 key，再 sort，避免比较函数中重复解码导致的高倍放大。
+\end{itemize}
+
+首次计算复杂度：
+
+\[
+O(N \cdot \text{decode}) + O(N \log N)
+\]
+
+命中缓存后为 \(O(1)\)。
+
+\subsection{关键代码段：sorted\_indices 的“排序 key 缓存”}
+
+懒加载且 \texttt{order\_key != id} 时，为避免 sort 比较器内反复解码，代码会先构造 slot$\rightarrow$key 的映射：
+
+\begin{lstlisting}[language=C++,caption={sorted\_indices：先解码一次再排序（节选）}]
+std::unordered_map<size_t, std::string> sort_keys;
+for (size_t slot : indices) {
+    Row row;
+    decode_heap_slot(slot, row);
+    auto it = row.attrs.find(order_key);
+    sort_keys.emplace(slot, it != row.attrs.end() ? it->second : "");
+}
+std::sort(indices.begin(), indices.end(), [&](size_t ia, size_t ib) {
+    int cmp = schema.compare_attr(order_key, sort_keys[ia], sort_keys[ib]);
+    return dir == Asc ? (cmp < 0) : (cmp > 0);
+});
+\end{lstlisting}
+
+这把解码成本从“比较器内的 \(O(N\log N)\) 次解码”降到了“预处理的 \(O(N)\) 次解码”，在 N 较大时差距非常明显。
+
+\subsection{find\_by\_id：热路径行为}
+
+若 \texttt{index\_by\_id} 命中：
+
+\begin{itemize}
+  \item 物化：直接返回 \texttt{rows[idx]}（额外做可见性检查）
+  \item 懒加载：解码该 slot 到 scratch row，并返回其指针（同样做可见性检查）
+\end{itemize}
+
+若索引未命中且物化形态，会退化为全表扫描 \(O(N)\)；懒加载形态则直接返回 \texttt{nullptr}（避免隐式触发大量解码）。
+

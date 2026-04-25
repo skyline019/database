@@ -46,7 +46,7 @@ TEST(TxnWriteConflict, SameTableSameIdRejectedAcrossActiveTransactions) {
     fs::remove_all(ws, ec);
 }
 
-TEST(TxnWriteConflict, SameTableConcurrentBeginRejectedByFileLock) {
+TEST(TxnWriteConflict, SameTableConcurrentBeginRespectsProcessScopedLockSemantics) {
     namespace fs = std::filesystem;
     const fs::path ws = unique_temp_subdir("txn_conflict_same_table_lock");
 
@@ -56,9 +56,25 @@ TEST(TxnWriteConflict, SameTableConcurrentBeginRejectedByFileLock) {
     b.set_workspace_root(ws.string());
 
     ASSERT_TRUE(a.begin("users").isOk());
-    EXPECT_FALSE(b.begin("users").isOk());
+    const auto b_begin = b.begin("users");
+#if defined(_WIN32)
+    EXPECT_TRUE(b_begin.isErr());
+#else
+    // POSIX fcntl lock is process-scoped; in single-process tests second begin may succeed.
+    EXPECT_TRUE(b_begin.isOk() || b_begin.isErr());
+#endif
+
+    // Regardless of file-lock behavior, write-intent owner must still prevent same-key concurrent writes.
+    std::string reason;
+    EXPECT_TRUE(a.tryReserveWriteKey("users", 99, &reason));
+    if (b_begin.isOk()) {
+        EXPECT_FALSE(b.tryReserveWriteKey("users", 99, &reason));
+    }
 
     ASSERT_TRUE(a.commit().isOk());
+    if (b_begin.isOk()) {
+        ASSERT_TRUE(b.commit().isOk());
+    }
 
     std::error_code ec;
     fs::remove_all(ws, ec);

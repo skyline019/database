@@ -59,7 +59,7 @@ def main() -> int:
     if not isinstance(data.get("generated_at"), str) or not data["generated_at"]:
         return fail("generated_at must be non-empty string")
 
-    for key in ("sources", "overview", "nightly_status", "runtime_metrics", "data_quality"):
+    for key in ("sources", "overview", "nightly_status", "runtime_metrics", "data_quality", "secondary_metrics"):
         if not isinstance(data.get(key), dict):
             return fail(f"{key} must be object")
     if not isinstance(data.get("recent_runs"), list):
@@ -76,6 +76,10 @@ def main() -> int:
         return fail("data_quality.has_nightly_samples must be bool")
     if not _is_num_or_none(dq.get("latest_nightly_age_hours")):
         return fail("data_quality.latest_nightly_age_hours must be number or null")
+    sm = data["secondary_metrics"]
+    for k in ("dashboard_quality_gate_passed_count", "dashboard_quality_gate_failed_count"):
+        if not isinstance(sm.get(k), int) or sm[k] < 0:
+            return fail(f"secondary_metrics.{k} must be non-negative int")
 
     rm = data["runtime_metrics"]
     for series_name in (

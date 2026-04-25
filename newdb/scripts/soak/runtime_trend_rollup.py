@@ -132,6 +132,12 @@ def main() -> int:
     nightly_passed = sum(1 for r in nightly_rows if r.get("status") == "passed")
     nightly_failed = sum(1 for r in nightly_rows if r.get("status") == "failed")
     pass_rate = (float(nightly_passed) / float(nightly_total)) if nightly_total > 0 else None
+    dashboard_gate_failed_count = sum(
+        1 for r in nightly_rows if str(r.get("dashboard_quality_gate_status", "")).strip().lower() == "failed"
+    )
+    dashboard_gate_passed_count = sum(
+        1 for r in nightly_rows if str(r.get("dashboard_quality_gate_status", "")).strip().lower() == "passed"
+    )
     latest_nightly_dt = _parse_ts(nightly_rows[-1].get("timestamp")) if nightly_rows else None
     nightly_age_hours = None
     if latest_nightly_dt is not None:
@@ -164,6 +170,10 @@ def main() -> int:
         "data_quality": {
             "has_nightly_samples": nightly_total > 0,
             "latest_nightly_age_hours": nightly_age_hours,
+        },
+        "secondary_metrics": {
+            "dashboard_quality_gate_passed_count": dashboard_gate_passed_count,
+            "dashboard_quality_gate_failed_count": dashboard_gate_failed_count,
         },
         "runtime_metrics": {
             "vacuum_efficiency_p50": _series(vac_p50),

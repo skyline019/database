@@ -1,0 +1,46 @@
+name: newdb-nightly-soak
+
+on:
+  schedule:
+    - cron: "20 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  nightly-soak-lite:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: pwsh
+        working-directory: newdb
+        run: cmake -S . -B build_nightly -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        shell: pwsh
+        working-directory: newdb
+        run: cmake --build build_nightly --config RelWithDebInfo --parallel
+
+      - name: Run nightly soak (lite profile for stable sampling)
+        shell: pwsh
+        working-directory: newdb
+        run: >
+          .\scripts\soak\nightly_soak_runner.ps1
+          -BuildDir build_nightly\RelWithDebInfo
+          -Runs 1
+          -SoakMinutes 0
+          -SleepSecondsBetweenRuns 0
+          -LiteProfile
+          -RequireNightlySamplesForDashboard $true
+          -MaxLatestNightlyAgeHours 168
+          -ContinueOnFailure:$false
+
+      - name: Upload nightly trend artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-nightly-soak-trend
+          path: |
+            newdb/scripts/results/nightly_soak_trend.jsonl
+            newdb/scripts/results/runtime_trend_dashboard.json
+          if-no-files-found: error
+

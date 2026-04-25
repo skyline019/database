@@ -20,7 +20,8 @@ param(
     [string]$TelemetryEnvironment = "nightly",
     [string]$TelemetryProfile = "soak",
     [bool]$RequireNightlySamplesForDashboard = $true,
-    [double]$MaxLatestNightlyAgeHours = 48.0
+    [double]$MaxLatestNightlyAgeHours = 48.0,
+    [switch]$LiteProfile
 )
 
 Set-StrictMode -Version Latest
@@ -140,9 +141,6 @@ for ($i = 1; $i -le $Runs; $i++) {
         "-DataDir", $DataDir,
         "-Table", $Table,
         "-CtestJobs", $CtestJobs,
-        "-EnforcePerf",
-        "-RunHighPressure",
-        "-RunConcurrentMillion",
         "-HighPressureSizesCsv", $HighPressureSizesCsv,
         "-HighPressureQueryLoops", $HighPressureQueryLoops,
         "-HighPressureTxnPerMode", $HighPressureTxnPerMode,
@@ -155,6 +153,16 @@ for ($i = 1; $i -le $Runs; $i++) {
         "-TelemetryEnvironment", $TelemetryEnvironment,
         "-TelemetryProfile", $TelemetryProfile
     )
+    if ($LiteProfile) {
+        # P13: stable nightly sample mode, avoid high-pressure branches.
+        $args += "-RunConcurrentPressure"
+    } else {
+        $args += @(
+            "-EnforcePerf",
+            "-RunHighPressure",
+            "-RunConcurrentMillion"
+        )
+    }
     if ($SkipBuildAndCoreGates) {
         $args += "-SkipBuildAndCoreGates"
     }

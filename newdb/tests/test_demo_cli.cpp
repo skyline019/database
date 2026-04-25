@@ -1,7 +1,12 @@
 #include "demo_cli.h"
 #include "csv_export.h"
+#include "page_index_sidecar.h"
+
+#include <newdb/heap_table.h>
+#include <newdb/schema.h>
 
 #include <filesystem>
+#include <fstream>
 #include <gtest/gtest.h>
 
 namespace fs = std::filesystem;
@@ -227,4 +232,43 @@ TEST(CsvExport, EscapeCommaQuotesNewline) {
     EXPECT_EQ(csv_escape_cell("a,b"), "\"a,b\"");
     EXPECT_EQ(csv_escape_cell("say \"x\""), "\"say \"\"x\"\"\"");
     EXPECT_EQ(csv_escape_cell("a\nb"), "\"a\nb\"");
+}
+
+TEST(PageIndexSidecar, SortByIdAscNumericOrder) {
+    namespace fs = std::filesystem;
+    const fs::path base = fs::temp_directory_path() / "newdb_page_id_sort_reg";
+    const std::string data_file = (base.string() + ".bin");
+    {
+        std::ofstream touch(data_file, std::ios::out | std::ios::trunc);
+        ASSERT_TRUE(touch.good());
+        touch << "seed";
+    }
+
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    schema.attrs = {newdb::AttrMeta{"name", newdb::AttrType::String}};
+
+    newdb::HeapTable tbl;
+    tbl.rows = {
+        newdb::Row{1, {{"name", "a"}}, {}},
+        newdb::Row{10, {{"name", "c"}}, {}},
+        newdb::Row{2, {{"name", "b"}}, {}},
+    };
+
+    PageSidecarRequest req;
+    req.data_file = data_file;
+    req.table_name = "t";
+    req.order_key = "id";
+    req.descending = false;
+
+    const auto idx = load_or_build_page_index_sidecar(req, schema, tbl);
+    ASSERT_EQ(idx.size(), 3u);
+    EXPECT_EQ(tbl.rows[idx[0]].id, 1);
+    EXPECT_EQ(tbl.rows[idx[1]].id, 2);
+    EXPECT_EQ(tbl.rows[idx[2]].id, 10);
+
+    std::error_code ec;
+    fs::remove(fs::path(data_file + ".idx.id.asc"), ec);
+    ec.clear();
+    fs::remove(fs::path(data_file), ec);
 }

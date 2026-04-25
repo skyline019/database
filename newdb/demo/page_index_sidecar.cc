@@ -17,6 +17,7 @@
 namespace fs = std::filesystem;
 
 namespace {
+constexpr int kPageIndexSidecarVersion = 2;
 
 bool row_at_slot_read_sidecar(const newdb::HeapTable& tbl, const std::size_t i, newdb::Row& r) {
     if (tbl.is_heap_storage_backed()) {
@@ -44,8 +45,14 @@ std::uint64_t file_sig(const std::string& p) {
     return static_cast<std::uint64_t>(sz) ^ ticks;
 }
 
-bool parse_header(const std::string& line, std::string& key, bool& desc, std::uint64_t& data_sig, std::uint64_t& attr_sig, std::uint64_t& wal_lsn) {
-    // key=<k>;desc=<0|1>;data_sig=<n>;attr_sig=<n>[;wal_lsn=<n>]
+bool parse_header(const std::string& line,
+                  std::string& key,
+                  bool& desc,
+                  std::uint64_t& data_sig,
+                  std::uint64_t& attr_sig,
+                  std::uint64_t& wal_lsn,
+                  int& ver) {
+    // key=<k>;desc=<0|1>;data_sig=<n>;attr_sig=<n>[;wal_lsn=<n>][;ver=<n>]
     const auto k0 = line.find("key=");
     const auto d0 = line.find(";desc=");
     const auto s0 = line.find(";data_sig=");
@@ -56,25 +63,37 @@ bool parse_header(const std::string& line, std::string& key, bool& desc, std::ui
     key = line.substr(4, d0 - 4);
     const std::string d = line.substr(d0 + 6, s0 - (d0 + 6));
     const std::string::size_type wpos = line.find(";wal_lsn=");
+    const std::string::size_type vpos = line.find(";ver=");
     desc = (d == "1");
     wal_lsn = 0;
+    ver = 0;
     if (wpos == std::string::npos) {
         const std::string ds = line.substr(s0 + 10, a0 - (s0 + 10));
-        const std::string as = line.substr(a0 + 10);
+        const std::string as = (vpos == std::string::npos)
+                                   ? line.substr(a0 + 10)
+                                   : line.substr(a0 + 10, vpos - (a0 + 10));
         try {
             data_sig = static_cast<std::uint64_t>(std::stoull(ds));
             attr_sig = static_cast<std::uint64_t>(std::stoull(as));
+            if (vpos != std::string::npos) {
+                ver = std::stoi(line.substr(vpos + 5));
+            }
         } catch (...) {
             return false;
         }
     } else {
         const std::string ds = line.substr(s0 + 10, a0 - (s0 + 10));
         const std::string as = line.substr(a0 + 10, wpos - (a0 + 10));
-        const std::string wl = line.substr(wpos + 9);
+        const std::string wl = (vpos == std::string::npos)
+                                   ? line.substr(wpos + 9)
+                                   : line.substr(wpos + 9, vpos - (wpos + 9));
         try {
             data_sig = static_cast<std::uint64_t>(std::stoull(ds));
             attr_sig = static_cast<std::uint64_t>(std::stoull(as));
             wal_lsn = static_cast<std::uint64_t>(std::stoull(wl));
+            if (vpos != std::string::npos) {
+                ver = std::stoi(line.substr(vpos + 5));
+            }
         } catch (...) {
             return false;
         }
@@ -97,8 +116,14 @@ bool try_read_sidecar(const std::string& path,
     std::uint64_t ds = 0;
     std::uint64_t as = 0;
     std::uint64_t wln = 0;
-    if (!parse_header(hdr, k, d, ds, as, wln)) return false;
-    if (k != req.order_key || d != req.descending || ds != data_sig || as != attr_sig || wln != wal_lsn) {
+    int ver = 0;
+    if (!parse_header(hdr, k, d, ds, as, wln, ver)) return false;
+    if (ver != kPageIndexSidecarVersion ||
+        k != req.order_key ||
+        d != req.descending ||
+        ds != data_sig ||
+        as != attr_sig ||
+        wln != wal_lsn) {
         return false;
     }
     out.clear();
@@ -126,7 +151,8 @@ void write_sidecar(const std::string& path,
         << ";desc=" << (req.descending ? "1" : "0")
         << ";data_sig=" << data_sig
         << ";attr_sig=" << attr_sig
-        << ";wal_lsn=" << wal_lsn << "\n";
+        << ";wal_lsn=" << wal_lsn
+        << ";ver=" << kPageIndexSidecarVersion << "\n";
     for (const auto v : idx) {
         out << v << "\n";
     }
@@ -168,24 +194,26 @@ std::vector<std::size_t> load_or_build_page_index_sidecar(const PageSidecarReque
         bpt.insert(std::move(key), slot);
     }
     indices = bpt.flatten_slots();
-    if (req.order_key != "id") {
-        // For typed attrs (int/float/date/etc.), refine B+Tree leaf order with schema comparator.
-        std::stable_sort(indices.begin(), indices.end(), [&](const std::size_t ia, const std::size_t ib) {
-            newdb::Row a;
-            newdb::Row b;
-            if (!row_at_slot_read_sidecar(table, ia, a) || !row_at_slot_read_sidecar(table, ib, b)) {
-                return ia < ib;
-            }
-            std::string va;
-            std::string vb;
-            const auto ita = a.attrs.find(req.order_key);
-            const auto itb = b.attrs.find(req.order_key);
-            if (ita != a.attrs.end()) va = ita->second;
-            if (itb != b.attrs.end()) vb = itb->second;
-            const int cmp = schema.compare_attr(req.order_key, va, vb);
-            return req.descending ? (cmp > 0) : (cmp < 0);
-        });
-    }
+    std::stable_sort(indices.begin(), indices.end(), [&](const std::size_t ia, const std::size_t ib) {
+        newdb::Row a;
+        newdb::Row b;
+        if (!row_at_slot_read_sidecar(table, ia, a) || !row_at_slot_read_sidecar(table, ib, b)) {
+            return ia < ib;
+        }
+        if (req.order_key == "id") {
+            if (a.id == b.id) return ia < ib;
+            return req.descending ? (a.id > b.id) : (a.id < b.id);
+        }
+        std::string va;
+        std::string vb;
+        const auto ita = a.attrs.find(req.order_key);
+        const auto itb = b.attrs.find(req.order_key);
+        if (ita != a.attrs.end()) va = ita->second;
+        if (itb != b.attrs.end()) vb = itb->second;
+        const int cmp = schema.compare_attr(req.order_key, va, vb);
+        if (cmp == 0) return ia < ib;
+        return req.descending ? (cmp > 0) : (cmp < 0);
+    });
 
     write_sidecar(sidecar, req, data_sig, attr_sig, wal_lsn, indices);
     return indices;

@@ -1,0 +1,152 @@
+{
+  "schema_version": "newdb.runtime_trend_dashboard.v1",
+  "generated_at": "2026-04-25T07:53:20.601975+00:00",
+  "sources": {
+    "test_loop_trend_path": "E:\\db\\DB\\newdb\\scripts\\results\\test_loop_trend.jsonl",
+    "nightly_soak_trend_path": "E:\\db\\DB\\newdb\\scripts\\results\\nightly_soak_trend.jsonl",
+    "test_loop_rows": 4,
+    "nightly_rows": 0
+  },
+  "overview": {
+    "total_rows": 4,
+    "latest_test_loop_timestamp": "2026-04-25T15:53:18.5669096+08:00",
+    "latest_nightly_timestamp": null,
+    "latest_runtime_run_id": "pressure_20260425_155312_4816abef"
+  },
+  "nightly_status": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "pass_rate": null
+  },
+  "data_quality": {
+    "has_nightly_samples": false,
+    "latest_nightly_age_hours": null
+  },
+  "secondary_metrics": {
+    "dashboard_quality_gate_passed_count": 0,
+    "dashboard_quality_gate_failed_count": 0
+  },
+  "runtime_metrics": {
+    "vacuum_efficiency_p50": {
+      "count": 2,
+      "min": 1.0,
+      "max": 1.0,
+      "avg": 1.0
+    },
+    "conflict_rate_p95": {
+      "count": 2,
+      "min": 0.0,
+      "max": 0.0,
+      "avg": 0.0
+    },
+    "txn_begin_lock_conflict_delta": {
+      "count": 1,
+      "min": 0.0,
+      "max": 0.0,
+      "avg": 0.0
+    },
+    "wal_compact_delta": {
+      "count": 1,
+      "min": 0.0,
+      "max": 0.0,
+      "avg": 0.0
+    }
+  },
+  "perf_metrics": {
+    "txn_normal_avg_ms": {
+      "count": 4,
+      "min": 4.851,
+      "max": 144.231,
+      "avg": 77.67675
+    },
+    "query_avg_ms_max": {
+      "count": 4,
+      "min": 6.849,
+      "max": 49.246,
+      "avg": 32.49125
+    },
+    "cm_tps_min": {
+      "count": 1,
+      "min": 95969.3,
+      "max": 95969.3,
+      "avg": 95969.3
+    },
+    "hp_max_query_avg_ms": {
+      "count": 0,
+      "min": null,
+      "max": null,
+      "avg": null
+    }
+  },
+  "health": {
+    "tier": "healthy",
+    "reasons": [],
+    "latest_query_avg_ms": 49.246,
+    "latest_cm_tps_min": 95969.3,
+    "latest_hp_max_query_avg_ms": null,
+    "latest_txn_normal_avg_ms": 144.231
+  },
+  "recent_runs": [
+    {
+      "source": "test_loop",
+      "timestamp": "2026-04-24T02:13:39.4931532+08:00",
+      "runtime_run_id": null,
+      "runtime_vacuum_efficiency_p50": null,
+      "runtime_conflict_rate_p95": null,
+      "runtime_txn_begin_lock_conflict_delta": null,
+      "runtime_wal_compact_delta": null,
+      "txn_normal_avg_ms": 21.621,
+      "query_avg_ms_max": 40.695,
+      "cm_tps_min": null,
+      "hp_max_query_avg_ms": null,
+      "status": null,
+      "dashboard_quality_gate_status": null
+    },
+    {
+      "source": "test_loop",
+      "timestamp": "2026-04-24T02:31:18.6882653+08:00",
+      "runtime_run_id": null,
+      "runtime_vacuum_efficiency_p50": null,
+      "runtime_conflict_rate_p95": null,
+      "runtime_txn_begin_lock_conflict_delta": null,
+      "runtime_wal_compact_delta": null,
+      "txn_normal_avg_ms": 4.851,
+      "query_avg_ms_max": 6.849,
+      "cm_tps_min": 95969.3,
+      "hp_max_query_avg_ms": null,
+      "status": null,
+      "dashboard_quality_gate_status": null
+    },
+    {
+      "source": "test_loop",
+      "timestamp": "2026-04-25T12:47:28.1923309+08:00",
+      "runtime_run_id": "pressure_20260425_124723_e850133e",
+      "runtime_vacuum_efficiency_p50": 1.0,
+      "runtime_conflict_rate_p95": 0.0,
+      "runtime_txn_begin_lock_conflict_delta": null,
+      "runtime_wal_compact_delta": null,
+      "txn_normal_avg_ms": 140.004,
+      "query_avg_ms_max": 33.175,
+      "cm_tps_min": null,
+      "hp_max_query_avg_ms": null,
+      "status": null,
+      "dashboard_quality_gate_status": null
+    },
+    {
+      "source": "test_loop",
+      "timestamp": "2026-04-25T15:53:18.5669096+08:00",
+      "runtime_run_id": "pressure_20260425_155312_4816abef",
+      "runtime_vacuum_efficiency_p50": 1.0,
+      "runtime_conflict_rate_p95": 0.0,
+      "runtime_txn_begin_lock_conflict_delta": 0.0,
+      "runtime_wal_compact_delta": 0.0,
+      "txn_normal_avg_ms": 144.231,
+      "query_avg_ms_max": 49.246,
+      "cm_tps_min": null,
+      "hp_max_query_avg_ms": null,
+      "status": null,
+      "dashboard_quality_gate_status": null
+    }
+  ]
+}

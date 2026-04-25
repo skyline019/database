@@ -80,3 +80,8 @@ This syncs:
 - `newdb_perf.exe`
 - `newdb_runtime_report.exe`
 - `libnewdb.dll`
+- GUI nightly/bench 所需脚本到 `src-tauri/resources/scripts/`（`soak/bench/validate/ci` 子集）
+- 结果目录与种子文件到 `src-tauri/resources/scripts/results/`：
+  - `runtime_trend_dashboard.json`
+  - `test_loop_trend.jsonl`
+  - `nightly_soak_trend.jsonl`

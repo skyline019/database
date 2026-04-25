@@ -240,7 +240,7 @@ struct PageJsonResult {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 struct UiSettings {
     accent: String,
     bg_mode: String,
@@ -250,6 +250,14 @@ struct UiSettings {
     font_scale: f32,
     dense_mode: bool,
     animations: bool,
+    sidebar_width: f32,
+    corner_scale: f32,
+    shadow_scale: f32,
+    log_font_scale: f32,
+    log_line_height: f32,
+    border_contrast: f32,
+    panel_brightness: f32,
+    log_highlight_intensity: f32,
 }
 
 impl Default for UiSettings {
@@ -263,6 +271,14 @@ impl Default for UiSettings {
             font_scale: 1.0,
             dense_mode: false,
             animations: true,
+            sidebar_width: 260.0,
+            corner_scale: 1.0,
+            shadow_scale: 1.0,
+            log_font_scale: 1.0,
+            log_line_height: 1.5,
+            border_contrast: 1.0,
+            panel_brightness: 1.0,
+            log_highlight_intensity: 1.0,
         }
     }
 }
@@ -453,16 +469,29 @@ fn resolve_script_path(script_name: &str) -> Result<PathBuf, String> {
 
 fn resolve_results_file(file_name: &str) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("scripts").join("results").join(file_name));
+        candidates.push(cwd.join("../scripts").join("results").join(file_name));
+        candidates.push(cwd.join("../../scripts").join("results").join(file_name));
+        candidates.push(cwd.join("src-tauri").join("resources").join("scripts").join("results").join(file_name));
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             candidates.push(dir.join(file_name));
             candidates.push(dir.join("results").join(file_name));
+            candidates.push(dir.join("resources").join("scripts").join("results").join(file_name));
             candidates.push(dir.join("scripts").join("results").join(file_name));
             candidates.push(dir.join("../scripts").join("results").join(file_name));
             candidates.push(dir.join("../../scripts").join("results").join(file_name));
+            candidates.push(dir.join("../../../scripts").join("results").join(file_name));
             candidates.push(dir.join("resources").join("scripts").join("results").join(file_name));
             candidates.push(dir.join("../resources").join("scripts").join("results").join(file_name));
         }
+    }
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        let manifest = PathBuf::from(manifest_dir);
+        candidates.push(manifest.join("../scripts/results").join(file_name));
+        candidates.push(manifest.join("resources/scripts/results").join(file_name));
     }
     candidates.push(PathBuf::from("scripts").join("results").join(file_name));
     candidates.push(PathBuf::from("../scripts").join("results").join(file_name));

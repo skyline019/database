@@ -94,7 +94,16 @@ type UiSettings = {
   fontScale: number;
   denseMode: boolean;
   animations: boolean;
+  sidebarWidth: number;
+  cornerScale: number;
+  shadowScale: number;
+  logFontScale: number;
+  logLineHeight: number;
+  borderContrast: number;
+  panelBrightness: number;
+  logHighlightIntensity: number;
 };
+type SettingsPreset = { key: string; label: string; settings: Partial<UiSettings> };
 type OperationType =
   | "table_create"
   | "table_drop"
@@ -128,6 +137,7 @@ type MenuAction =
   | { kind: "cliTerminalWindow" }
   | { kind: "perfBench" }
   | { kind: "nightlySoak" }
+  | { kind: "runtimeDashboard" }
   | { kind: "settings" }
   | { kind: "createTableWizard" }
   | {
@@ -157,9 +167,11 @@ type ColumnType = "string" | "int" | "float" | "double" | "bool" | "date" | "dat
 
 const state = ref<State>({ dataDir: "", currentTable: "", pageSize: 12 });
 const tables = ref<string[]>([]);
+const tableSearch = ref("");
 const tableTabs = ref<TableTabState[]>([]);
 const activeTableKey = ref<string>("");
 const command = ref("");
+const commandInputEl = ref<HTMLInputElement | null>(null);
 const scriptText = ref("# 每行一条命令\nLIST TABLES\n");
 const logs = ref<string[]>([]);
 const validationErrors = ref<Record<string, boolean>>({});
@@ -173,11 +185,15 @@ const runtimeDashboardPrevTier = ref<string>("");
 const runtimeDashboardTierChangeNote = ref("");
 const undoStack = ref<OperationRecord[]>([]);
 const redoStack = ref<OperationRecord[]>([]);
+const selectedStackKey = ref("");
 const showHelp = ref(false);
 const showDllModal = ref(false);
+const showRuntimeDashboardModal = ref(false);
 const showSettingsModal = ref(false);
+const settingsNav = ref<"theme" | "layout" | "module">("theme");
 const showWorkspaceWarning = ref(false);
 const showDialog = ref(false);
+const showSidebar = ref(true);
 const showRowAttrTools = ref(true);
 const showCreateTableWizard = ref(false);
 const showUiMessage = ref(false);
@@ -188,6 +204,7 @@ const uiMessageKind = ref<UiMessageKind>("alert");
 const uiMessageInput = ref("");
 let uiMessageResolver: ((value: string | boolean | null) => void) | null = null;
 const bgFileInput = ref<HTMLInputElement | null>(null);
+const settingsImportInput = ref<HTMLInputElement | null>(null);
 const helpExpanded = ref<Record<number, boolean>>({});
 const dialogTitle = ref("");
 const dialogFields = ref<{ key: string; label: string; value: string }[]>([]);
@@ -359,10 +376,51 @@ const defaultSettings: UiSettings = {
   panelOpacity: 0.9,
   fontScale: 1,
   denseMode: false,
-  animations: true
+  animations: true,
+  sidebarWidth: 260,
+  cornerScale: 1,
+  shadowScale: 1,
+  logFontScale: 1,
+  logLineHeight: 1.5,
+  borderContrast: 1,
+  panelBrightness: 1,
+  logHighlightIntensity: 1
 };
+const settingsPresets: SettingsPreset[] = [
+  {
+    key: "default",
+    label: "默认",
+    settings: { accent: "#3b82f6", bgMode: "gradient", panelOpacity: 0.9, fontScale: 1, denseMode: false, animations: true, cornerScale: 1, shadowScale: 1, logFontScale: 1, logLineHeight: 1.5, borderContrast: 1, panelBrightness: 1, logHighlightIntensity: 1 }
+  },
+  {
+    key: "midnight",
+    label: "午夜蓝",
+    settings: { accent: "#60a5fa", bgMode: "gradient", panelOpacity: 0.92, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.05, shadowScale: 1.15, logFontScale: 1, logLineHeight: 1.55, borderContrast: 1.08, panelBrightness: 0.96, logHighlightIntensity: 1.1 }
+  },
+  {
+    key: "mint",
+    label: "薄荷绿",
+    settings: { accent: "#34d399", bgMode: "gradient", panelOpacity: 0.88, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.1, shadowScale: 0.9, logFontScale: 1.02, logLineHeight: 1.55, borderContrast: 0.95, panelBrightness: 1.05, logHighlightIntensity: 0.95 }
+  },
+  {
+    key: "compact",
+    label: "高密度",
+    settings: { accent: "#818cf8", bgMode: "gradient", panelOpacity: 0.95, fontScale: 0.96, denseMode: true, animations: false, sidebarWidth: 240, cornerScale: 0.9, shadowScale: 0.75, logFontScale: 0.94, logLineHeight: 1.4, borderContrast: 1.2, panelBrightness: 0.92, logHighlightIntensity: 1.2 }
+  }
+];
 const settings = ref<UiSettings>({ ...defaultSettings });
 let settingsPersistTimer: number | null = null;
+const settingsDirty = ref(false);
+const settingsLastSavedAt = ref("");
+const settingsSyncing = ref(false);
+const settingsSliderDragging = ref(false);
+const sidebarResizing = ref(false);
+let sidebarDragStartX = 0;
+let sidebarDragStartWidth = 260;
+const settingsSummary = computed(
+  () =>
+    `accent=${settings.value.accent} | panel=${settings.value.panelOpacity.toFixed(2)} | font=${settings.value.fontScale.toFixed(2)} | border=${settings.value.borderContrast.toFixed(2)} | bright=${settings.value.panelBrightness.toFixed(2)} | logFx=${settings.value.logHighlightIntensity.toFixed(2)}`
+);
 
 function openUiMessage(
   kind: UiMessageKind,
@@ -394,6 +452,26 @@ function handleUiMessageClosed() {
   const fallback = uiMessageKind.value === "prompt" ? null : false;
   uiMessageResolver(fallback);
   uiMessageResolver = null;
+}
+
+function handleGlobalHotkeys(ev: KeyboardEvent) {
+  if (viewMode.value !== "main") return;
+  if (showHelp.value || showDllModal.value || showRuntimeDashboardModal.value || showSettingsModal.value || showDialog.value || showCreateTableWizard.value || showUiMessage.value) {
+    return;
+  }
+  const key = (ev.key || "").toLowerCase();
+  const ctrl = ev.ctrlKey || ev.metaKey;
+  if (ctrl && key === "l") {
+    ev.preventDefault();
+    logs.value = [];
+    persistLogs();
+    return;
+  }
+  if (ctrl && key === "k") {
+    ev.preventDefault();
+    commandInputEl.value?.focus();
+    return;
+  }
 }
 
 function parseGridFromRaw(raw: string): { headers: string[]; rows: string[][] } | null {
@@ -471,6 +549,198 @@ const dashboardRecentRuns = computed(() => {
   if (!Array.isArray(rows)) return [];
   return rows.slice(-8).reverse();
 });
+type LogKind = "cmd" | "error" | "success" | "meta" | "session" | "normal";
+type LogFilterKind = "all" | LogKind;
+type RenderedLog = { text: string; kind: LogKind };
+
+const logFilterKind = ref<LogFilterKind>("all");
+const logKeyword = ref("");
+const logAutoFollow = ref(true);
+const logScrollPaneEl = ref<HTMLElement | null>(null);
+const helpTotalCount = computed(() => helpEntries.length);
+const helpMatchedCount = computed(() => filteredHelp.value.length);
+const uiMessageIsLogReview = computed(
+  () => uiMessageKind.value === "alert" && uiMessageTitle.value.startsWith("回看日志：")
+);
+const reviewLogPaneEl = ref<HTMLElement | null>(null);
+const reviewLogRowEls = ref<Record<number, HTMLElement | null>>({});
+const reviewHitCursor = ref(0);
+const parsedReviewLog = computed(() => {
+  if (!uiMessageIsLogReview.value) return null;
+  const src = String(uiMessageText.value ?? "");
+  const marker = "\n\n--- 日志上下文";
+  const splitAt = src.indexOf(marker);
+  const meta = splitAt >= 0 ? src.slice(0, splitAt) : src;
+  const ctxBlock = splitAt >= 0 ? src.slice(splitAt + 2) : "";
+  const cmdMatch = /命令：([^\n]+)/.exec(meta);
+  const timeMatch = /时间：([^\n]+)/.exec(meta);
+  const lineRangeMatch = /日志上下文（(\d+-\d+)）/.exec(ctxBlock);
+  const body = ctxBlock.replace(/^---\s*日志上下文（\d+-\d+）---\n?/, "");
+  return {
+    command: cmdMatch ? cmdMatch[1].trim() : "",
+    time: timeMatch ? timeMatch[1].trim() : "",
+    lineRange: lineRangeMatch ? lineRangeMatch[1] : "",
+    lines: body || "(日志为空)"
+  };
+});
+const reviewLogRows = computed(() => {
+  const raw = parsedReviewLog.value?.lines ?? "";
+  return String(raw).split(/\r?\n/);
+});
+const reviewHitIndices = computed(() => {
+  const cmd = String(parsedReviewLog.value?.command ?? "").trim();
+  if (!cmd) return [];
+  const needle = cmd.toLowerCase();
+  const exact = `> ${cmd}`.toLowerCase();
+  const hits: number[] = [];
+  for (let i = 0; i < reviewLogRows.value.length; i += 1) {
+    const line = String(reviewLogRows.value[i] ?? "").trim().toLowerCase();
+    if (!line) continue;
+    if (line === exact || line.includes(needle)) {
+      hits.push(i);
+    }
+  }
+  return hits;
+});
+const reviewActiveHitLine = computed(() => {
+  if (!reviewHitIndices.value.length) return -1;
+  const pos = Math.max(0, Math.min(reviewHitCursor.value, reviewHitIndices.value.length - 1));
+  return reviewHitIndices.value[pos] ?? -1;
+});
+
+const renderedLogs = computed<RenderedLog[]>(() =>
+  logs.value.map((line) => {
+    const t = String(line ?? "").trim();
+    let kind: LogKind = "normal";
+    if (t.startsWith("> ")) {
+      kind = "cmd";
+    } else if (t.startsWith("[SESSION]")) {
+      kind = "session";
+    } else if (/\b(ERR|ERROR|FAILED|FAIL)\b/i.test(t) || t.includes("[CAPI_ERROR]")) {
+      kind = "error";
+    } else if (/\b(ok|passed|done|valid|success)\b/i.test(t) || t.includes("[INSERT] ok")) {
+      kind = "success";
+    } else if (t.startsWith("[") && t.includes("]")) {
+      kind = "meta";
+    }
+    return { text: line, kind };
+  })
+);
+const visibleLogs = computed<RenderedLog[]>(() => {
+  const kind = logFilterKind.value;
+  const keyword = logKeyword.value.trim().toLowerCase();
+  return renderedLogs.value.filter((x) => {
+    if (kind !== "all" && x.kind !== kind) return false;
+    if (!keyword) return true;
+    return String(x.text ?? "").toLowerCase().includes(keyword);
+  });
+});
+
+function highlightLogKeyword(text: string) {
+  const src = String(text ?? "");
+  const kw = logKeyword.value.trim();
+  const escapedSrc = escapeHtml(src);
+  if (!kw) return escapedSrc;
+  const escapedKw = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  try {
+    return escapedSrc.replace(new RegExp(escapedKw, "gi"), (m) => `<mark>${m}</mark>`);
+  } catch {
+    return escapedSrc;
+  }
+}
+function classifyLogLine(text: string): LogKind {
+  const t = String(text ?? "").trim();
+  if (t.startsWith("> ")) return "cmd";
+  if (t.startsWith("[SESSION]")) return "session";
+  if (/\b(ERR|ERROR|FAILED|FAIL)\b/i.test(t) || t.includes("[CAPI_ERROR]")) return "error";
+  if (/\b(ok|passed|done|valid|success)\b/i.test(t) || t.includes("[INSERT] ok")) return "success";
+  if (t.startsWith("[") && t.includes("]")) return "meta";
+  return "normal";
+}
+function highlightReviewLogLine(line: string) {
+  return {
+    text: line,
+    kind: classifyLogLine(line)
+  };
+}
+function setReviewLogRowRef(idx: number, el: Element | null) {
+  if (!el || !(el instanceof HTMLElement)) return;
+  reviewLogRowEls.value[idx] = el;
+}
+function scrollToReviewHitByCursor() {
+  const lineIdx = reviewActiveHitLine.value;
+  if (lineIdx < 0) return;
+  const row = reviewLogRowEls.value[lineIdx];
+  if (row) {
+    row.scrollIntoView({ block: "center", behavior: "smooth" });
+    return;
+  }
+  const pane = reviewLogPaneEl.value;
+  if (!pane) return;
+  const fallbackTop = Math.max(0, lineIdx * 24 - pane.clientHeight / 2);
+  pane.scrollTo({ top: fallbackTop, behavior: "smooth" });
+}
+function jumpReviewHit(step: number) {
+  const total = reviewHitIndices.value.length;
+  if (!total) return;
+  let next = reviewHitCursor.value + step;
+  if (next < 0) next = total - 1;
+  if (next >= total) next = 0;
+  reviewHitCursor.value = next;
+  nextTick(() => {
+    scrollToReviewHitByCursor();
+  });
+}
+function focusReviewHitByLine(lineIdx: number) {
+  const pos = reviewHitIndices.value.indexOf(lineIdx);
+  if (pos < 0) return;
+  reviewHitCursor.value = pos;
+}
+
+function scrollLogsToBottom() {
+  if (!logScrollPaneEl.value) return;
+  logScrollPaneEl.value.scrollTop = logScrollPaneEl.value.scrollHeight;
+}
+
+function onLogScroll() {
+  const el = logScrollPaneEl.value;
+  if (!el) return;
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+  logAutoFollow.value = distance < 18;
+}
+
+function toggleLogAutoFollow() {
+  logAutoFollow.value = !logAutoFollow.value;
+  if (logAutoFollow.value) {
+    nextTick(() => {
+      scrollLogsToBottom();
+    });
+  }
+}
+
+watch(
+  visibleLogs,
+  () => {
+    if (!logAutoFollow.value) return;
+    nextTick(() => {
+      scrollLogsToBottom();
+    });
+  },
+  { deep: false }
+);
+watch(
+  [parsedReviewLog, uiMessageIsLogReview],
+  () => {
+    reviewLogRowEls.value = {};
+    reviewHitCursor.value = 0;
+    if (!uiMessageIsLogReview.value) return;
+    if (!reviewHitIndices.value.length) return;
+    nextTick(() => {
+      scrollToReviewHitByCursor();
+    });
+  },
+  { deep: false }
+);
 const layoutStyle = computed(() => {
   const s = settings.value;
   const gradient = "radial-gradient(circle at 15% 15%, #1e3a8a 0%, #0f172a 40%, #030712 100%)";
@@ -482,6 +752,14 @@ const layoutStyle = computed(() => {
     "--accent": s.accent,
     "--panel-opacity": String(s.panelOpacity),
     "--font-scale": String(s.fontScale),
+    "--sidebar-width": `${Math.round(s.sidebarWidth)}px`,
+    "--corner-scale": String(s.cornerScale),
+    "--shadow-scale": String(s.shadowScale),
+    "--log-font-scale": String(s.logFontScale),
+    "--log-line-height": String(s.logLineHeight),
+    "--border-contrast": String(s.borderContrast),
+    "--panel-brightness": String(s.panelBrightness),
+    "--log-highlight-intensity": String(s.logHighlightIntensity),
     backgroundImage: bg
   } as Record<string, string>;
 });
@@ -523,8 +801,23 @@ const tableTree = computed<SchemaNode[]>(() => {
     .sort((a, b) => a.localeCompare(b))
     .map((schema) => ({ schema, tables: groups[schema].sort((a, b) => a.localeCompare(b)) }));
 });
+const filteredTableTree = computed<SchemaNode[]>(() => {
+  const kw = tableSearch.value.trim().toLowerCase();
+  if (!kw) return tableTree.value;
+  const out: SchemaNode[] = [];
+  for (const s of tableTree.value) {
+    const schemaHit = s.schema.toLowerCase().includes(kw);
+    if (schemaHit) {
+      out.push({ schema: s.schema, tables: [...s.tables] });
+      continue;
+    }
+    const tables = s.tables.filter((t) => t.toLowerCase().includes(kw) || `${s.schema}.${t}`.toLowerCase().includes(kw));
+    if (tables.length) out.push({ schema: s.schema, tables });
+  }
+  return out;
+});
 const treeData = computed<UiTreeNode[]>(() =>
-  tableTree.value.map((s) => ({
+  filteredTableTree.value.map((s) => ({
     key: `schema:${s.schema}`,
     label: s.schema,
     type: "schema",
@@ -646,6 +939,7 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } },
       { label: "百万级性能压测(可执行)...", action: { kind: "perfBench" } },
       { label: "Nightly Soak 趋势跑批...", action: { kind: "nightlySoak" } },
+      { label: "Runtime Dashboard...", action: { kind: "runtimeDashboard" } },
       { divider: true, label: "-" },
       { label: "调优状态", action: { kind: "command", command: "SHOW TUNING", opType: "generic", title: "调优状态" } },
       { label: "WALSYNC normal 20", action: { kind: "command", command: "WALSYNC normal 20", opType: "generic", title: "WALSYNC normal 20" } },
@@ -680,21 +974,42 @@ function persistLogCollapsed() {
 }
 
 async function loadSettings() {
+  settingsSyncing.value = true;
   try {
     const s = await invoke<UiSettings>("get_settings");
-    settings.value = { ...defaultSettings, ...(s as Partial<UiSettings>) };
+    settings.value = sanitizeSettings({ ...defaultSettings, ...(s as Partial<UiSettings>) });
   } catch {
     settings.value = { ...defaultSettings };
   }
+  settingsDirty.value = false;
+  window.setTimeout(() => {
+    settingsSyncing.value = false;
+  }, 0);
 }
 
 async function persistSettings() {
-  await invoke("set_settings", { settings: settings.value });
+  settingsSyncing.value = true;
+  try {
+    const sanitized = sanitizeSettings(settings.value);
+    if (!sameSettings(settings.value, sanitized)) {
+      settings.value = sanitized;
+    }
+    await invoke("set_settings", { settings: sanitized });
+    settingsDirty.value = false;
+    settingsLastSavedAt.value = now();
+  } finally {
+    window.setTimeout(() => {
+      settingsSyncing.value = false;
+    }, 0);
+  }
 }
 
 watch(
   settings,
   () => {
+    if (settingsSyncing.value) return;
+    settingsDirty.value = true;
+    if (settingsSliderDragging.value) return;
     if (settingsPersistTimer !== null) {
       window.clearTimeout(settingsPersistTimer);
     }
@@ -705,6 +1020,95 @@ watch(
   },
   { deep: true }
 );
+
+function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
+  const safeAccent = /^#[0-9a-f]{6}$/i.test(String(input.accent ?? "")) ? String(input.accent) : defaultSettings.accent;
+  const bgMode = input.bgMode === "image" ? "image" : "gradient";
+  const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+  const num = (v: unknown, fallback: number) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  return {
+    accent: safeAccent,
+    bgMode,
+    bgImageUrl: String(input.bgImageUrl ?? ""),
+    bgImageOpacity: clamp(num(input.bgImageOpacity, defaultSettings.bgImageOpacity), 0.05, 0.8),
+    panelOpacity: clamp(num(input.panelOpacity, defaultSettings.panelOpacity), 0.6, 1),
+    fontScale: clamp(num(input.fontScale, defaultSettings.fontScale), 0.9, 1.2),
+    denseMode: Boolean(input.denseMode),
+    animations: Boolean(input.animations),
+    sidebarWidth: clamp(num(input.sidebarWidth, defaultSettings.sidebarWidth), 200, 460),
+    cornerScale: clamp(num(input.cornerScale, defaultSettings.cornerScale), 0.8, 1.35),
+    shadowScale: clamp(num(input.shadowScale, defaultSettings.shadowScale), 0.6, 1.5),
+    logFontScale: clamp(num(input.logFontScale, defaultSettings.logFontScale), 0.88, 1.25),
+    logLineHeight: clamp(num(input.logLineHeight, defaultSettings.logLineHeight), 1.3, 1.9),
+    borderContrast: clamp(num(input.borderContrast, defaultSettings.borderContrast), 0.75, 1.4),
+    panelBrightness: clamp(num(input.panelBrightness, defaultSettings.panelBrightness), 0.85, 1.2),
+    logHighlightIntensity: clamp(num(input.logHighlightIntensity, defaultSettings.logHighlightIntensity), 0.75, 1.4)
+  };
+}
+
+function sameSettings(a: UiSettings, b: UiSettings) {
+  return (
+    a.accent === b.accent &&
+    a.bgMode === b.bgMode &&
+    a.bgImageUrl === b.bgImageUrl &&
+    a.bgImageOpacity === b.bgImageOpacity &&
+    a.panelOpacity === b.panelOpacity &&
+    a.fontScale === b.fontScale &&
+    a.denseMode === b.denseMode &&
+    a.animations === b.animations &&
+    a.sidebarWidth === b.sidebarWidth &&
+    a.cornerScale === b.cornerScale &&
+    a.shadowScale === b.shadowScale &&
+    a.logFontScale === b.logFontScale &&
+    a.logLineHeight === b.logLineHeight &&
+    a.borderContrast === b.borderContrast &&
+    a.panelBrightness === b.panelBrightness &&
+    a.logHighlightIntensity === b.logHighlightIntensity
+  );
+}
+
+function onSettingsSliderInput() {
+  settingsSliderDragging.value = true;
+}
+
+async function onSettingsSliderChange() {
+  settingsSliderDragging.value = false;
+  if (settingsPersistTimer !== null) {
+    window.clearTimeout(settingsPersistTimer);
+    settingsPersistTimer = null;
+  }
+  await persistSettings();
+}
+
+function onSidebarResizeMove(ev: MouseEvent) {
+  if (!sidebarResizing.value) return;
+  const next = Math.max(200, Math.min(460, sidebarDragStartWidth + (ev.clientX - sidebarDragStartX)));
+  if (settings.value.sidebarWidth === next) return;
+  settings.value.sidebarWidth = next;
+}
+
+function stopSidebarResize() {
+  if (!sidebarResizing.value) return;
+  sidebarResizing.value = false;
+  window.removeEventListener("mousemove", onSidebarResizeMove);
+  window.removeEventListener("mouseup", stopSidebarResize);
+  document.body.style.cursor = "";
+  document.body.style.userSelect = "";
+}
+
+function startSidebarResize(ev: MouseEvent) {
+  if (!showSidebar.value) return;
+  sidebarResizing.value = true;
+  sidebarDragStartX = ev.clientX;
+  sidebarDragStartWidth = settings.value.sidebarWidth;
+  document.body.style.cursor = "col-resize";
+  document.body.style.userSelect = "none";
+  window.addEventListener("mousemove", onSidebarResizeMove);
+  window.addEventListener("mouseup", stopSidebarResize);
+}
 
 function loadLogs() {
   const raw = localStorage.getItem("newdb_gui_logs");
@@ -741,6 +1145,52 @@ function logLine(line: string) {
   logs.value.push(line);
   if (logs.value.length > 500) logs.value.shift();
   persistLogs();
+}
+
+function appendSessionLogHeader() {
+  const ts = new Date().toLocaleString();
+  const mode = viewMode.value === "log" ? "LOG_WINDOW" : viewMode.value === "cli" ? "CLI_WINDOW" : "MAIN_WINDOW";
+  logLine(`\n[SESSION] ${mode} started at ${ts}`);
+}
+
+function stackKey(item: OperationRecord) {
+  return `${item.time}::${item.forward}`;
+}
+
+async function viewOperationLog(item: OperationRecord) {
+  const all = logs.value.join("\n");
+  const lines = all.split(/\r?\n/);
+  const needle = `> ${item.forward}`.trim();
+  let hit = -1;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const t = (lines[i] ?? "").trim();
+    if (!t) continue;
+    if (t === needle) {
+      hit = i;
+      break;
+    }
+  }
+  if (hit < 0 && item.forward && item.forward !== "[SCRIPT]") {
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const t = (lines[i] ?? "").trim();
+      if (t.includes(item.forward)) {
+        hit = i;
+        break;
+      }
+    }
+  }
+  const start = Math.max(0, (hit >= 0 ? hit : lines.length - 1) - 10);
+  const end = Math.min(lines.length, (hit >= 0 ? hit : lines.length - 1) + 18);
+  const snippet = lines.slice(start, end).join("\n");
+  await openUiMessage(
+    "alert",
+    `回看日志：${item.title}`,
+    `命令：${item.forward}\n时间：${item.time}\n\n--- 日志上下文（${start + 1}-${end}）---\n${snippet || "(日志为空)"}`
+  );
+}
+
+async function selectStackItem(item: OperationRecord) {
+  selectedStackKey.value = stackKey(item);
 }
 
 function extractScriptStopLine(raw: string): number | null {
@@ -843,9 +1293,55 @@ async function openDllStatusModal() {
   showDllModal.value = true;
 }
 
-function resetSettings() {
+async function openRuntimeDashboardModal() {
+  await refreshRuntimeDashboard();
+  showRuntimeDashboardModal.value = true;
+}
+
+function applySettingsPreset(preset: SettingsPreset) {
+  settings.value = sanitizeSettings({ ...settings.value, ...preset.settings });
+}
+
+async function resetSettings() {
+  const ok = await openUiMessage("confirm", "恢复默认设置", "确认恢复所有设置为默认值？");
+  if (!ok) return;
   settings.value = { ...defaultSettings };
-  void persistSettings();
+  await persistSettings();
+}
+
+function openSettingsImport() {
+  settingsImportInput.value?.click();
+}
+
+function exportSettingsJson() {
+  const payload = JSON.stringify(sanitizeSettings(settings.value), null, 2);
+  const blob = new Blob([payload], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  a.href = url;
+  a.download = `newdb-gui-settings-${ts}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function onSettingsImportChange(ev: Event) {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const raw = JSON.parse(String(reader.result ?? "{}")) as Partial<UiSettings>;
+      settings.value = sanitizeSettings({ ...settings.value, ...raw });
+      await persistSettings();
+      await openUiMessage("alert", "导入成功", "设置已导入并生效。");
+    } catch (e) {
+      await openUiMessage("alert", "导入失败", `设置 JSON 解析失败：${String(e)}`);
+    }
+  };
+  reader.readAsText(file);
+  input.value = "";
 }
 
 function pickBackgroundFile() {
@@ -1673,6 +2169,10 @@ async function runMenuAction(action: MenuAction) {
     }
     return;
   }
+  if (action.kind === "runtimeDashboard") {
+    await openRuntimeDashboardModal();
+    return;
+  }
   if (action.kind === "dialog") {
     openDialog(action.title, action.template, action.fields.map((x) => ({ ...x })), action.opType, !!action.reversible);
     return;
@@ -1721,6 +2221,7 @@ async function onTreeNodeClick(data: UiTreeNode) {
 onMounted(async () => {
   loadSettings();
   loadLogs();
+  appendSessionLogHeader();
   loadLogCollapsed();
   if (viewMode.value === "cli") {
     await mountCliTerminal();
@@ -1728,6 +2229,9 @@ onMounted(async () => {
   }
   if (viewMode.value === "log") {
     setInterval(loadLogs, 1000);
+    nextTick(() => {
+      scrollLogsToBottom();
+    });
     return;
   }
   state.value = await invoke<State>("get_state");
@@ -1754,19 +2258,47 @@ onMounted(async () => {
   window.addEventListener("click", () => {
     hideContextMenu();
   });
+  window.addEventListener("keydown", handleGlobalHotkeys);
+  nextTick(() => {
+    scrollLogsToBottom();
+  });
 });
 
 onUnmounted(() => {
   if (viewMode.value === "cli") {
     void teardownCliTerminal();
   }
+  stopSidebarResize();
+  window.removeEventListener("keydown", handleGlobalHotkeys);
 });
 </script>
 
 <template>
   <div v-if="viewMode === 'log'" class="log-only">
     <h2>独立日志窗口</h2>
-    <div class="logs">{{ logs.join("\n") }}</div>
+    <div class="log-tools">
+      <el-select v-model="logFilterKind" size="small" style="width: 120px">
+        <el-option label="全部" value="all" />
+        <el-option label="命令" value="cmd" />
+        <el-option label="错误" value="error" />
+        <el-option label="成功" value="success" />
+        <el-option label="状态" value="meta" />
+      </el-select>
+      <el-input v-model="logKeyword" size="small" clearable placeholder="筛选关键词" />
+      <el-button size="small" :type="logAutoFollow ? 'primary' : undefined" @click="toggleLogAutoFollow">
+        {{ logAutoFollow ? "跟随中" : "已暂停" }}
+      </el-button>
+    </div>
+    <div ref="logScrollPaneEl" class="logs command-output-box" @scroll="onLogScroll">
+      <div
+        v-for="(ln, idx) in visibleLogs"
+        :key="`logonly-${idx}`"
+        class="log-line"
+        :class="`log-${ln.kind}`"
+        v-html="highlightLogKeyword(ln.text)"
+      >
+      </div>
+    </div>
   </div>
 
   <div v-else-if="viewMode === 'cli'" class="cli-only">
@@ -1788,13 +2320,30 @@ onUnmounted(() => {
   <div
     v-else
     class="layout"
-    :class="{ dense: settings.denseMode, 'no-anim': !settings.animations }"
+    :class="{ dense: settings.denseMode, 'no-anim': !settings.animations, 'sidebar-collapsed': !showSidebar }"
     :style="layoutStyle"
   >
     <aside class="sidebar">
-      <div class="tables-title">架构 / 表</div>
-      <el-button plain @click="refreshTables">刷新表</el-button>
-      <div style="height: 8px" />
+      <div class="sidebar-section">
+        <div class="sidebar-header">
+          <div class="sidebar-title">架构 / 表</div>
+          <div class="sidebar-actions">
+            <el-button size="small" plain @click="showSidebar = false">收起</el-button>
+            <el-button size="small" plain @click="refreshTables">刷新</el-button>
+          </div>
+        </div>
+        <div class="sidebar-subtitle">
+          <span class="mono">workspace:</span>
+          <span class="sidebar-subtitle-path">{{ state.dataDir || "(未设置)" }}</span>
+        </div>
+        <div style="height: 8px" />
+        <el-input
+          v-model="tableSearch"
+          size="small"
+          clearable
+          placeholder="搜索 schema / table，例如 users 或 hr."
+        />
+      </div>
       <el-tree
         :data="treeData"
         node-key="key"
@@ -1813,33 +2362,150 @@ onUnmounted(() => {
             }"
             @contextmenu.prevent="data.type === 'table' && data.fullName && onTableContextMenu($event, data.fullName)"
           >
-            <span class="tree-icon">{{ data.type === "schema" ? "🗂" : "▦" }}</span>
-            <span>{{ data.label }}</span>
+            <span class="tree-icon" :class="{ schema: data.type === 'schema', table: data.type === 'table' }">
+              {{ data.type === "schema" ? "🗂" : "▦" }}
+            </span>
+            <span class="tree-label">{{ data.label }}</span>
           </div>
         </template>
       </el-tree>
+      <div class="sidebar-section sidebar-quicktools">
+        <div class="fold-header" @click="showRowAttrTools = !showRowAttrTools">
+          <strong>行 / 属性快捷操作</strong>
+          <span>{{ showRowAttrTools ? "▾" : "▸" }}</span>
+        </div>
+        <div v-if="showRowAttrTools" class="fold-body">
+          <div class="tool-grid">
+            <div class="tool-card">
+              <div class="tool-title">新增行</div>
+              <el-form label-width="0">
+                <el-form-item>
+                  <div class="tool-row sidebar-tool-row">
+                    <el-input
+                      v-model="addRowId"
+                      placeholder="id（可空）"
+                      @keydown="handleQuickToolEnter($event, 'addRow')"
+                    />
+                    <el-input
+                      v-model="addRowValues"
+                      placeholder="其它值（可空）"
+                      @keydown="handleQuickToolEnter($event, 'addRow')"
+                    />
+                    <el-button type="primary" :disabled="busy" @click="quickAddRow">新增</el-button>
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
+            <div class="tool-card">
+              <div class="tool-title">属性管理</div>
+              <el-form label-width="0">
+                <el-form-item>
+                  <div class="tool-row sidebar-tool-row">
+                    <el-input
+                      v-model="addAttrName"
+                      placeholder="属性名，如 salary"
+                      @keydown="handleQuickToolEnter($event, 'addAttr')"
+                    />
+                    <el-select v-model="addAttrType">
+                      <el-option value="string" label="string" />
+                      <el-option value="int" label="int" />
+                      <el-option value="float" label="float" />
+                      <el-option value="double" label="double" />
+                      <el-option value="bool" label="bool" />
+                      <el-option value="date" label="date" />
+                      <el-option value="datetime" label="datetime" />
+                      <el-option value="timestamp" label="timestamp" />
+                      <el-option value="char" label="char" />
+                    </el-select>
+                    <el-button type="primary" plain :disabled="busy" @click="addAttribute">新增属性</el-button>
+                  </div>
+                </el-form-item>
+                <el-form-item>
+                  <div class="tool-row sidebar-tool-row">
+                    <el-select
+                      v-model="delAttrName"
+                      placeholder="选择要删除的属性"
+                      @keydown="handleQuickToolEnter($event, 'delAttr')"
+                    >
+                      <el-option
+                        v-for="h in sortableAttrs.filter((x) => x !== 'id')"
+                        :key="`attr-sidebar-${h}`"
+                        :value="h"
+                        :label="h"
+                      />
+                    </el-select>
+                    <el-button
+                      type="danger"
+                      plain
+                      :disabled="busy"
+                      @click="deleteAttribute"
+                      @keydown="handleQuickToolEnter($event, 'delAttr')"
+                    >删除属性</el-button>
+                  </div>
+                </el-form-item>
+              </el-form>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="stack-panel">
-        <div class="stack-title">撤销栈 / 重做栈</div>
+        <div class="stack-header">
+          <div class="stack-title">事务栈</div>
+          <div class="stack-counts">
+            <span class="stack-chip">U {{ undoStack.length }}</span>
+            <span class="stack-chip">R {{ redoStack.length }}</span>
+          </div>
+        </div>
         <div class="stack-actions">
           <button class="secondary" :disabled="!canUndo || busy" @click="undo">撤销</button>
           <button class="secondary" :disabled="!canRedo || busy" @click="redo">重做</button>
         </div>
         <div class="stack-list">
-          <div v-for="(item, idx) in undoStack.slice().reverse().slice(0, 8)" :key="`u-${idx}`">
-            U {{ item.time }} - {{ item.title }}
+          <div v-if="undoStack.length === 0 && redoStack.length === 0" class="stack-empty">
+            暂无可撤销/重做操作
           </div>
-          <div v-for="(item, idx) in redoStack.slice().reverse().slice(0, 6)" :key="`r-${idx}`">
-            <div class="redo-line">
-              <span>R {{ item.time }} - {{ item.title }}</span>
-              <button
-                class="secondary mini"
-                @click="redoFromStack(redoStack.length - 1 - idx, true)"
-              >编辑重做</button>
+          <div
+            v-for="(item, idx) in undoStack.slice().reverse().slice(0, 8)"
+            :key="`u2-${idx}`"
+            class="stack-item clickable"
+            :class="{ selected: selectedStackKey === stackKey(item) }"
+            @click="selectStackItem(item)"
+          >
+            <span class="stack-badge">U</span>
+            <span class="stack-item-text">
+              <span class="mono">{{ item.time }}</span>
+              <span class="stack-item-title">{{ item.title }}</span>
+            </span>
+            <button class="secondary mini" @click.stop="viewOperationLog(item)">回看</button>
+          </div>
+          <div
+            v-for="(item, idx) in redoStack.slice().reverse().slice(0, 6)"
+            :key="`r-${idx}`"
+            class="stack-item redo clickable"
+            :class="{ selected: selectedStackKey === stackKey(item) }"
+            @click="selectStackItem(item)"
+          >
+            <span class="stack-badge">R</span>
+            <span class="stack-item-text">
+              <span class="mono">{{ item.time }}</span>
+              <span class="stack-item-title">{{ item.title }}</span>
+            </span>
+            <div class="stack-row-actions">
+              <button class="secondary mini" @click.stop="viewOperationLog(item)">回看</button>
+              <button class="secondary mini" @click.stop="redoFromStack(redoStack.length - 1 - idx, false)">重做</button>
+              <button class="secondary mini" @click.stop="redoFromStack(redoStack.length - 1 - idx, true)">编辑</button>
             </div>
           </div>
         </div>
       </div>
     </aside>
+    <div
+      v-if="showSidebar"
+      class="sidebar-resizer"
+      :class="{ active: sidebarResizing }"
+      title="拖拽调整侧栏宽度"
+      @mousedown.prevent="startSidebarResize"
+    />
 
     <section class="content" :class="{ 'console-collapsed': logCollapsed }">
       <div class="menu-bar">
@@ -1863,6 +2529,7 @@ onUnmounted(() => {
       <div class="toolbar">
         <div class="toolbar-group">
           <span class="toolbar-group-title">高频</span>
+          <el-button plain @click="showSidebar = !showSidebar">{{ showSidebar ? "隐藏侧栏" : "显示侧栏" }}</el-button>
           <el-button type="primary" :icon="FolderOpened" @click="setWorkspace">数据目录</el-button>
           <el-button type="primary" plain :icon="Plus" @click="openCreateTableWizard">创建表</el-button>
           <el-button :icon="Setting" @click="showSettingsModal = true">设置</el-button>
@@ -1888,72 +2555,6 @@ onUnmounted(() => {
         </div>
 
         <template v-if="activeTab === 'data'">
-          <div class="fold-panel">
-            <div class="fold-header">
-              <strong>Runtime Dashboard</strong>
-              <div class="dashboard-header-actions">
-                <span v-if="runtimeDashboard?.health?.tier" class="dashboard-tier-wrap">
-                  健康等级：
-                  <span class="dashboard-tier-pill" :class="dashboardTierClass">{{ runtimeDashboard.health.tier }}</span>
-                </span>
-                <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新</el-button>
-              </div>
-            </div>
-            <div class="fold-body">
-              <template v-if="runtimeDashboard">
-                <div class="dashboard-meta-line">
-                  <span>last refresh: {{ runtimeDashboardUpdatedAt || "n/a" }}</span>
-                  <span>generated_at: {{ runtimeDashboard.generated_at || "n/a" }}</span>
-                  <span v-if="runtimeDashboardTierChangeNote" class="dashboard-tier-change">
-                    tier changed: {{ runtimeDashboardTierChangeNote }}
-                  </span>
-                </div>
-                <div style="height: 8px" />
-                <div class="tool-grid">
-                  <div class="tool-card">
-                    <div class="tool-title">健康状态</div>
-                    <div><strong>tier:</strong> {{ runtimeDashboard.health?.tier || "unknown" }}</div>
-                    <div><strong>nightly rows:</strong> {{ runtimeDashboard.sources?.nightly_rows ?? 0 }}</div>
-                    <div><strong>test rows:</strong> {{ runtimeDashboard.sources?.test_loop_rows ?? 0 }}</div>
-                    <div><strong>nightly pass_rate:</strong> {{ runtimeDashboard.nightly_status?.pass_rate ?? "n/a" }}</div>
-                  </div>
-                  <div class="tool-card">
-                    <div class="tool-title">关键性能快照</div>
-                    <div><strong>latest query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_query_avg_ms ?? "n/a" }}</div>
-                    <div><strong>latest cm_tps_min:</strong> {{ runtimeDashboard.health?.latest_cm_tps_min ?? "n/a" }}</div>
-                    <div><strong>latest hp_query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_hp_max_query_avg_ms ?? "n/a" }}</div>
-                    <div><strong>latest txn_normal_avg_ms:</strong> {{ runtimeDashboard.health?.latest_txn_normal_avg_ms ?? "n/a" }}</div>
-                  </div>
-                  <div class="tool-card">
-                    <div class="tool-title">健康原因</div>
-                    <div v-if="runtimeDashboard.health?.reasons?.length">
-                      {{ runtimeDashboard.health?.reasons?.join(" | ") }}
-                    </div>
-                    <div v-else>无</div>
-                  </div>
-                </div>
-                <div style="height: 10px" />
-                <div class="tool-card">
-                  <div class="tool-title">最近运行（recent_runs）</div>
-                  <div v-if="dashboardRecentRuns.length === 0" class="mini-tip">暂无 recent_runs 数据</div>
-                  <div v-else class="recent-runs-list">
-                    <div v-for="(r, idx) in dashboardRecentRuns" :key="`run-${idx}`" class="recent-run-row">
-                      <span class="mono">{{ r.timestamp || "n/a" }}</span>
-                      <span>{{ r.source || "unknown" }}</span>
-                      <span class="mono">{{ r.runtime_run_id || "-" }}</span>
-                      <span>q={{ r.query_avg_ms_max ?? "n/a" }}</span>
-                      <span>cm={{ r.cm_tps_min ?? "n/a" }}</span>
-                      <span>status={{ r.status || "-" }}</span>
-                    </div>
-                  </div>
-                </div>
-              </template>
-              <template v-else>
-                <div class="mini-tip">未找到 runtime_trend_dashboard.json（先运行 test_loop/nightly_soak 产样）</div>
-              </template>
-            </div>
-          </div>
-
           <div class="open-table-tabs">
             <div class="open-table-tabs-left">
               <strong>已打开表</strong>
@@ -1975,89 +2576,6 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div class="fold-panel">
-            <div class="fold-header" @click="showRowAttrTools = !showRowAttrTools">
-              <strong>行 / 属性操作</strong>
-              <span>{{ showRowAttrTools ? "▾" : "▸" }}</span>
-            </div>
-            <div v-if="showRowAttrTools" class="fold-body">
-              <div class="tool-grid">
-                <div class="tool-card">
-                  <div class="tool-title">新增行</div>
-                  <el-form label-width="0">
-                    <el-form-item>
-                      <div class="tool-row">
-                        <el-input
-                          v-model="addRowId"
-                          placeholder="id（可空，自动+1）"
-                          style="width: 160px"
-                          @keydown="handleQuickToolEnter($event, 'addRow')"
-                        />
-                        <el-input
-                          v-model="addRowValues"
-                          placeholder="其它值（可空，如 Alice,ENG,29）"
-                          style="flex: 1"
-                          @keydown="handleQuickToolEnter($event, 'addRow')"
-                        />
-                        <el-button type="primary" :disabled="busy" @click="quickAddRow">新增</el-button>
-                      </div>
-                    </el-form-item>
-                  </el-form>
-                </div>
-                <div class="tool-card">
-                  <div class="tool-title">属性管理</div>
-                  <el-form label-width="0">
-                    <el-form-item>
-                      <div class="tool-row">
-                        <el-input
-                          v-model="addAttrName"
-                          placeholder="属性名，如 salary"
-                          style="width: 180px"
-                          @keydown="handleQuickToolEnter($event, 'addAttr')"
-                        />
-                        <el-select v-model="addAttrType" style="width: 140px">
-                          <el-option value="string" label="string" />
-                          <el-option value="int" label="int" />
-                          <el-option value="float" label="float" />
-                          <el-option value="double" label="double" />
-                          <el-option value="bool" label="bool" />
-                          <el-option value="date" label="date" />
-                          <el-option value="datetime" label="datetime" />
-                          <el-option value="timestamp" label="timestamp" />
-                          <el-option value="char" label="char" />
-                        </el-select>
-                        <el-button type="primary" plain :disabled="busy" @click="addAttribute">新增属性</el-button>
-                      </div>
-                    </el-form-item>
-                    <el-form-item>
-                      <div class="tool-row" style="width: 100%;">
-                        <el-select
-                          v-model="delAttrName"
-                          style="flex: 1"
-                          placeholder="选择要删除的属性"
-                          @keydown="handleQuickToolEnter($event, 'delAttr')"
-                        >
-                          <el-option
-                            v-for="h in sortableAttrs.filter((x) => x !== 'id')"
-                            :key="`attr-${h}`"
-                            :value="h"
-                            :label="h"
-                          />
-                        </el-select>
-                        <el-button
-                          type="danger"
-                          plain
-                          :disabled="busy"
-                          @click="deleteAttribute"
-                          @keydown="handleQuickToolEnter($event, 'delAttr')"
-                        >删除属性</el-button>
-                      </div>
-                    </el-form-item>
-                  </el-form>
-                </div>
-              </div>
-            </div>
-          </div>
           <div class="data-table-wrap">
             <el-table :data="tableViewData.rows" border height="100%" stripe table-layout="auto">
               <el-table-column
@@ -2173,12 +2691,23 @@ onUnmounted(() => {
 
       <div class="console">
         <div class="console-header">
-          <span>命令与日志</span>
+          <div class="console-header-left">
+            <span>命令与日志</span>
+            <el-tag size="small" effect="plain" :type="logAutoFollow ? 'success' : 'warning'">
+              {{ logAutoFollow ? "自动跟随" : "已暂停跟随" }}
+            </el-tag>
+            <span class="console-shortcuts">
+              <span class="kbd-chip"><kbd>Enter</kbd> 执行</span>
+              <span class="kbd-chip"><kbd>Ctrl</kbd>+<kbd>L</kbd> 清空</span>
+              <span class="kbd-chip"><kbd>Ctrl</kbd>+<kbd>K</kbd> 聚焦输入</span>
+            </span>
+          </div>
           <el-button text @click="toggleLogCollapsed">{{ logCollapsed ? "展开" : "折叠" }}</el-button>
         </div>
         <template v-if="!logCollapsed">
           <div class="console-input">
           <input
+            ref="commandInputEl"
             v-model="command"
             placeholder="输入命令，如 INSERT(1,alice,20)"
             style="flex: 1"
@@ -2186,7 +2715,30 @@ onUnmounted(() => {
           />
           <el-button type="primary" :icon="VideoPlay" @click="runCommand(command); command=''" :disabled="busy">执行命令</el-button>
           </div>
-          <div class="logs command-output-box">{{ logs.join('\n') }}</div>
+          <div class="log-tools">
+            <el-select v-model="logFilterKind" size="small" style="width: 120px">
+              <el-option label="全部" value="all" />
+              <el-option label="命令" value="cmd" />
+              <el-option label="错误" value="error" />
+              <el-option label="成功" value="success" />
+              <el-option label="状态" value="meta" />
+            </el-select>
+            <el-input v-model="logKeyword" size="small" clearable placeholder="筛选关键词" />
+            <el-button size="small" :type="logAutoFollow ? 'primary' : undefined" @click="toggleLogAutoFollow">
+              {{ logAutoFollow ? "跟随中" : "已暂停" }}
+            </el-button>
+            <span class="status">显示 {{ visibleLogs.length }} / {{ renderedLogs.length }}</span>
+          </div>
+          <div ref="logScrollPaneEl" class="logs command-output-box" @scroll="onLogScroll">
+            <div
+              v-for="(ln, idx) in visibleLogs"
+              :key="`mainlog-${idx}`"
+              class="log-line"
+              :class="`log-${ln.kind}`"
+              v-html="highlightLogKeyword(ln.text)"
+            >
+            </div>
+          </div>
         </template>
       </div>
     </section>
@@ -2240,26 +2792,38 @@ onUnmounted(() => {
 
     <el-dialog v-model="showHelp" class="help-modal" width="760px">
       <template #header>
-        <h3>帮助（可搜索，高亮匹配）</h3>
+        <div class="help-dialog-header">
+          <h3 style="margin: 0">帮助中心</h3>
+          <div class="help-dialog-stats">
+            <el-tag size="small" effect="plain">总计 {{ helpTotalCount }}</el-tag>
+            <el-tag size="small" type="success" effect="plain">命中 {{ helpMatchedCount }}</el-tag>
+          </div>
+        </div>
       </template>
-      <el-input v-model="helpKeyword" placeholder="搜索命令、语法、示例、说明..." />
+      <div class="help-dialog-toolbar">
+        <el-input v-model="helpKeyword" placeholder="搜索命令、语法、示例、说明..." />
+        <el-button @click="helpKeyword = ''">清空筛选</el-button>
+      </div>
       <div class="dialog-actions" style="margin-top: 8px">
         <el-button @click="expandAllHelp">全部展开</el-button>
         <el-button @click="collapseAllHelp">全部折叠</el-button>
       </div>
       <div class="help-list">
+        <div v-if="filteredHelp.length === 0" class="help-empty">
+          无匹配项，建议尝试 `INSERT` / `PAGE` / `WALSYNC` 等关键词
+        </div>
         <div v-for="(h, idx) in filteredHelp" :key="`${h.command}-${idx}`" class="help-item">
           <div class="help-header" @click="toggleHelpCard(idx)">
-            <strong v-html="highlight(h.category)"></strong>
-            <strong v-html="highlight(h.command)"></strong>
+            <span class="help-category" v-html="highlight(h.category)"></span>
+            <strong class="help-command" v-html="highlight(h.command)"></strong>
             <span>{{ helpExpanded[idx] ? "▾" : "▸" }}</span>
           </div>
           <div v-if="helpExpanded[idx]" class="help-body">
-            <div>语法：<span v-html="highlight(h.syntax)"></span></div>
-            <div v-if="h.overloads?.length">重载：<span v-html="highlight(h.overloads.join(' | '))"></span></div>
-            <div>示例：<span v-html="highlight(h.example)"></span></div>
-            <div>说明：<span v-html="highlight(h.desc)"></span></div>
-            <div>详细：<span v-html="highlight(h.detail)"></span></div>
+            <div><span class="help-kv-key">语法</span><span class="help-kv-val mono" v-html="highlight(h.syntax)"></span></div>
+            <div v-if="h.overloads?.length"><span class="help-kv-key">重载</span><span class="help-kv-val mono" v-html="highlight(h.overloads.join(' | '))"></span></div>
+            <div><span class="help-kv-key">示例</span><span class="help-kv-val mono" v-html="highlight(h.example)"></span></div>
+            <div><span class="help-kv-key">说明</span><span class="help-kv-val" v-html="highlight(h.desc)"></span></div>
+            <div><span class="help-kv-key">详细</span><span class="help-kv-val" v-html="highlight(h.detail)"></span></div>
           </div>
         </div>
       </div>
@@ -2289,6 +2853,74 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="showRuntimeDashboardModal" class="dashboard-modal" width="860px">
+      <template #header>
+        <div class="dashboard-modal-header">
+          <h3 style="margin:0;">Runtime Dashboard</h3>
+          <div class="dashboard-modal-header-right">
+            <span v-if="runtimeDashboard?.health?.tier" class="dashboard-tier-wrap">
+              <span class="dashboard-tier-pill" :class="dashboardTierClass">{{ runtimeDashboard.health.tier }}</span>
+            </span>
+            <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <template v-if="runtimeDashboard">
+        <div class="dashboard-meta-line">
+          <span>last refresh: {{ runtimeDashboardUpdatedAt || "n/a" }}</span>
+          <span>generated_at: {{ runtimeDashboard.generated_at || "n/a" }}</span>
+          <span v-if="runtimeDashboardTierChangeNote" class="dashboard-tier-change">
+            tier changed: {{ runtimeDashboardTierChangeNote }}
+          </span>
+        </div>
+        <div style="height: 10px" />
+        <div class="tool-grid">
+          <div class="tool-card">
+            <div class="tool-title">健康状态</div>
+            <div><strong>tier:</strong> {{ runtimeDashboard.health?.tier || "unknown" }}</div>
+            <div><strong>nightly rows:</strong> {{ runtimeDashboard.sources?.nightly_rows ?? 0 }}</div>
+            <div><strong>test rows:</strong> {{ runtimeDashboard.sources?.test_loop_rows ?? 0 }}</div>
+            <div><strong>nightly pass_rate:</strong> {{ runtimeDashboard.nightly_status?.pass_rate ?? "n/a" }}</div>
+          </div>
+          <div class="tool-card">
+            <div class="tool-title">关键性能快照</div>
+            <div><strong>latest query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_query_avg_ms ?? "n/a" }}</div>
+            <div><strong>latest cm_tps_min:</strong> {{ runtimeDashboard.health?.latest_cm_tps_min ?? "n/a" }}</div>
+            <div><strong>latest hp_query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_hp_max_query_avg_ms ?? "n/a" }}</div>
+            <div><strong>latest txn_normal_avg_ms:</strong> {{ runtimeDashboard.health?.latest_txn_normal_avg_ms ?? "n/a" }}</div>
+          </div>
+          <div class="tool-card">
+            <div class="tool-title">健康原因</div>
+            <div v-if="runtimeDashboard.health?.reasons?.length">
+              {{ runtimeDashboard.health?.reasons?.join(" | ") }}
+            </div>
+            <div v-else>无</div>
+          </div>
+        </div>
+        <div style="height: 10px" />
+        <div class="tool-card">
+          <div class="tool-title">最近运行（recent_runs）</div>
+          <div v-if="dashboardRecentRuns.length === 0" class="mini-tip">暂无 recent_runs 数据</div>
+          <div v-else class="recent-runs-list">
+            <div v-for="(r, idx) in dashboardRecentRuns" :key="`run-${idx}`" class="recent-run-row">
+              <span class="mono">{{ r.timestamp || "n/a" }}</span>
+              <span>{{ r.source || "unknown" }}</span>
+              <span class="mono">{{ r.runtime_run_id || "-" }}</span>
+              <span>q={{ r.query_avg_ms_max ?? "n/a" }}</span>
+              <span>cm={{ r.cm_tps_min ?? "n/a" }}</span>
+              <span>status={{ r.status || "-" }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <template v-else>
+        <div class="mini-tip">未找到 runtime_trend_dashboard.json（先运行 test_loop/nightly_soak 产样）</div>
+      </template>
+      <template #footer>
+        <el-button @click="showRuntimeDashboardModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="showWorkspaceWarning" width="620px">
       <template #header>
         <h3>Workspace 路径风险提示</h3>
@@ -2302,10 +2934,52 @@ onUnmounted(() => {
 
     <el-dialog v-model="showSettingsModal" class="settings-modal" width="700px">
       <template #header>
-        <h3>Settings</h3>
+        <div class="settings-header">
+          <h3 style="margin: 0">Settings</h3>
+          <span class="settings-summary mono">{{ settingsSummary }}</span>
+        </div>
       </template>
-      <div class="settings-grid">
-        <section class="settings-card">
+      <div class="settings-preset-row">
+        <span class="settings-preset-label">预设</span>
+        <el-button
+          v-for="preset in settingsPresets"
+          :key="preset.key"
+          size="small"
+          plain
+          @click="applySettingsPreset(preset)"
+        >
+          {{ preset.label }}
+        </el-button>
+      </div>
+      <div class="settings-tools-row">
+        <el-button size="small" @click="openSettingsImport">导入 JSON</el-button>
+        <el-button size="small" @click="exportSettingsJson">导出 JSON</el-button>
+        <el-tag size="small" :type="settingsDirty ? 'warning' : 'success'" effect="plain">
+          {{ settingsDirty ? "未保存" : "已保存" }}
+        </el-tag>
+        <span class="mini-tip">last saved: {{ settingsLastSavedAt || "n/a" }}</span>
+        <input
+          ref="settingsImportInput"
+          type="file"
+          accept="application/json,.json"
+          style="display:none"
+          @change="onSettingsImportChange"
+        />
+      </div>
+      <div class="settings-shell">
+        <aside class="settings-side-menu">
+          <button class="settings-menu-item" :class="{ active: settingsNav === 'theme' }" @click="settingsNav = 'theme'">
+            主题与背景
+          </button>
+          <button class="settings-menu-item" :class="{ active: settingsNav === 'layout' }" @click="settingsNav = 'layout'">
+            布局与交互
+          </button>
+          <button class="settings-menu-item" :class="{ active: settingsNav === 'module' }" @click="settingsNav = 'module'">
+            模块化样式
+          </button>
+        </aside>
+        <div class="settings-main">
+        <section v-if="settingsNav === 'theme'" class="settings-card">
           <div class="settings-card-title">主题与背景</div>
           <el-form label-width="120px">
             <el-form-item label="主题色">
@@ -2337,18 +3011,113 @@ onUnmounted(() => {
               </div>
             </el-form-item>
             <el-form-item label="背景透过度">
-              <el-slider v-model="settings.bgImageOpacity" :min="0.05" :max="0.8" :step="0.01" />
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.bgImageOpacity"
+                  :min="0.05"
+                  :max="0.8"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.bgImageOpacity.toFixed(2) }}</span>
+              </div>
             </el-form-item>
           </el-form>
         </section>
-        <section class="settings-card">
+        <section v-if="settingsNav === 'layout'" class="settings-card">
           <div class="settings-card-title">布局与交互</div>
           <el-form label-width="120px">
             <el-form-item label="面板透明度">
-              <el-slider v-model="settings.panelOpacity" :min="0.6" :max="1" :step="0.01" />
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.panelOpacity"
+                  :min="0.6"
+                  :max="1"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.panelOpacity.toFixed(2) }}</span>
+              </div>
             </el-form-item>
             <el-form-item label="字体缩放">
-              <el-slider v-model="settings.fontScale" :min="0.9" :max="1.2" :step="0.01" />
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.fontScale"
+                  :min="0.9"
+                  :max="1.2"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.fontScale.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="侧栏宽度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.sidebarWidth"
+                  :min="200"
+                  :max="460"
+                  :step="1"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ Math.round(settings.sidebarWidth) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="圆角尺度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.cornerScale"
+                  :min="0.8"
+                  :max="1.35"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.cornerScale.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="阴影强度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.shadowScale"
+                  :min="0.6"
+                  :max="1.5"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.shadowScale.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="日志字号">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.logFontScale"
+                  :min="0.88"
+                  :max="1.25"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.logFontScale.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="日志行高">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.logLineHeight"
+                  :min="1.3"
+                  :max="1.9"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.logLineHeight.toFixed(2) }}</span>
+              </div>
             </el-form-item>
             <el-form-item label="紧凑模式">
               <el-switch v-model="settings.denseMode" />
@@ -2358,8 +3127,55 @@ onUnmounted(() => {
             </el-form-item>
           </el-form>
         </section>
+        <section v-if="settingsNav === 'module'" class="settings-card">
+          <div class="settings-card-title">模块化样式覆盖</div>
+          <el-form label-width="120px">
+            <el-form-item label="边框对比度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.borderContrast"
+                  :min="0.75"
+                  :max="1.4"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.borderContrast.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="主面板亮度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.panelBrightness"
+                  :min="0.85"
+                  :max="1.2"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.panelBrightness.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="日志高亮强度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.logHighlightIntensity"
+                  :min="0.75"
+                  :max="1.4"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.logHighlightIntensity.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <div class="mini-tip">按模块影响：侧栏/主面板边框、主窗口亮度、日志高亮层级。</div>
+          </el-form>
+        </section>
+        </div>
       </div>
       <template #footer>
+        <el-button @click="persistSettings">立即保存</el-button>
         <el-button @click="resetSettings">恢复默认</el-button>
         <el-button type="primary" @click="showSettingsModal = false">关闭</el-button>
       </template>
@@ -2442,14 +3258,49 @@ onUnmounted(() => {
 
     <el-dialog
       v-model="showUiMessage"
-      width="480px"
+      :width="uiMessageIsLogReview ? '760px' : '480px'"
+      class="ui-message-modal"
       :close-on-click-modal="false"
       @closed="handleUiMessageClosed"
     >
       <template #header>
         <h3>{{ uiMessageTitle }}</h3>
       </template>
-      <div style="white-space: pre-wrap;">{{ uiMessageText }}</div>
+      <template v-if="uiMessageIsLogReview && parsedReviewLog">
+        <div class="review-log-meta">
+          <div><strong>命令</strong><span class="mono">{{ parsedReviewLog.command || "-" }}</span></div>
+          <div><strong>时间</strong><span class="mono">{{ parsedReviewLog.time || "-" }}</span></div>
+          <div><strong>区间</strong><span class="mono">{{ parsedReviewLog.lineRange || "-" }}</span></div>
+        </div>
+        <div class="review-log-toolbar">
+          <el-tag size="small" effect="plain" :type="reviewHitIndices.length ? 'success' : 'info'">
+            命中 {{ reviewHitIndices.length }}
+          </el-tag>
+          <span v-if="reviewHitIndices.length" class="review-hit-pos">
+            第 {{ reviewHitCursor + 1 }} / {{ reviewHitIndices.length }} 条
+          </span>
+          <span v-else class="review-hit-pos">未找到命中行</span>
+          <el-button size="small" :disabled="!reviewHitIndices.length" @click="jumpReviewHit(-1)">上一条</el-button>
+          <el-button size="small" :disabled="!reviewHitIndices.length" @click="jumpReviewHit(1)">下一条</el-button>
+        </div>
+        <div ref="reviewLogPaneEl" class="review-log-pane">
+          <div
+            v-for="(line, idx) in reviewLogRows"
+            :key="`review-log-${idx}`"
+            class="log-line"
+            :class="[
+              `log-${highlightReviewLogLine(line).kind}`,
+              { 'review-log-hit': reviewHitIndices.includes(idx), 'review-log-hit-active': reviewActiveHitLine === idx }
+            ]"
+            @click="focusReviewHitByLine(idx)"
+            :ref="(el) => setReviewLogRowRef(idx, el as Element | null)"
+          >
+            <span class="review-log-line-no">{{ idx + 1 }}</span>
+            <span>{{ line }}</span>
+          </div>
+        </div>
+      </template>
+      <div v-else style="white-space: pre-wrap;">{{ uiMessageText }}</div>
       <el-input
         v-if="uiMessageKind === 'prompt'"
         v-model="uiMessageInput"

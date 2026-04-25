@@ -43,6 +43,8 @@ struct TxnRuntimeStats {
     std::uint64_t vacuum_execute_count{0};
     std::uint64_t vacuum_cooldown_skip_count{0};
     std::uint64_t write_conflict_count{0};
+    std::uint64_t txn_begin_lock_conflict_count{0};
+    std::uint64_t wal_compact_count{0};
 };
 
 // 事务管理器（嵌入 ShellState，无全局单例）
@@ -94,6 +96,8 @@ public:
     std::uint64_t vacuumExecuteCount() const { return m_vacuum_execute_count.load(); }
     std::uint64_t vacuumCooldownSkipCount() const { return m_vacuum_cooldown_skip_count.load(); }
     std::uint64_t writeConflictCount() const { return m_write_conflict_count.load(); }
+    std::uint64_t txnBeginLockConflictCount() const { return m_txn_begin_lock_conflict_count.load(); }
+    std::uint64_t walCompactCount() const { return m_wal_compact_count.load(); }
     TxnRuntimeStats runtimeStats() const;
     bool vacuumRunning() const { return m_vacuum_running.load(); }
 
@@ -157,6 +161,8 @@ private:
     std::atomic<std::uint64_t> m_vacuum_execute_count{0};
     std::atomic<std::uint64_t> m_vacuum_cooldown_skip_count{0};
     std::atomic<std::uint64_t> m_write_conflict_count{0};
+    std::atomic<std::uint64_t> m_txn_begin_lock_conflict_count{0};
+    std::atomic<std::uint64_t> m_wal_compact_count{0};
     std::unordered_map<std::string, std::chrono::steady_clock::time_point> m_vacuum_last_run;
 
     std::string m_workspace_root;

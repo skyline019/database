@@ -124,6 +124,8 @@ std::string build_runtime_stats_json(const CApiSession& s) {
         << "\"vacuum_execute_count\":" << stats.vacuum_execute_count << ","
         << "\"vacuum_cooldown_skip_count\":" << stats.vacuum_cooldown_skip_count << ","
         << "\"write_conflicts\":" << stats.write_conflict_count << ","
+        << "\"txn_begin_lock_conflicts\":" << stats.txn_begin_lock_conflict_count << ","
+        << "\"wal_compact_count\":" << stats.wal_compact_count << ","
         << "\"vacuum_running\":" << (s.shell.txn.vacuumRunning() ? "true" : "false") << ","
         << "\"vacuum_ops_threshold\":" << s.shell.txn.vacuumOpsThreshold() << ","
         << "\"vacuum_min_interval_sec\":" << s.shell.txn.vacuumMinIntervalSec()

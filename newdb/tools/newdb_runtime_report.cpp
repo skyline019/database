@@ -19,6 +19,8 @@ struct Args {
     double max_conflict_rate{-1.0};
     double min_vacuum_efficiency_p50{-1.0};
     double max_conflict_rate_p95{-1.0};
+    double max_txn_begin_lock_conflict_delta{-1.0};
+    double max_wal_compact_delta{-1.0};
     int last_n{0};
 };
 
@@ -29,6 +31,8 @@ struct Row {
     std::uint64_t execute_count{0};
     std::uint64_t cooldown_skips{0};
     std::uint64_t write_conflicts{0};
+    std::uint64_t txn_begin_lock_conflicts{0};
+    std::uint64_t wal_compact_count{0};
     bool ok{false};
 };
 
@@ -47,7 +51,8 @@ void print_usage() {
         << "  [--run-id <id>|latest]\n"
         << "  [--label-prefix <prefix>] [--last-n <N>=2 for before/after]\n"
         << "  [--min-vacuum-efficiency <0..1>] [--max-conflict-rate <0..1>]\n"
-        << "  [--min-vacuum-efficiency-p50 <0..1>] [--max-conflict-rate-p95 <0..1>]\n";
+        << "  [--min-vacuum-efficiency-p50 <0..1>] [--max-conflict-rate-p95 <0..1>]\n"
+        << "  [--max-txn-begin-lock-conflict-delta <>=0] [--max-wal-compact-delta <>=0]\n";
 }
 
 bool parse_double(const char* s, double& out) {
@@ -102,6 +107,16 @@ bool parse_args(int argc, char** argv, Args& out) {
             if (!v || !parse_double(v, out.max_conflict_rate_p95)) return false;
             continue;
         }
+        if (arg == "--max-txn-begin-lock-conflict-delta") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_txn_begin_lock_conflict_delta)) return false;
+            continue;
+        }
+        if (arg == "--max-wal-compact-delta") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_wal_compact_delta)) return false;
+            continue;
+        }
         if (arg == "--label-prefix") {
             const char* v = next();
             if (!v) return false;
@@ -149,6 +164,15 @@ bool extract_u64_field(const std::string& line, const std::string& key, std::uin
     }
 }
 
+bool extract_u64_field_optional(const std::string& line, const std::string& key, std::uint64_t& out) {
+    std::uint64_t v = 0;
+    if (!extract_u64_field(line, key, v)) {
+        return true;
+    }
+    out = v;
+    return true;
+}
+
 bool extract_string_field(const std::string& line, const std::string& key, std::string& out) {
     const std::string needle = "\"" + key + "\":\"";
     const std::size_t pos = line.find(needle);
@@ -171,6 +195,8 @@ Row parse_row(const std::string& line) {
     ok = ok && extract_u64_field(line, "vacuum_execute_count", r.execute_count);
     ok = ok && extract_u64_field(line, "vacuum_cooldown_skip_count", r.cooldown_skips);
     ok = ok && extract_u64_field(line, "write_conflicts", r.write_conflicts);
+    ok = ok && extract_u64_field_optional(line, "txn_begin_lock_conflicts", r.txn_begin_lock_conflicts);
+    ok = ok && extract_u64_field_optional(line, "wal_compact_count", r.wal_compact_count);
     r.ok = ok;
     return r;
 }
@@ -202,6 +228,8 @@ std::string build_summary_json(std::size_t samples,
                                std::uint64_t execute_delta,
                                std::uint64_t skip_delta,
                                std::uint64_t conflict_delta,
+                               std::uint64_t begin_lock_conflict_delta,
+                               std::uint64_t wal_compact_delta,
                                double vacuum_efficiency,
                                double conflict_rate,
                                const DistStats& vacuum_eff_stats,
@@ -212,6 +240,8 @@ std::string build_summary_json(std::size_t samples,
            "\"vacuum_execute_delta\":" + std::to_string(execute_delta) + "," +
            "\"vacuum_cooldown_skip_delta\":" + std::to_string(skip_delta) + "," +
            "\"write_conflict_delta\":" + std::to_string(conflict_delta) + "," +
+           "\"txn_begin_lock_conflict_delta\":" + std::to_string(begin_lock_conflict_delta) + "," +
+           "\"wal_compact_delta\":" + std::to_string(wal_compact_delta) + "," +
            "\"vacuum_efficiency\":" + std::to_string(vacuum_efficiency) + "," +
            "\"conflict_rate\":" + std::to_string(conflict_rate) + "," +
            "\"vacuum_efficiency_min\":" + std::to_string(vacuum_eff_stats.min) + "," +
@@ -284,6 +314,13 @@ int main(int argc, char** argv) {
     const std::uint64_t conflict_delta = (last.write_conflicts >= first.write_conflicts)
                                              ? (last.write_conflicts - first.write_conflicts)
                                              : 0;
+    const std::uint64_t begin_lock_conflict_delta =
+        (last.txn_begin_lock_conflicts >= first.txn_begin_lock_conflicts)
+            ? (last.txn_begin_lock_conflicts - first.txn_begin_lock_conflicts)
+            : 0;
+    const std::uint64_t wal_compact_delta = (last.wal_compact_count >= first.wal_compact_count)
+                                                ? (last.wal_compact_count - first.wal_compact_count)
+                                                : 0;
 
     const double vacuum_efficiency =
         (trigger_delta == 0) ? 1.0 : (static_cast<double>(execute_delta) / static_cast<double>(trigger_delta));
@@ -314,6 +351,8 @@ int main(int argc, char** argv) {
         execute_delta,
         skip_delta,
         conflict_delta,
+        begin_lock_conflict_delta,
+        wal_compact_delta,
         vacuum_efficiency,
         conflict_rate,
         vacuum_eff_stats,
@@ -348,6 +387,17 @@ int main(int argc, char** argv) {
         std::cerr << "gate failed: conflict_rate_p95(" << conflict_rate_stats.p95
                   << ") > max_conflict_rate_p95(" << args.max_conflict_rate_p95 << ")\n";
         return 13;
+    }
+    if (args.max_txn_begin_lock_conflict_delta >= 0.0 &&
+        static_cast<double>(begin_lock_conflict_delta) > args.max_txn_begin_lock_conflict_delta) {
+        std::cerr << "gate failed: txn_begin_lock_conflict_delta(" << begin_lock_conflict_delta
+                  << ") > max_txn_begin_lock_conflict_delta(" << args.max_txn_begin_lock_conflict_delta << ")\n";
+        return 14;
+    }
+    if (args.max_wal_compact_delta >= 0.0 && static_cast<double>(wal_compact_delta) > args.max_wal_compact_delta) {
+        std::cerr << "gate failed: wal_compact_delta(" << wal_compact_delta
+                  << ") > max_wal_compact_delta(" << args.max_wal_compact_delta << ")\n";
+        return 15;
     }
 
     return 0;

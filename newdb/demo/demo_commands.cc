@@ -375,7 +375,7 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
         const char* mode_s = (mode == newdb::WalSyncMode::Off) ? "off" :
                              (mode == newdb::WalSyncMode::Normal) ? "normal" : "full";
         log_and_print(log_file,
-                      "[TUNING] WALSYNC=%s normal_interval_ms=%llu AUTOVACUUM=%s ops_threshold=%zu min_interval_sec=%zu trigger_count=%llu execute_count=%llu cooldown_skips=%llu write_conflicts=%llu\n",
+                      "[TUNING] WALSYNC=%s normal_interval_ms=%llu AUTOVACUUM=%s ops_threshold=%zu min_interval_sec=%zu trigger_count=%llu execute_count=%llu cooldown_skips=%llu write_conflicts=%llu begin_lock_conflicts=%llu wal_compacts=%llu\n",
                       mode_s,
                       static_cast<unsigned long long>(st.txn.walNormalSyncIntervalMs()),
                       st.txn.vacuumRunning() ? "on" : "off",
@@ -384,7 +384,9 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
                       static_cast<unsigned long long>(stats.vacuum_trigger_count),
                       static_cast<unsigned long long>(stats.vacuum_execute_count),
                       static_cast<unsigned long long>(stats.vacuum_cooldown_skip_count),
-                      static_cast<unsigned long long>(stats.write_conflict_count));
+                      static_cast<unsigned long long>(stats.write_conflict_count),
+                      static_cast<unsigned long long>(stats.txn_begin_lock_conflict_count),
+                      static_cast<unsigned long long>(stats.wal_compact_count));
         return true;
     }
     if (strcasecmp_ascii(line, "SHOW TUNING JSON") == 0 || strcasecmp_ascii(line, "SHOW STATUS JSON") == 0) {
@@ -396,7 +398,8 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
                       "{\"walsync\":\"%s\",\"normal_interval_ms\":%llu,\"autovacuum\":%s,"
                       "\"vacuum_ops_threshold\":%zu,\"vacuum_min_interval_sec\":%zu,"
                       "\"vacuum_trigger_count\":%llu,\"vacuum_execute_count\":%llu,"
-                      "\"vacuum_cooldown_skip_count\":%llu,\"write_conflicts\":%llu}\n",
+                      "\"vacuum_cooldown_skip_count\":%llu,\"write_conflicts\":%llu,"
+                      "\"txn_begin_lock_conflicts\":%llu,\"wal_compact_count\":%llu}\n",
                       mode_s,
                       static_cast<unsigned long long>(st.txn.walNormalSyncIntervalMs()),
                       st.txn.vacuumRunning() ? "true" : "false",
@@ -405,7 +408,9 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
                       static_cast<unsigned long long>(stats.vacuum_trigger_count),
                       static_cast<unsigned long long>(stats.vacuum_execute_count),
                       static_cast<unsigned long long>(stats.vacuum_cooldown_skip_count),
-                      static_cast<unsigned long long>(stats.write_conflict_count));
+                      static_cast<unsigned long long>(stats.write_conflict_count),
+                      static_cast<unsigned long long>(stats.txn_begin_lock_conflict_count),
+                      static_cast<unsigned long long>(stats.wal_compact_count));
         return true;
     }
     if (strcasecmp_ascii(line, "SHOW STORAGE") == 0) {

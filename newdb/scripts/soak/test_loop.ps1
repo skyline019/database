@@ -160,6 +160,30 @@ function Load-JsonFile([string]$path) {
     }
 }
 
+function Invoke-PythonScript {
+    param(
+        [string]$ScriptPath,
+        [string[]]$ScriptArgs
+    )
+    $pythonCandidates = @(
+        @("python3"),
+        @("py", "-3"),
+        @("python")
+    )
+    foreach ($candidate in $pythonCandidates) {
+        $cmd = $candidate[0]
+        $prefix = @()
+        if ($candidate.Length -gt 1) {
+            $prefix = $candidate[1..($candidate.Length - 1)]
+        }
+        & $cmd @prefix $ScriptPath @ScriptArgs
+        if ($LASTEXITCODE -eq 0) {
+            return
+        }
+    }
+    throw "failed to execute python script: $ScriptPath"
+}
+
 function Resolve-HighPressureQueryGate([double]$rows) {
     if ($rows -ge 3000000.0) { return $MaxHighPressureQueryAvgMs3M }
     if ($rows -ge 1000000.0) { return $MaxHighPressureQueryAvgMs1M }
@@ -329,6 +353,8 @@ $perf = [ordered]@{
     runtime_samples = $null
     runtime_vacuum_efficiency_p50 = $null
     runtime_conflict_rate_p95 = $null
+    runtime_txn_begin_lock_conflict_delta = $null
+    runtime_wal_compact_delta = $null
     runtime_run_id = $null
     soak_repeat = $null
     soak_summary = $null
@@ -467,11 +493,15 @@ if ($RunConcurrentPressure) {
         $perf.runtime_samples = $cpSummary.runtime_gate_summary.samples
         $perf.runtime_vacuum_efficiency_p50 = $cpSummary.runtime_gate_summary.vacuum_efficiency_p50
         $perf.runtime_conflict_rate_p95 = $cpSummary.runtime_gate_summary.conflict_rate_p95
+        $perf.runtime_txn_begin_lock_conflict_delta = $cpSummary.runtime_gate_summary.txn_begin_lock_conflict_delta
+        $perf.runtime_wal_compact_delta = $cpSummary.runtime_gate_summary.wal_compact_delta
         $perf.runtime_run_id = $cpSummary.runtime_run_id
         Add-TelemetryEvent -Phase "concurrent_pressure" -Metrics @{
             runtime_samples = $perf.runtime_samples
             runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
             runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
+            runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
+            runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
             runtime_run_id = $perf.runtime_run_id
             summary = $cpSummaryPath
         }
@@ -529,6 +559,8 @@ if ($SoakMinutes -gt 0) {
         $perf.runtime_samples = $soakSummary.runtime_gate_summary.samples
         $perf.runtime_vacuum_efficiency_p50 = $soakSummary.runtime_gate_summary.vacuum_efficiency_p50
         $perf.runtime_conflict_rate_p95 = $soakSummary.runtime_gate_summary.conflict_rate_p95
+        $perf.runtime_txn_begin_lock_conflict_delta = $soakSummary.runtime_gate_summary.txn_begin_lock_conflict_delta
+        $perf.runtime_wal_compact_delta = $soakSummary.runtime_gate_summary.wal_compact_delta
         $perf.runtime_run_id = $soakSummary.runtime_run_id
     }
     Add-TelemetryEvent -Phase "soak" -Metrics @{
@@ -537,6 +569,8 @@ if ($SoakMinutes -gt 0) {
         runtime_samples = $perf.runtime_samples
         runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
         runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
+        runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
+        runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
     }
 }
 
@@ -581,12 +615,24 @@ $trendPath = Join-Path $resultDir "test_loop_trend.jsonl"
     runtime_samples = $perf.runtime_samples
     runtime_vacuum_efficiency_p50 = $perf.runtime_vacuum_efficiency_p50
     runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
+    runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
+    runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
     runtime_run_id = $perf.runtime_run_id
     cm_tps_min = $perf.cm_tps_min
     soak_repeat = $perf.soak_repeat
     soak_summary = $perf.soak_summary
 } | ConvertTo-Json -Compress) | Add-Content -Path $trendPath
 Write-Host ("==> Trend JSONL: {0}" -f $trendPath)
+
+$nightlyTrendPath = Join-Path $resultDir "nightly_soak_trend.jsonl"
+$dashboardPath = Join-Path $resultDir "runtime_trend_dashboard.json"
+Invoke-PythonScript -ScriptPath (Join-Path $scriptsRoot "runtime_trend_rollup.py") -ScriptArgs @(
+    "--test-loop-trend", $trendPath,
+    "--nightly-trend", $nightlyTrendPath,
+    "--output", $dashboardPath
+)
+Invoke-PythonScript -ScriptPath (Join-Path $scriptsBase "validate/validate_runtime_trend_dashboard.py") -ScriptArgs @($dashboardPath)
+Write-Host ("==> Runtime trend dashboard: {0}" -f $dashboardPath)
 
 if ($EnforcePerf) {
     $failed = $false

@@ -161,12 +161,24 @@ for ($i = 1; $i -le $Runs; $i++) {
         runtime_samples = if ($perf) { $perf.runtime_samples } else { $null }
         runtime_vacuum_efficiency_p50 = if ($perf) { $perf.runtime_vacuum_efficiency_p50 } else { $null }
         runtime_conflict_rate_p95 = if ($perf) { $perf.runtime_conflict_rate_p95 } else { $null }
+        runtime_txn_begin_lock_conflict_delta = if ($perf) { $perf.runtime_txn_begin_lock_conflict_delta } else { $null }
+        runtime_wal_compact_delta = if ($perf) { $perf.runtime_wal_compact_delta } else { $null }
         runtime_run_id = if ($perf) { $perf.runtime_run_id } else { $null }
         soak_repeat = if ($soak) { $soak.repeat } else { $null }
         soak_summary = if ($soak) { $soak.summary } else { $null }
     }
     ($record | ConvertTo-Json -Compress) | Add-Content -Path $nightlyTrendPath
     Write-Host ("Nightly trend append: {0}" -f $nightlyTrendPath)
+
+    $testLoopTrendPath = Join-Path $resultDir "test_loop_trend.jsonl"
+    $dashboardPath = Join-Path $resultDir "runtime_trend_dashboard.json"
+    Invoke-PythonScript -ScriptPath (Join-Path $scriptsRoot "runtime_trend_rollup.py") -ScriptArgs @(
+        "--test-loop-trend", $testLoopTrendPath,
+        "--nightly-trend", $nightlyTrendPath,
+        "--output", $dashboardPath
+    )
+    Invoke-PythonScript -ScriptPath (Join-Path (Split-Path -Parent $scriptsRoot) "validate/validate_runtime_trend_dashboard.py") -ScriptArgs @($dashboardPath)
+    Write-Host ("Nightly dashboard refresh: {0}" -f $dashboardPath)
 
     if ($exitCode -ne 0 -and -not $ContinueOnFailure) {
         throw "Nightly run failed at index=$i exit_code=$exitCode"

@@ -79,6 +79,7 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
     const std::string bin_file = resolveDataFilePath(table_name);
     auto lockResult = acquireLock(bin_file);
     if (lockResult.isErr()) {
+        m_txn_begin_lock_conflict_count.fetch_add(1, std::memory_order_relaxed);
         m_state.store(TxnState::None);
         return lockResult;
     }
@@ -563,6 +564,7 @@ void TxnCoordinator::maybeCompactWalAfterCommit() {
         return;
     }
     (void)w2->checkpoint_and_truncate(w2->current_lsn());
+    m_wal_compact_count.fetch_add(1, std::memory_order_relaxed);
     persistWalsnHighWaterUnlocked(w2);
 }
 
@@ -874,5 +876,7 @@ TxnRuntimeStats TxnCoordinator::runtimeStats() const {
     s.vacuum_execute_count = m_vacuum_execute_count.load(std::memory_order_relaxed);
     s.vacuum_cooldown_skip_count = m_vacuum_cooldown_skip_count.load(std::memory_order_relaxed);
     s.write_conflict_count = m_write_conflict_count.load(std::memory_order_relaxed);
+    s.txn_begin_lock_conflict_count = m_txn_begin_lock_conflict_count.load(std::memory_order_relaxed);
+    s.wal_compact_count = m_wal_compact_count.load(std::memory_order_relaxed);
     return s;
 }

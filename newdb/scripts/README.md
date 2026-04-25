@@ -22,7 +22,8 @@
   CI 轻量压测门禁；支持可选 `--runtime-jsonl` + 阈值参数
   （`--min-vacuum-efficiency` / `--max-conflict-rate`）调用 `newdb_runtime_report`
   做运行时统计趋势门禁。额外支持 `--runtime-last-n` 与
-  `--runtime-label-prefix`，用于单次窗口隔离与标签过滤。
+  `--runtime-label-prefix`，用于单次窗口隔离与标签过滤。P11 增补
+  `--max-txn-begin-lock-conflict-delta` 与 `--max-wal-compact-delta`。
 
 ## 2) 性能与压测脚本（scripts/bench）
 
@@ -38,6 +39,7 @@
 - 每次运行默认独立 `runtime_stats_concurrent_pressure_<timestamp>.jsonl`
 - `-AppendRuntimeJsonl`（显式开启后才追加）
 - `-RunRuntimeGate` + 阈值参数（支持均值与趋势分位阈值）
+- 新增 `-MaxTxnBeginLockConflictDelta` / `-MaxWalCompactDelta`（锁冲突与 WAL 压缩 delta 门禁）
 - `-RuntimePressureBatches` / `-RuntimePressureBatchSize` / `-RuntimeSampleEveryBatches`（控制同生命周期多点采样强度）
 - 采样会写入 `run_id`，可配合 `newdb_runtime_report --run-id` 做单次运行趋势分析（含 p50/p95）
 
@@ -51,7 +53,8 @@
 - `soak/nightly_soak_runner.ps1`
 
 `test_loop.ps1` 与 `nightly_soak_runner.ps1` 当前会输出趋势 JSONL，包含
-`runtime_samples`、`runtime_vacuum_efficiency_p50`、`runtime_conflict_rate_p95`
+`runtime_samples`、`runtime_vacuum_efficiency_p50`、`runtime_conflict_rate_p95`、
+`runtime_txn_begin_lock_conflict_delta`、`runtime_wal_compact_delta`
 等运行时门禁指标，便于长期回归追踪。
 
 ## 4) C API / 遥测 / 汇总校验（scripts/validate）
@@ -61,8 +64,13 @@
 - `validate/validate_telemetry_event.py`
 - `validate/validate_perf_summary.py`
 - `validate/validate_runtime_stats.py`
+- `validate/validate_runtime_trend_dashboard.py`
 - `PERF_METRICS_SCHEMA.md`
 - `RUNTIME_STATS_SCHEMA.md`
+
+`newdb.runtime_stats.v1` 当前除 vacuum/conflict 指标外，已补充
+`txn_begin_lock_conflicts` 与 `wal_compact_count`，用于观测事务启动锁争用与
+WAL 压缩触发强度。
 
 ## 5) 文档与运维说明
 
@@ -72,6 +80,9 @@
 ## 6) 结果目录
 
 - `results/` 为脚本生成产物目录（json/csv/jsonl），详见 `results/README.md`。
+- `soak/runtime_trend_rollup.py` 会把 `test_loop_trend.jsonl` 与 `nightly_soak_trend.jsonl`
+  聚合为 `runtime_trend_dashboard.json`（schema: `newdb.runtime_trend_dashboard.v1`），并输出
+  `recent_runs`（默认最近 30 条，可用 `--recent-limit` 调整）方便前端直接绘制趋势线。
 
 ---
 

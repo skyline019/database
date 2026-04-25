@@ -19,6 +19,8 @@ REQUIRED_STATS = (
     "vacuum_execute_count",
     "vacuum_cooldown_skip_count",
     "write_conflicts",
+    "txn_begin_lock_conflicts",
+    "wal_compact_count",
 )
 ALLOWED_WALSYNC = {"off", "normal", "full"}
 
@@ -65,6 +67,8 @@ def validate_row(obj: dict, idx: int) -> int:
         "vacuum_execute_count",
         "vacuum_cooldown_skip_count",
         "write_conflicts",
+        "txn_begin_lock_conflicts",
+        "wal_compact_count",
     ):
         if not _is_non_negative_int(stats[key]):
             return fail(f"line {idx}: `{key}` must be non-negative int")

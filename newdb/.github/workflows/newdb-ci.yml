@@ -109,6 +109,8 @@ jobs:
                       "vacuum_execute_count": 0,
                       "vacuum_cooldown_skip_count": 0,
                       "write_conflicts": 0,
+                      "txn_begin_lock_conflicts": 0,
+                      "wal_compact_count": 0,
                   },
               },
               {
@@ -126,6 +128,8 @@ jobs:
                       "vacuum_execute_count": 2,
                       "vacuum_cooldown_skip_count": 0,
                       "write_conflicts": 0,
+                      "txn_begin_lock_conflicts": 0,
+                      "wal_compact_count": 0,
                   },
               },
           ]

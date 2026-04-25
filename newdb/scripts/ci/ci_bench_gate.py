@@ -105,6 +105,18 @@ def main() -> int:
         default=-1.0,
         help="Fail gate when conflict_rate_p95 is above this threshold (disabled when <0).",
     )
+    p.add_argument(
+        "--max-txn-begin-lock-conflict-delta",
+        type=float,
+        default=-1.0,
+        help="Fail gate when txn_begin_lock_conflict_delta is above this threshold (disabled when <0).",
+    )
+    p.add_argument(
+        "--max-wal-compact-delta",
+        type=float,
+        default=-1.0,
+        help="Fail gate when wal_compact_delta is above this threshold (disabled when <0).",
+    )
     args = p.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     # scripts/ci/ci_bench_gate.py -> repo root is two levels up.
@@ -161,6 +173,10 @@ def main() -> int:
             cmd.extend(["--min-vacuum-efficiency-p50", str(args.min_vacuum_efficiency_p50)])
         if args.max_conflict_rate_p95 >= 0.0:
             cmd.extend(["--max-conflict-rate-p95", str(args.max_conflict_rate_p95)])
+        if args.max_txn_begin_lock_conflict_delta >= 0.0:
+            cmd.extend(["--max-txn-begin-lock-conflict-delta", str(args.max_txn_begin_lock_conflict_delta)])
+        if args.max_wal_compact_delta >= 0.0:
+            cmd.extend(["--max-wal-compact-delta", str(args.max_wal_compact_delta)])
         out = subprocess.check_output(cmd, cwd=b, text=True).strip()
         # Keep one machine-readable summary line in CI logs.
         try:

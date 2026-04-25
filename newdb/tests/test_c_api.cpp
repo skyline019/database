@@ -182,6 +182,8 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     EXPECT_NE(stats_json.find("\"vacuum_execute_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_cooldown_skip_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"write_conflicts\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_compact_count\":"), std::string::npos);
 
     std::memset(out, 0, sizeof(out));
     EXPECT_EQ(newdb_session_execute(h2, "SHOW TUNING JSON", out, sizeof(out)), 1);
@@ -190,6 +192,8 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     EXPECT_NE(tuning_json.find("\"vacuum_execute_count\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"vacuum_cooldown_skip_count\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"write_conflicts\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_compact_count\":"), std::string::npos);
 
     EXPECT_EQ(newdb_session_execute(h1, "ROLLBACK", out, sizeof(out)), 1);
 
@@ -225,6 +229,8 @@ TEST(CApi, RuntimeSnapshotAppendsJsonl) {
     EXPECT_NE(l1.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l1.find("\"label\":\"after_insert\""), std::string::npos);
     EXPECT_NE(l1.find("\"stats\":{"), std::string::npos);
+    EXPECT_NE(l1.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_compact_count\":"), std::string::npos);
     EXPECT_NE(l2.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l2.find("\"label\":\"after_insert_2\""), std::string::npos);
     in.close();

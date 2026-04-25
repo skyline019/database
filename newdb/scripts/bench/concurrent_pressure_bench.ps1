@@ -11,7 +11,9 @@ param(
     [double]$MinVacuumEfficiency = -1.0,
     [double]$MaxConflictRate = -1.0,
     [double]$MinVacuumEfficiencyP50 = -1.0,
-    [double]$MaxConflictRateP95 = -1.0
+    [double]$MaxConflictRateP95 = -1.0,
+    [double]$MaxTxnBeginLockConflictDelta = -1.0,
+    [double]$MaxWalCompactDelta = -1.0
 )
 
 Set-StrictMode -Version Latest
@@ -174,6 +176,12 @@ if ($RunRuntimeGate) {
     if ($MaxConflictRateP95 -ge 0.0) {
         $reportCmd += @("--max-conflict-rate-p95", "$MaxConflictRateP95")
     }
+    if ($MaxTxnBeginLockConflictDelta -ge 0.0) {
+        $reportCmd += @("--max-txn-begin-lock-conflict-delta", "$MaxTxnBeginLockConflictDelta")
+    }
+    if ($MaxWalCompactDelta -ge 0.0) {
+        $reportCmd += @("--max-wal-compact-delta", "$MaxWalCompactDelta")
+    }
     $reportOut = (& $reportExe @reportCmd | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "runtime gate failed: exit_code=$LASTEXITCODE"
@@ -209,6 +217,8 @@ if ($RunRuntimeGate) {
      max_conflict_rate = $MaxConflictRate
      min_vacuum_efficiency_p50 = $MinVacuumEfficiencyP50
      max_conflict_rate_p95 = $MaxConflictRateP95
+     max_txn_begin_lock_conflict_delta = $MaxTxnBeginLockConflictDelta
+     max_wal_compact_delta = $MaxWalCompactDelta
      runtime_gate_summary = $runtimeGateSummary
      status = "passed"
  } | ConvertTo-Json -Depth 5 | Set-Content -Path $summaryPath

@@ -22,6 +22,8 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `vacuum_execute_count` (int >= 0)
 - `vacuum_cooldown_skip_count` (int >= 0)
 - `write_conflicts` (int >= 0)
+- `txn_begin_lock_conflicts` (int >= 0): `BEGIN(table)` 阶段文件锁冲突次数
+- `wal_compact_count` (int >= 0): WAL checkpoint+truncate 成功执行次数
 
 ## Notes
 

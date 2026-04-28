@@ -1,6 +1,6 @@
 \section{MVCC：快照可见性与事务水位线}
 
-对应实现：\fpath{newdb/src/mvcc.cpp}（快照与管理器）、\fpath{newdb/src/page_io.cpp}（元数据提取）、\fpath{newdb/src/heap_table.cpp}（可见性应用）
+对应实现：\fpath{newdb/engine/src/mvcc/snapshot/mvcc.cpp}（快照与管理器）、\fpath{newdb/engine/src/io/page/page_io.cpp}（元数据提取）、\fpath{newdb/engine/src/heap/heap_table.cpp}（可见性应用）
 
 \subsection{关键代码段：可见性函数 is\_visible}
 

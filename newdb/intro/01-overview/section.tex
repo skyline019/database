@@ -21,7 +21,7 @@
 
 \subsubsection{Row：逻辑行（内存表示）}
 
-定义见 \fpath{newdb/include/newdb/row.h}：
+定义见 \fpath{newdb/engine/include/newdb/row.h}：
 
 \begin{lstlisting}[language=C++,caption={Row（原型）}]
 struct Row {
@@ -48,7 +48,7 @@ struct Row {
 
 \subsubsection{HeapRowFinger：物理定位（懒加载的核心索引单元）}
 
-定义见 \fpath{newdb/include/newdb/heap_storage.h}：
+定义见 \fpath{newdb/engine/include/newdb/heap_storage.h}：
 
 \begin{lstlisting}[language=C++,caption={HeapRowFinger（原型）}]
 struct HeapRowFinger {
@@ -71,7 +71,7 @@ struct HeapRowFinger {
 
 \subsubsection{RecordMetadata：MVCC 元数据（与 slot 对齐存放）}
 
-定义见 \fpath{newdb/include/newdb/mvcc.h}：
+定义见 \fpath{newdb/engine/include/newdb/mvcc.h}：
 
 \begin{lstlisting}[language=C++,caption={RecordMetadata（原型）}]
 struct RecordMetadata {
@@ -100,7 +100,7 @@ struct RecordMetadata {
 
 \subsubsection{TableSchema：会话级 schema（类型与比较语义的来源）}
 
-定义见 \fpath{newdb/include/newdb/schema.h}：
+定义见 \fpath{newdb/engine/include/newdb/schema.h}：
 
 \begin{lstlisting}[language=C++,caption={TableSchema（核心字段节选）}]
 struct TableSchema {
@@ -121,7 +121,7 @@ struct TableSchema {
 
 \subsubsection{HeapTable：逻辑表（双形态 + 多索引 + 可见性过滤）}
 
-定义见 \fpath{newdb/include/newdb/heap_table.h}。最关键的是它同时承载两种表示：
+定义见 \fpath{newdb/engine/include/newdb/heap_table.h}。最关键的是它同时承载两种表示：
 
 \begin{itemize}
   \item \textbf{物化}：\texttt{rows} 非空，索引值指向 \texttt{rows} 下标；
@@ -132,7 +132,7 @@ struct TableSchema {
 
 \subsubsection{WAL 相关：WalRecordHeader / QueuedWalOp}
 
-\texttt{WalRecordHeader} 定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+\texttt{WalRecordHeader} 定义见 \fpath{newdb/engine/include/newdb/wal_manager.h}：
 
 \begin{lstlisting}[language=C++,caption={WalRecordHeader（原型）}]
 struct WalRecordHeader {
@@ -159,7 +159,7 @@ struct WalRecordHeader {
 
 \subsubsection{WalDecodedRecord：WAL 解码后的“统一记录视图”（用于读取/调试）}
 
-定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+定义见 \fpath{newdb/engine/include/newdb/wal_manager.h}：
 
 \begin{lstlisting}[language=C++,caption={WalDecodedRecord（原型）}]
 struct WalDecodedRecord {
@@ -189,7 +189,7 @@ struct WalDecodedRecord {
 
 \subsubsection{WalRecoveryStats：恢复过程的可观测性指标（性能/正确性排查入口）}
 
-定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+定义见 \fpath{newdb/engine/include/newdb/wal_manager.h}：
 
 \begin{lstlisting}[language=C++,caption={WalRecoveryStats（字段节选）}]
 struct WalRecoveryStats {
@@ -231,7 +231,7 @@ struct WalRecoveryStats {
 
 \subsubsection{WalTxn：事务 RAII（保证异常路径也能 rollback）}
 
-定义见 \fpath{newdb/include/newdb/wal_manager.h}：
+定义见 \fpath{newdb/engine/include/newdb/wal_manager.h}：
 
 \begin{lstlisting}[language=C++,caption={WalTxn（原型）}]
 class WalTxn {
@@ -265,7 +265,7 @@ private:
 
 \subsubsection{MVCCSnapshot：读视图的载体（被 HeapTable 消费的关键对象）}
 
-定义见 \fpath{newdb/include/newdb/mvcc.h}：
+定义见 \fpath{newdb/engine/include/newdb/mvcc.h}：
 
 \begin{lstlisting}[language=C++,caption={MVCCSnapshot（原型）}]
 struct MVCCSnapshot {
@@ -302,7 +302,7 @@ struct MVCCSnapshot {
 
 \subsubsection{HeapFileReadView：只读堆文件视图（mmap/stdio 抽象）}
 
-定义见 \fpath{newdb/include/newdb/heap_file_read_view.h}：
+定义见 \fpath{newdb/engine/include/newdb/heap_file_read_view.h}：
 
 \begin{lstlisting}[language=C++,caption={HeapFileReadView（接口节选）}]
 class HeapFileReadView {
@@ -325,7 +325,7 @@ public:
 
 \subsubsection{HeapLoadOptions：装载策略开关}
 
-定义见 \fpath{newdb/include/newdb/heap_storage.h}：
+定义见 \fpath{newdb/engine/include/newdb/heap_storage.h}：
 
 \begin{lstlisting}[language=C++,caption={HeapLoadOptions（原型）}]
 struct HeapLoadOptions {
@@ -342,7 +342,7 @@ struct HeapLoadOptions {
 
 \subsubsection{heap\_page::RecordSlice：页内记录切片（无需拷贝）}
 
-定义见 \fpath{newdb/include/newdb/heap_page.h}：
+定义见 \fpath{newdb/engine/include/newdb/heap_page.h}：
 
 \begin{lstlisting}[language=C++,caption={RecordSlice（原型）}]
 struct RecordSlice {
@@ -361,7 +361,7 @@ struct RecordSlice {
 
 \subsubsection{Status：显式错误载体（跨层传播的“最小公约数”）}
 
-定义见 \fpath{newdb/include/newdb/error.h}：
+定义见 \fpath{newdb/engine/include/newdb/error.h}：
 
 \begin{lstlisting}[language=C++,caption={Status（原型）}]
 struct Status {
@@ -382,7 +382,7 @@ struct Status {
 
 \subsubsection{Session：会话对象（线程安全边界明确）}
 
-定义见 \fpath{newdb/include/newdb/session.h}。它的“关键点”不是字段数量，而是并发语义：
+定义见 \fpath{newdb/engine/include/newdb/session.h}。它的“关键点”不是字段数量，而是并发语义：
 
 \begin{itemize}
   \item \textbf{mut\_ 保护范围}：保护 \texttt{cache\_valid}、schema 重载副作用、以及 \texttt{table} 的一致视图。
@@ -394,7 +394,7 @@ struct Status {
 
 \subsubsection{Catalog：数据库目录的文件系统视图}
 
-定义见 \fpath{newdb/include/newdb/catalog.h}：
+定义见 \fpath{newdb/engine/include/newdb/catalog.h}：
 
 \begin{itemize}
   \item \textbf{root\_}：数据库根目录（可为空则用当前目录回退）；
@@ -426,5 +426,16 @@ struct Status {
   \item \textbf{写 WAL}：把行操作编码到 WAL payload，按事务聚合，在恢复时回放到 HeapTable。
 \end{itemize}
 
-两者可组合为“WAL 保障持久性 + heap 作为主存储”（是否已完整打通取决于上层 demo/命令层如何调用）。
+两者可组合为“WAL 保障持久性 + heap 作为主存储”（是否已完整打通取决于上层 cli/命令层如何调用）。
+
+\subsection{重构后新增能力（架构视角）}
+
+相较早期“单路径回放”形态，当前工程在事务与恢复面上已补齐若干关键能力：
+
+\begin{itemize}
+  \item \textbf{恢复闭环}：WAL 从单一回放扩展为 analysis/redo/undo 三阶段恢复；
+  \item \textbf{任意回退}：命令层支持 savepoint 粒度回退/重做与事务级回滚；
+  \item \textbf{时间点恢复}：支持按 LSN/时间戳约束回放终点（PITR）；
+  \item \textbf{GUI 运维化}：Rust GUI 提供事务栈、回看、崩溃矩阵与趋势看板入口，形成“执行-验证-复盘”链路。
+\end{itemize}
 

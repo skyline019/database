@@ -70,7 +70,7 @@
 
 \begin{itemize}
   \item \textbf{newdb}：有 \texttt{MVCCSnapshot} 与可见性判断（created/deleted/active\_txns），
-    但整体更偏“读视图过滤”，尚未形成 InnoDB 那种完整 undo 版本链体系。
+    并已具备 savepoint 级回退与 analysis/redo/undo 恢复闭环；但在锁管理与高隔离级别语义上仍弱于 InnoDB。
   \item \textbf{LevelDB}：以单机 KV 引擎语义为主，事务与复杂隔离级别不是其核心目标。
   \item \textbf{InnoDB}：完整事务隔离（RC/RR 等）、行锁/间隙锁、undo 版本链，MVCC 与锁协作成熟。
 \end{itemize}
@@ -116,7 +116,7 @@
 
 \begin{itemize}
   \item newdb 当前更像“\textbf{页式存储 + LSM/OLTP 中间态}”：
-    已有 WAL、快照、页布局与懒加载，但尚未形成 InnoDB 级完整事务存储栈，也未引入 LevelDB 式系统性 compaction。
+    已有 WAL、快照、页布局、懒加载、savepoint 回退与 PITR，但仍未形成 InnoDB 级锁/隔离体系，也未引入 LevelDB 式系统性 compaction。
   \item 若追求简单可控与可读性，现结构非常适合继续迭代；
     若追求长期高并发生产语义，需要在“版本回收 + 事务子系统 + 后台调度”上补关键能力。
 \end{itemize}
@@ -133,7 +133,7 @@
 \textbf{劣势}
 \begin{itemize}
   \item 缺少系统化后台 compact/purge，长期运行可能出现历史版本与 tombstone 堆积。
-  \item 事务与并发控制深度不足，距离完整 OLTP 引擎还有明显差距。
+  \item 锁管理与隔离级别深度不足，距离完整 OLTP 引擎仍有明显差距。
   \item 索引体系偏“内存态辅助索引”，对超大规模数据与复杂查询支持有限。
 \end{itemize}
 
@@ -172,29 +172,29 @@
   \item \textbf{通用事务型业务（SQL + 强一致事务）}：优先 InnoDB。
 \end{itemize}
 
-\subsection{10) 纳入中层（demo/include/tests/tools）后的再评估}
+\subsection{10) 纳入中层（cli/engine-include/tests/tools）后的再评估}
 
 前文 1)\textasciitilde9) 主要基于底层结构。将中层模块纳入后，newdb 的工程画像需要做一次修正：
 
 \subsubsection{A. 架构完整性：从“内核原型”提升为“可用小系统”}
 \begin{itemize}
-  \item \fpath{demo/} 提供了从 CLI 到命令分发、事务协调、查询策略的完整入口链路；
-  \item \fpath{include/} 提供公共契约层（Status/Session/WAL/C API），使模块边界更清晰；
+  \item \fpath{newdb/cli/} 提供了从 CLI 到命令分发、事务协调、查询策略的完整入口链路；
+  \item \fpath{newdb/engine/include/} 提供公共契约层（Status/Session/WAL/C API），使模块边界更清晰；
   \item \fpath{tools/} 补齐了基准与冒烟工具，\fpath{tests/} 补齐了回归与并发护栏。
 \end{itemize}
 结论：newdb 不再只是“底层存储实验”，而是具备了可验证、可演示、可持续迭代的最小数据库工程闭环。
 
 \subsubsection{B. 与 LevelDB/InnoDB 的差距重述（中层视角）}
 \begin{itemize}
-  \item \textbf{相对 LevelDB}：newdb 在“可读性、可教学、可改造”上优势明显；但在大规模长期运行治理（compaction 体系化、尾延迟控制）仍弱。
-  \item \textbf{相对 InnoDB}：newdb 在架构透明度与学习曲线方面更友好；但事务隔离深度、锁子系统、后台调度完整性仍有代际差距。
+  \item \textbf{相对 LevelDB}：newdb 在“可读性、可教学、可改造”上优势明显，且已补齐 analysis/redo/undo + PITR 恢复链路；但在大规模长期运行治理（compaction 体系化、尾延迟控制）仍弱。
+  \item \textbf{相对 InnoDB}：newdb 在架构透明度与学习曲线方面更友好，且已具备 savepoint 级回退能力；但事务隔离深度、锁子系统、后台调度完整性仍有代际差距。
 \end{itemize}
-换言之，中层增强主要提升了“工程可用性”，并未改变底层机制成熟度的代差结论。
+换言之，newdb 已从“可用性增强”进入“事务恢复能力显著增强”阶段，但底层成熟度仍与 InnoDB/LevelDB 的长期生产能力存在代差。
 
 \subsubsection{C. 工程风险再分级（加入中层后）}
 \begin{itemize}
-  \item \textbf{已明显下降的风险}：接口失配风险（include 统一契约）、回归风险（tests 覆盖）、使用门槛风险（demo/tooling）。
-  \item \textbf{仍高的核心风险}：版本回收与空间膨胀、复杂并发语义、长期稳定性与运维自动化。
+  \item \textbf{已明显下降的风险}：接口失配风险（engine/include 统一契约）、回归风险（tests 覆盖）、使用门槛风险（cli/tooling）、崩溃后事务不一致风险（redo/undo 恢复闭环）。
+  \item \textbf{仍高的核心风险}：版本回收与空间膨胀、复杂并发语义（锁/隔离）、长期稳定性与运维自动化。
 \end{itemize}
 
 \subsubsection{D. 选型建议修订（纳入中层能力）}
@@ -218,14 +218,14 @@
 \textbf{一句话结论}
 \begin{itemize}
   \item newdb 目前已从“可读的底层原型”升级为“可演示、可验证、可迭代的小型数据库系统”，
-  但底层成熟度仍处于 LevelDB/InnoDB 之下，短期定位应是“教学/原型/内部可控负载”，而非生产核心替代。
+  并在事务恢复上形成 analysis/redo/undo + savepoint + PITR 能力闭环；但底层成熟度仍处于 LevelDB/InnoDB 之下，短期定位应是“教学/原型/内部可控负载”，而非生产核心替代。
 \end{itemize}
 
 \textbf{当前定位（纳入中层后）}
 \begin{itemize}
-  \item \textbf{技术形态}：heap 页存储 + WAL + 快照可见性 + 中层 CLI/契约/测试/工具闭环。
+  \item \textbf{技术形态}：heap 页存储 + WAL + analysis/redo/undo 恢复 + savepoint 回退 + PITR + 中层 CLI/契约/测试/工具闭环。
   \item \textbf{工程能力}：可快速迭代、可回归验证、可做性能观测（含并发压测与恢复统计）。
-  \item \textbf{核心短板}：版本回收体系、事务隔离深度、长期运行治理能力。
+  \item \textbf{核心短板}：版本回收体系、锁与隔离深度、长期运行治理能力。
 \end{itemize}
 
 \textbf{与对标系统的决策差异}
@@ -261,5 +261,22 @@
   \item \textbf{立项建议}：继续投入，定位“数据库内核教学与原型孵化平台”。
   \item \textbf{资源建议}：优先投向 compact/purge 与事务语义，不优先追求 SQL 面扩张。
   \item \textbf{验收建议}：以“长期运行稳定性 + 回归可测性 + 性能基线达标”作为阶段性 Gate。
+\end{itemize}
+
+\subsection{11) 成熟度对照（已补齐 / 待补齐）}
+
+\textbf{A. 与早期版本相比已补齐的关键项}
+\begin{itemize}
+  \item \textbf{崩溃恢复闭环}：由“仅重放”升级为 analysis/redo/undo 三阶段恢复。
+  \item \textbf{回退语义}：支持 savepoint 级回退/重做与事务级回滚。
+  \item \textbf{时间点恢复}：支持按 LSN/时间戳进行 PITR 边界控制。
+  \item \textbf{可观测性与自动化}：crash matrix、恢复统计与 nightly 趋势链路可联动。
+\end{itemize}
+
+\textbf{B. 相对 LevelDB/InnoDB 仍待补齐的关键项}
+\begin{itemize}
+  \item \textbf{LevelDB 方向}：系统化 compaction 与长期尾延迟治理能力。
+  \item \textbf{InnoDB 方向}：锁管理与更完整隔离级别语义（不仅是可见性过滤与回退）。
+  \item \textbf{通用方向}：长期运行自动化治理（后台调度、容量回收、SLO 驱动告警）。
 \end{itemize}
 

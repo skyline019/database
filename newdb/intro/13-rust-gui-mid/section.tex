@@ -48,6 +48,28 @@
   \item \textbf{数据顺序修复}：PAGE 的 \texttt{id} 排序改为数值语义，并补最小回归测试（\texttt{1,2,10}）。
 \end{itemize}
 
+\subsection{事务栈能力（Undo/Redo）}
+
+Rust GUI 当前已不只是“命令面板”，而是具备事务历史编排能力的操作层：
+
+\begin{itemize}
+  \item \textbf{栈模型升级}：以 savepoint 级 \texttt{UndoUnit} 聚合命令明细 \texttt{UndoOp}，支持跨表事务回退；
+  \item \textbf{执行策略}：后端区分 soft/hard fail，失败时按策略修复或中止，避免半回退状态静默扩散；
+  \item \textbf{持久化恢复}：事务栈以 jsonl 持久化，启动时可恢复历史并对坏行容错；
+  \item \textbf{逆向推断增强}：针对 \texttt{UPDATE/DELETE/SETATTR} 等操作优先走结构化查询快照推断 inverse，降低文本解析误差；
+  \item \textbf{可观测性}：回看面板支持命中导航、会话分段、逆向来源展示，便于审计与复盘。
+\end{itemize}
+
+\subsection{运维与验证闭环}
+
+GUI 与脚本层已形成面向 CI/soak 的闭环：
+
+\begin{itemize}
+  \item \textbf{脚本镜像}：\texttt{sync\_runtime\_binaries.ps1} 递归镜像 \fpath{newdb/scripts} 到 GUI 运行目录，确保 gate/bench/soak 脚本一致；
+  \item \textbf{看板联动}：crash matrix 与压力结果可输出 JSON 并进入 nightly trend/dashboard；
+  \item \textbf{设置持久化}：面板、表格视图、日志视图透明度等关键 UI 参数可持久化恢复，降低重启后状态漂移。
+\end{itemize}
+
 \subsection{本章复评结论（现状 / 风险 / 建议）}
 
 \subsubsection{结论 1：结构可维护性明显提升}

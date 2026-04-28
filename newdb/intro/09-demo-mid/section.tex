@@ -1,15 +1,15 @@
-\section{中层解析 I：demo（CLI、命令分发、业务编排）}
+\section{中层解析 I：cli（CLI、命令分发、业务编排）}
 
 \subsection{模块定位}
 
-\fpath{demo/} 是“用户入口层 + 中层业务编排层”：
+\fpath{cli/} 是“用户入口层 + 中层业务编排层”：
 
 \begin{itemize}
-  \item \textbf{入口}：\fpath{demo/demo_main.cc} 解析 CLI 并决定执行模式；
-  \item \textbf{命令分发}：\fpath{demo/demo_commands.cc} 负责交互命令解析与路由；
-  \item \textbf{查询中间层}：\fpath{demo/where.cc,h} 管理条件解析、候选集构建、策略限流与查询缓存；
-  \item \textbf{事务协调}：\fpath{demo/txn_manager.h,cc} 封装 Txn + WAL + 文件锁 + vacuum 触发；
-  \item \textbf{运行编排}：\fpath{demo/demo_runner.cc} 对接 batch/exec/import/mdb 等模式。
+  \item \textbf{入口}：\fpath{cli/app/demo_main.cc} 解析 CLI 并决定执行模式；
+  \item \textbf{命令分发}：\fpath{cli/shell/dispatch/dispatch.cc} + \fpath{cli/shell/dispatch/handlers/*} 负责交互命令解析与路由；
+  \item \textbf{查询中间层}：\fpath{cli/modules/where/executor/*} 管理条件解析、候选集构建、策略限流与查询缓存；
+  \item \textbf{事务协调}：\fpath{cli/modules/txn/coordinator/*} 封装 Txn + WAL + 文件锁 + vacuum 触发；
+  \item \textbf{运行编排}：\fpath{cli/shell/bootstrap/demo_runner.cc} 对接 batch/exec/import/mdb 等模式。
 \end{itemize}
 
 \subsection{关键数据结构（中层）}
@@ -93,6 +93,17 @@ bool process_command_line(ShellState& st, const char* input_line) {
 
 这条链的特点是“先高层语义命令、后表级缓存路径”，减少不必要的 heap 装载与解码。
 
+\subsection{事务与回退能力（重构后现状）}
+
+围绕事务路径，\fpath{cli/modules/txn/coordinator/*} 与命令分发层已形成“可执行 + 可恢复 + 可观测”的闭环：
+
+\begin{itemize}
+  \item \textbf{事务语法统一}：\texttt{SAVEPOINT / ROLLBACK TO / RELEASE SAVEPOINT} 在会话命令入口统一解释，降低命令分叉与 unknown 噪声；
+  \item \textbf{任意回退语义}：支持按 savepoint 粒度回退与重做，命令层可组合为多步事务修复流；
+  \item \textbf{崩溃恢复联动}：事务协调器与 WAL 的 analysis/redo/undo 恢复流程对齐，避免“命令层成功但恢复层不一致”；
+  \item \textbf{诊断输出增强}：事务失败路径保留 soft/hard fail 诊断信息，便于自动化 gate 与 GUI 回看定位。
+\end{itemize}
+
 \subsection{算法与复杂度（中层视角）}
 
 \begin{itemize}
@@ -116,7 +127,7 @@ bool process_command_line(ShellState& st, const char* input_line) {
 
 \subsection{近期修复要点：PAGE id 排序语义一致性}
 
-在 \fpath{demo/page_index_sidecar.cc} 的近期修复中，\texttt{PAGE(..., id, asc)} 明确改为\textbf{按整数 id 比较}，避免字符串字典序导致的
+在 \fpath{cli/modules/sidecar/page/page_index_sidecar.cc} 的近期修复中，\texttt{PAGE(..., id, asc)} 明确改为\textbf{按整数 id 比较}，避免字符串字典序导致的
 \texttt{1,10,2} 问题（表现为新增到 10 后显示在 1 与 2 之间）。
 
 \begin{itemize}

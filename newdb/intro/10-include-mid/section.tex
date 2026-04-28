@@ -1,12 +1,12 @@
-\section{中层解析 II：include（公共 API 与契约层）}
+\section{中层解析 II：engine/include（公共 API 与契约层）}
 
 \subsection{模块定位}
 
-\fpath{include/newdb/*.h} 是工程的“公共契约层”：
+\fpath{newdb/engine/include/newdb/*.h} 是工程的“公共契约层”：
 
 \begin{itemize}
-  \item 向 \fpath{demo/}、\fpath{tests/}、\fpath{tools/} 暴露稳定接口；
-  \item 隐藏 \fpath{src/} 的实现细节（例如文件布局、线程模型、平台差异）；
+  \item 向 \fpath{cli/}、\fpath{tests/}、\fpath{tools/} 暴露稳定接口；
+  \item 隐藏 \fpath{newdb/engine/src/} 的实现细节（例如文件布局、线程模型、平台差异）；
   \item 通过注释与类型设计明确线程边界、生命周期与错误传播方式。
 \end{itemize}
 

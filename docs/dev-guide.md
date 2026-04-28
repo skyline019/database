@@ -24,9 +24,9 @@
 
 `newdb/` 关键子目录：
 
-- `src/`：核心引擎（heap/page/io/WAL/MVCC/session）
-- `include/`：公共头文件与契约接口
-- `demo/`：CLI 命令层、中层业务编排与 sidecar 索引逻辑
+- `engine/src/`：核心引擎实现（heap/page/io/WAL/MVCC/session/c_api）
+- `engine/include/`：公共头文件与契约接口
+- `cli/`：CLI 命令层、中层业务编排与 sidecar 索引逻辑
 - `tests/`：单元测试与集成测试
 - `tools/`：perf/smoke/runtime report 工具
 - `rust_gui/`：Tauri + Vue 图形界面
@@ -94,10 +94,10 @@ ctest --test-dir build_mingw -R "PageIndexSidecar.SortByIdAscNumericOrder" --out
 
 `newdb/intro/main.tex` 汇总了完整源码解析章节，建议阅读顺序：
 
-1. `01-overview`：整体架构与数据流
+1. `01-overview`：整体架构与数据流（含 analysis/redo/undo、savepoint、PITR 口径）
 2. `02-06`：heap/page/io/table/mvcc/wal 核心路径
 3. `07`：session 与 C API
-4. `09-13`：demo/include/tests/tools/rust_gui 中层复评
+4. `09-13`：cli/engine-include/tests/tools/rust_gui 中层复评
 5. `08`（附录）：与 LevelDB / InnoDB 的对比
 
 在 WSL (Ubuntu) 编译 PDF：

@@ -5,7 +5,7 @@
 一个以教学与工程实践为导向的数据库实验仓库，包含：
 
 - `waterfall/`：底层存储与基础模块
-- `newdb/`：数据库引擎（Heap Page / WAL / MVCC）、CLI、测试体系与 Rust GUI
+- `newdb/`：数据库引擎（`engine`）+ 命令层（`cli`）+ 测试体系 + Rust GUI
 
 ## 学术价值与研究可读性
 
@@ -19,6 +19,13 @@
 - 图形界面：`newdb/rust_gui/`
 - 深度文档（PDF）：`newdb/intro/out/newdb-intro.pdf`
 - 开发者手册：`docs/dev-guide.md`
+
+## 重构后能力概览
+
+- 事务恢复：analysis / redo / undo 三阶段恢复
+- 回退语义：savepoint 级回退 / 重做 + 事务级回滚
+- 可控恢复：按 LSN / 时间戳恢复（PITR）
+- 可观测性：crash matrix、runtime report、nightly 趋势看板
 
 ## 文档导航
 

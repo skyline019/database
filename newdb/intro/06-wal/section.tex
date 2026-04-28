@@ -1,6 +1,6 @@
 \section{WAL：记录格式、写入线程、分段与恢复}
 
-对应实现：\fpath{newdb/src/wal_manager.cpp}、\fpath{newdb/src/wal_codec.cpp}
+对应实现：\fpath{newdb/engine/src/wal/writer/wal_manager.cpp}、\fpath{newdb/engine/src/wal/codec/wal_codec.cpp}
 
 \subsection{关键代码段：append\_record 如何分配 LSN 并计算校验}
 
@@ -164,4 +164,28 @@ txn_ops.erase(it);
   \item \texttt{NEWDB\_RECOVER\_ENABLE\_OFFSET\_SEEK=1}
   \item \texttt{NEWDB\_RECOVER\_MIN\_LSN=<u64>}
 \end{itemize}
+
+\subsection{恢复阶段语义：analysis / redo / undo}
+
+在当前重构后的恢复链路中，WAL 不再只是“顺序回放”工具，而是承载更完整的事务恢复语义：
+
+\begin{itemize}
+  \item \textbf{analysis}：扫描段文件并重建事务状态（活跃/提交/回滚边界），识别 checkpoint 与控制记录；
+  \item \textbf{redo}：对已提交事务执行幂等重做，支持 barrier/strict 语义以避免重复 apply 造成数据漂移；
+  \item \textbf{undo}：对未完成事务执行回退，保证 crash 后不会暴露未提交中间态。
+\end{itemize}
+
+这使恢复从“只做前滚”演进为“前滚 + 回滚”闭环，语义上更接近成熟事务引擎的崩溃恢复模型。
+
+\subsection{PITR 与检查点协作}
+
+围绕恢复能力，当前实现已支持按 LSN 或时间戳进行恢复边界控制（PITR）：
+
+\begin{itemize}
+  \item \textbf{recoverToLsn}：把恢复终点限制在目标 LSN；
+  \item \textbf{recoverToTime}：把恢复终点限制在目标时间点；
+  \item \textbf{CHECKPOINT\_BEGIN/END + PITR\_MARK}：用于缩短恢复扫描窗口并标记可回放边界。
+\end{itemize}
+
+工程收益是可把“恢复”从单一灾难动作，扩展为“可控回放工具”（例如压测回看、事故窗口定位、版本回归验证）。
 

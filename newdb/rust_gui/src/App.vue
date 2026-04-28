@@ -1461,7 +1461,9 @@ function inferUpdateInverseFromCurrentView(forward: string): string | undefined 
   if (idIdx < 0) return undefined;
   const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
   if (!hit) return undefined;
-  const oldValues = hit.filter((_, idx) => idx !== idIdx).map((x) => `${x ?? ""}`.trim());
+  const oldValues = hit
+    .filter((_, idx) => idx !== idIdx)
+    .map((x) => `${x ?? ""}`.trim() || "0");
   return `UPDATE(${[id, ...oldValues].join(",")})`;
 }
 
@@ -1474,7 +1476,7 @@ function inferDeleteInverseFromCurrentView(forward: string): string | undefined 
   if (idIdx < 0) return undefined;
   const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
   if (!hit) return undefined;
-  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim()).join(",")})`;
+  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim() || "0").join(",")})`;
 }
 
 function inferOpTypeFromCommand(command: string): OperationType {

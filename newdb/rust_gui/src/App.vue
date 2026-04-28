@@ -1461,9 +1461,7 @@ function inferUpdateInverseFromCurrentView(forward: string): string | undefined 
   if (idIdx < 0) return undefined;
   const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
   if (!hit) return undefined;
-  const oldValues = hit
-    .filter((_, idx) => idx !== idIdx)
-    .map((x) => `${x ?? ""}`.trim() || "0");
+  const oldValues = hit.filter((_, idx) => idx !== idIdx).map((x) => `${x ?? ""}`.trim());
   return `UPDATE(${[id, ...oldValues].join(",")})`;
 }
 
@@ -1476,7 +1474,7 @@ function inferDeleteInverseFromCurrentView(forward: string): string | undefined 
   if (idIdx < 0) return undefined;
   const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
   if (!hit) return undefined;
-  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim() || "0").join(",")})`;
+  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim()).join(",")})`;
 }
 
 function inferOpTypeFromCommand(command: string): OperationType {
@@ -1508,19 +1506,14 @@ function inferBackwardForCommand(command: string, opType: OperationType): string
   );
 }
 
-function sanitizeCommandDefaultFill(cmd: string | undefined): string | undefined {
+function commandHasEmptyUpdateInsertArg(cmd: string | undefined): boolean {
   const t = String(cmd ?? "").trim();
-  if (!t) return undefined;
+  if (!t) return false;
   const m = /^(UPDATE|INSERT)\(([\s\S]*)\)$/i.exec(t);
-  if (!m) return t;
-  const op = m[1]!.toUpperCase();
+  if (!m) return false;
   const inner = m[2] ?? "";
   const parts = inner.split(",").map((x) => x.trim());
-  const fixed = parts.map((x) => (x.length ? x : "0"));
-  const rebuilt = `${op}(${fixed.join(",")})`;
-  // Safety: if something unexpected still produced empty args, keep original.
-  if (rebuilt.includes(",,")) return t;
-  return rebuilt;
+  return parts.some((x) => x.length === 0);
 }
 
 async function inferBackwardPayloadByBackend(
@@ -2150,13 +2143,12 @@ async function runCommand(
   const opType = opts?.opType ?? "generic";
   const backendInfer = await inferBackwardPayloadByBackend(text, opType);
   const backendBackward = backendInfer.backward;
-  const presetBackward = sanitizeCommandDefaultFill(
+  const presetBackward =
     opts?.backward ??
-      backendBackward ??
-      inferInverse(opType, text) ??
-      (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
-      (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined)
-  );
+    backendBackward ??
+    inferInverse(opType, text) ??
+    (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
+    (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined);
   busy.value = true;
   try {
     const exec = await invoke<CommandExecResult>("execute_command_ex", { command: text });
@@ -2433,10 +2425,18 @@ async function undoToIndex(targetIndex: number) {
     while (undoStack.value.length - 1 >= targetIndex) {
       const top = undoStack.value[undoStack.value.length - 1];
       if (!top) break;
-      const safeUnit = {
-        ...top,
-        ops: top.ops.map((op) => ({ ...op, backward: sanitizeCommandDefaultFill(op.backward) }))
-      };
+      const repairedOps: UndoOp[] = [];
+      for (const op of top.ops) {
+        let backward = op.backward;
+        if (commandHasEmptyUpdateInsertArg(backward)) {
+          const repaired = await inferBackwardPayloadByBackend(op.forward, op.type);
+          if (repaired.backward && !commandHasEmptyUpdateInsertArg(repaired.backward)) {
+            backward = repaired.backward;
+          }
+        }
+        repairedOps.push({ ...op, backward });
+      }
+      const safeUnit = { ...top, ops: repairedOps };
       const r = await invoke<StackExecResult>("stack_undo_unit", { unit: safeUnit });
       recordStackExecTrace(top, "undo", r);
       logLine(`[UNDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
@@ -2482,11 +2482,7 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
         await redoFromStack(topIndex, true);
         break;
       }
-      const safeUnit = {
-        ...top,
-        ops: top.ops.map((op) => ({ ...op, forward: sanitizeCommandDefaultFill(op.forward) }))
-      };
-      const r = await invoke<StackExecResult>("stack_redo_unit", { unit: safeUnit });
+      const r = await invoke<StackExecResult>("stack_redo_unit", { unit: top });
       recordStackExecTrace(top, "redo", r);
       logLine(`[REDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
       if (r.ok) {
@@ -2518,10 +2514,18 @@ async function undo() {
   if (!okConfirm) return;
   busy.value = true;
   try {
-    const safeUnit = {
-      ...item,
-      ops: item.ops.map((op) => ({ ...op, backward: sanitizeCommandDefaultFill(op.backward) }))
-    };
+    const repairedOps: UndoOp[] = [];
+    for (const op of item.ops) {
+      let backward = op.backward;
+      if (commandHasEmptyUpdateInsertArg(backward)) {
+        const repaired = await inferBackwardPayloadByBackend(op.forward, op.type);
+        if (repaired.backward && !commandHasEmptyUpdateInsertArg(repaired.backward)) {
+          backward = repaired.backward;
+        }
+      }
+      repairedOps.push({ ...op, backward });
+    }
+    const safeUnit = { ...item, ops: repairedOps };
     const r = await invoke<StackExecResult>("stack_undo_unit", { unit: safeUnit });
     recordStackExecTrace(item, "undo", r);
     logLine(`[UNDO][${r.repairAction}] ${item.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
@@ -2553,11 +2557,7 @@ async function redo() {
   if (!okConfirm) return;
   busy.value = true;
   try {
-    const safeUnit = {
-      ...last,
-      ops: last.ops.map((op) => ({ ...op, forward: sanitizeCommandDefaultFill(op.forward) }))
-    };
-    const r = await invoke<StackExecResult>("stack_redo_unit", { unit: safeUnit });
+    const r = await invoke<StackExecResult>("stack_redo_unit", { unit: last });
     recordStackExecTrace(last, "redo", r);
     logLine(`[REDO][${r.repairAction}] ${last.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
     if (r.ok) {

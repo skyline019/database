@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate C API ABI and symbol surface
-        run: python3 scripts/validate/check_c_api_abi.py --expected-abi 1
+        run: python3 newdb/scripts/validate/check_c_api_abi.py --expected-abi 1
 
   observability-schema-gate:
     runs-on: ubuntu-latest
@@ -21,7 +21,7 @@ jobs:
           python3 - <<'PY'
           import json
           import pathlib
-          p = pathlib.Path("scripts/results/ci_sample_perf_summary.json")
+          p = pathlib.Path("newdb/scripts/results/ci_sample_perf_summary.json")
           p.parent.mkdir(parents=True, exist_ok=True)
           p.write_text(
               json.dumps(
@@ -41,7 +41,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          python3 scripts/validate/validate_perf_summary.py scripts/results/ci_sample_perf_summary.json
+          python3 newdb/scripts/validate/validate_perf_summary.py newdb/scripts/results/ci_sample_perf_summary.json
 
   telemetry-schema-gate:
     runs-on: ubuntu-latest
@@ -52,7 +52,7 @@ jobs:
           python3 - <<'PY'
           import json
           import pathlib
-          p = pathlib.Path("scripts/results/ci_sample_telemetry.jsonl")
+          p = pathlib.Path("newdb/scripts/results/ci_sample_telemetry.jsonl")
           p.parent.mkdir(parents=True, exist_ok=True)
           events = [
               {
@@ -80,7 +80,7 @@ jobs:
           ]
           p.write_text("\n".join(json.dumps(x) for x in events) + "\n", encoding="utf-8")
           PY
-          python3 scripts/validate/validate_telemetry_event.py scripts/results/ci_sample_telemetry.jsonl
+          python3 newdb/scripts/validate/validate_telemetry_event.py newdb/scripts/results/ci_sample_telemetry.jsonl
 
   runtime-stats-schema-gate:
     runs-on: ubuntu-latest
@@ -91,7 +91,7 @@ jobs:
           python3 - <<'PY'
           import json
           import pathlib
-          p = pathlib.Path("scripts/results/ci_sample_runtime_stats.jsonl")
+          p = pathlib.Path("newdb/scripts/results/ci_sample_runtime_stats.jsonl")
           p.parent.mkdir(parents=True, exist_ok=True)
           rows = [
               {
@@ -108,9 +108,50 @@ jobs:
                       "vacuum_trigger_count": 0,
                       "vacuum_execute_count": 0,
                       "vacuum_cooldown_skip_count": 0,
+                      "vacuum_compact_success_count": 0,
+                      "vacuum_compact_failure_count": 0,
+                      "vacuum_compact_bytes_reclaimed": 0,
+                      "vacuum_compact_last_elapsed_ms": 0,
+                      "vacuum_queue_depth": 0,
+                      "vacuum_queue_depth_peak": 0,
                       "write_conflicts": 0,
+                      "lock_wait_ms_total": 0,
+                      "lock_wait_max_ms": 0,
+                      "lock_deadlock_detect_count": 0,
+                      "lock_deadlock_victim_count": 0,
                       "txn_begin_lock_conflicts": 0,
                       "wal_compact_count": 0,
+                      "wal_recovery_runs": 0,
+                      "wal_recovery_undo_ops": 0,
+                      "wal_recovery_last_elapsed_ms": 0,
+                      "wal_recovery_analyze_ms": 0,
+                      "wal_recovery_undo_ms": 0,
+                      "wal_recovery_finalize_ms": 0,
+                      "wal_recovery_records_scanned": 0,
+                      "wal_recovery_dangling_txns": 0,
+                      "wal_group_commit_count": 0,
+                      "wal_group_commit_batch_commits": 0,
+                      "wal_group_commit_pending_commits": 0,
+                      "txn_commit_count": 0,
+                      "txn_commit_p95_ms": 0,
+                      "txn_commit_max_ms": 0,
+                      "wal_bytes_since_start": 0,
+                      "wal_bytes_per_commit_avg": 0,
+                      "lock_wait_p95_ms": 0,
+                      "scheduler_throttle_count": 0,
+                      "hot_index_enabled": True,
+                      "segment_target_bytes": 0,
+                      "lsm_memtable_flush_count": 0,
+                      "lsm_compaction_count": 0,
+                      "lsm_segment_count": 0,
+                      "lsm_memtable_bytes": 0,
+                      "lsm_read_segments_scanned": 0,
+                      "lsm_read_segments_scanned_p95": 0,
+                      "lsm_compaction_bytes_in": 0,
+                      "lsm_compaction_bytes_out": 0,
+                      "wal_adaptive_enabled": False,
+                      "group_commit_window_ms": 0,
+                      "group_commit_max_batch_commits": 1,
                   },
               },
               {
@@ -127,15 +168,56 @@ jobs:
                       "vacuum_trigger_count": 2,
                       "vacuum_execute_count": 2,
                       "vacuum_cooldown_skip_count": 0,
+                      "vacuum_compact_success_count": 2,
+                      "vacuum_compact_failure_count": 0,
+                      "vacuum_compact_bytes_reclaimed": 4096,
+                      "vacuum_compact_last_elapsed_ms": 8,
+                      "vacuum_queue_depth": 0,
+                      "vacuum_queue_depth_peak": 2,
                       "write_conflicts": 0,
+                      "lock_wait_ms_total": 0,
+                      "lock_wait_max_ms": 0,
+                      "lock_deadlock_detect_count": 0,
+                      "lock_deadlock_victim_count": 0,
                       "txn_begin_lock_conflicts": 0,
                       "wal_compact_count": 0,
+                      "wal_recovery_runs": 1,
+                      "wal_recovery_undo_ops": 0,
+                      "wal_recovery_last_elapsed_ms": 3,
+                      "wal_recovery_analyze_ms": 1,
+                      "wal_recovery_undo_ms": 1,
+                      "wal_recovery_finalize_ms": 1,
+                      "wal_recovery_records_scanned": 10,
+                      "wal_recovery_dangling_txns": 0,
+                      "wal_group_commit_count": 1,
+                      "wal_group_commit_batch_commits": 2,
+                      "wal_group_commit_pending_commits": 0,
+                      "txn_commit_count": 1,
+                      "txn_commit_p95_ms": 1,
+                      "txn_commit_max_ms": 1,
+                      "wal_bytes_since_start": 0,
+                      "wal_bytes_per_commit_avg": 0,
+                      "lock_wait_p95_ms": 0,
+                      "scheduler_throttle_count": 0,
+                      "hot_index_enabled": True,
+                      "segment_target_bytes": 0,
+                      "lsm_memtable_flush_count": 1,
+                      "lsm_compaction_count": 0,
+                      "lsm_segment_count": 1,
+                      "lsm_memtable_bytes": 0,
+                      "lsm_read_segments_scanned": 1,
+                      "lsm_read_segments_scanned_p95": 1,
+                      "lsm_compaction_bytes_in": 1024,
+                      "lsm_compaction_bytes_out": 900,
+                      "wal_adaptive_enabled": False,
+                      "group_commit_window_ms": 0,
+                      "group_commit_max_batch_commits": 1,
                   },
               },
           ]
           p.write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
           PY
-          python3 scripts/validate/validate_runtime_stats.py scripts/results/ci_sample_runtime_stats.jsonl
+          python3 newdb/scripts/validate/validate_runtime_stats.py newdb/scripts/results/ci_sample_runtime_stats.jsonl
 
   linux-gcc:
     runs-on: ubuntu-latest
@@ -148,16 +230,32 @@ jobs:
           sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
 
       - name: Configure (clean build dir)
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+        run: cmake -S newdb -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
       - name: Build
         run: cmake --build build --parallel
+
+      - name: Runtime report compact gate regression
+        run: >
+          python3 newdb/scripts/validate/test_runtime_report_compact_gates.py
+          build/newdb_runtime_report
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
       - name: Bench gate (smoke + microbench)
-        run: python3 scripts/ci/ci_bench_gate.py build
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
 
   linux-clang:
     runs-on: ubuntu-latest
@@ -172,7 +270,7 @@ jobs:
       - name: Configure
         env:
           CXX: clang++
-        run: cmake -S . -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S newdb -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build and test
         run: |
@@ -180,7 +278,18 @@ jobs:
           ctest --test-dir build-clang --output-on-failure
 
       - name: Bench gate (smoke + microbench)
-        run: python3 scripts/ci/ci_bench_gate.py build-clang
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build-clang
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
 
   windows-clean-room:
     runs-on: windows-latest
@@ -190,7 +299,7 @@ jobs:
       - name: Verify clean-room configure/build/test
         shell: pwsh
         run: >
-          .\scripts\ci\verify_clean_reconfigure.ps1
+          .\newdb\scripts\ci\verify_clean_reconfigure.ps1
           -BuildDir build_ci_windows
           -Generator "Visual Studio 17 2022"
           -BuildConfig RelWithDebInfo

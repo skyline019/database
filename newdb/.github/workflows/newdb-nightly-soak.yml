@@ -35,10 +35,34 @@ jobs:
           -SoakMinutes 0
           -SleepSecondsBetweenRuns 0
           -LiteProfile
+          -MaxRuntimeVacuumCompactFailureDelta 0
+          -MaxRuntimeVacuumQueueDepthPeak 12
+          -MaxRuntimeWalRecoveryLastElapsedMs 3000
+          -MaxRuntimeLockDeadlockDetectDelta 0
+          -MaxRuntimeLockDeadlockVictimDelta 0
+          -MaxRuntimeLockWaitMaxMsDelta 5000
+          -MaxRuntimeLsmSegmentCount 12
+          -MinRuntimeLsmMemtableFlushDelta 0
+          -RuntimeLsmSegmentTargetBytes 128
+          -MaxRuntimeLsmReadSegmentsScannedP95 12
+          -MinRuntimeLsmCompactionBytesAmpEfficiency 0.2
           -RequireNightlySamplesForDashboard $true
           -MaxLatestNightlyAgeHours 168
           -MaxDashboardHealthTier warning
           -ContinueOnFailure:$false
+
+      - name: Run nightly durability profile compare
+        shell: pwsh
+        working-directory: newdb
+        run: >
+          .\scripts\ci\nightly_pressure_profile_compare.ps1
+          -BuildDir build_nightly
+          -Jobs 8
+          -RuntimePressureBatches 16
+          -RuntimePressureBatchSize 500
+          -RuntimeSampleEveryBatches 2
+          -MinLeveldbOverInnodbTpsRatio 1.05
+          -MaxInnodbOverLeveldbP95Ratio 1.15
 
       - name: Upload nightly trend artifacts
         if: always()
@@ -48,6 +72,8 @@ jobs:
           path: |
             newdb/scripts/results/nightly_soak_trend.jsonl
             newdb/scripts/results/runtime_trend_dashboard.json
+            newdb/scripts/results/pressure_profile_compare_*.json
+            newdb/scripts/results/redo_undo_crash_matrix_*.json
           if-no-files-found: error
 
       - name: Alert on dashboard quality gate failure

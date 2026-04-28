@@ -1,7 +1,8 @@
 param(
     [string]$BuildDir = "..\build_mingw",
     [string]$OutDir = ".\src-tauri\bin",
-    [string]$ScriptsOutDir = ".\src-tauri\resources\scripts"
+    [string]$ScriptsOutDir = ".\src-tauri\resources\scripts",
+    [string]$GuiScriptsDir = ".\scripts"
 )
 
 Set-StrictMode -Version Latest
@@ -17,11 +18,15 @@ if (-not [System.IO.Path]::IsPathRooted($OutDir)) {
 if (-not [System.IO.Path]::IsPathRooted($ScriptsOutDir)) {
     $ScriptsOutDir = Join-Path $repoRoot $ScriptsOutDir
 }
+if (-not [System.IO.Path]::IsPathRooted($GuiScriptsDir)) {
+    $GuiScriptsDir = Join-Path $repoRoot $GuiScriptsDir
+}
 if (-not (Test-Path -LiteralPath $BuildDir)) {
     throw "BuildDir not found: $BuildDir"
 }
 New-Item -Path $OutDir -ItemType Directory -Force | Out-Null
 New-Item -Path $ScriptsOutDir -ItemType Directory -Force | Out-Null
+New-Item -Path $GuiScriptsDir -ItemType Directory -Force | Out-Null
 
 $required = @(
     "newdb_demo.exe",
@@ -31,6 +36,19 @@ $required = @(
 )
 
 foreach ($name in $required) {
+    if ($name -ieq "libnewdb.dll") {
+        $dllCandidates = @(
+            (Join-Path $BuildDir "libnewdb.dll"),
+            (Join-Path $BuildDir "newdb.dll")
+        )
+        $dllSrc = $dllCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+        if (-not $dllSrc) {
+            throw ("missing required runtime artifact: {0}" -f ($dllCandidates -join " | "))
+        }
+        Copy-Item -LiteralPath $dllSrc -Destination (Join-Path $OutDir "libnewdb.dll") -Force
+        Write-Host ("[SYNC] {0} <= {1}" -f "libnewdb.dll", (Split-Path -Leaf $dllSrc))
+        continue
+    }
     $src = Join-Path $BuildDir $name
     if (-not (Test-Path -LiteralPath $src)) {
         throw "missing required runtime artifact: $src"
@@ -60,33 +78,46 @@ $sourceScriptsRoot = Join-Path $repoRoot "..\scripts"
 if (-not (Test-Path -LiteralPath $sourceScriptsRoot)) {
     throw "Scripts root not found: $sourceScriptsRoot"
 }
+$sourceScriptsRoot = (Resolve-Path -LiteralPath $sourceScriptsRoot).Path
 
-$requiredScriptFiles = @(
-    "soak/nightly_soak_runner.ps1",
-    "soak/test_loop.ps1",
-    "soak/runtime_trend_rollup.py",
-    "validate/validate_runtime_trend_dashboard.py",
-    "validate/validate_perf_summary.py",
-    "validate/validate_telemetry_event.py",
-    "bench/concurrent_pressure_bench.ps1",
-    "bench/million_scale_bench.ps1",
-    "bench/concurrent_million_scale_bench.ps1",
-    "bench/query_bench.ps1",
-    "bench/txn_write_bench.ps1",
-    "bench/eq_sidecar_cache_bench.ps1",
-    "bench/eq_sidecar_invalidation_bench.ps1",
-    "ci/ci_bench_gate.py"
-)
+function Test-SkipScriptRelativePath {
+    param([string]$RelativePath)
+    $norm = $RelativePath -replace "\\", "/"
+    return $norm.StartsWith("results/") -or
+        $norm.Contains("/results/") -or
+        $norm.StartsWith("__pycache__/") -or
+        $norm.Contains("/__pycache__/") -or
+        $norm.EndsWith(".pyc")
+}
 
-foreach ($relative in $requiredScriptFiles) {
-    $src = Join-Path $sourceScriptsRoot $relative
-    if (-not (Test-Path -LiteralPath $src)) {
-        throw "missing required GUI script: $src"
+function Remove-MirroredGeneratedDirs {
+    param([string]$RootDir)
+    if (-not (Test-Path -LiteralPath $RootDir)) {
+        return
     }
-    $dst = Join-Path $ScriptsOutDir $relative
-    $dstParent = Split-Path -Parent $dst
-    New-Item -Path $dstParent -ItemType Directory -Force | Out-Null
-    Copy-Item -LiteralPath $src -Destination $dst -Force
+    Get-ChildItem -Path $RootDir -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -in @("results", "__pycache__") } |
+        ForEach-Object {
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Host ("[SYNC][CLEAN] {0}" -f $_.FullName)
+        }
+}
+
+Remove-MirroredGeneratedDirs -RootDir $GuiScriptsDir
+Remove-MirroredGeneratedDirs -RootDir $ScriptsOutDir
+
+Get-ChildItem -Path $sourceScriptsRoot -Recurse -File | ForEach-Object {
+    $src = $_.FullName
+    $relative = $src.Substring($sourceScriptsRoot.Length).TrimStart('\', '/')
+    if (Test-SkipScriptRelativePath -RelativePath $relative) {
+        return
+    }
+    foreach ($targetRoot in @($GuiScriptsDir, $ScriptsOutDir)) {
+        $dst = Join-Path $targetRoot $relative
+        $dstParent = Split-Path -Parent $dst
+        New-Item -Path $dstParent -ItemType Directory -Force | Out-Null
+        Copy-Item -LiteralPath $src -Destination $dst -Force
+    }
     Write-Host ("[SYNC][SCRIPT] {0}" -f $relative)
 }
 
@@ -173,3 +204,4 @@ foreach ($file in $jsonlSeeds) {
 }
 
 Write-Host ("[SYNC] scripts output dir: {0}" -f $ScriptsOutDir)
+Write-Host ("[SYNC] gui scripts dir: {0}" -f $GuiScriptsDir)

@@ -25,11 +25,13 @@ jobs:
         working-directory: newdb
         run: |
           cmake -S . -B build_gui_ci -G "Visual Studio 17 2022" -A x64 -DNEWDB_BUILD_TESTS=OFF -DNEWDB_BUILD_GUI=OFF -DNEWDB_BUILD_SHARED=ON
-          cmake --build build_gui_ci --config RelWithDebInfo --target newdb_shared newdb_demo newdb_perf
+          cmake --build build_gui_ci --config RelWithDebInfo --target newdb_shared newdb_demo newdb_perf newdb_runtime_report
           $out = Join-Path (Resolve-Path build_gui_ci).Path "RelWithDebInfo"
-          Copy-Item -Force (Join-Path $out "newdb.dll") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb.dll")
-          Copy-Item -Force (Join-Path $out "newdb_demo.exe") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb_demo.exe")
-          Copy-Item -Force (Join-Path $out "newdb_perf.exe") (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\newdb_perf.exe")
+          powershell -ExecutionPolicy Bypass -File (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\scripts\\sync_runtime_binaries.ps1") `
+            -BuildDir $out `
+            -OutDir (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\bin") `
+            -ScriptsOutDir (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\src-tauri\\resources\\scripts") `
+            -GuiScriptsDir (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\scripts")
 
       - name: Install frontend dependencies
         working-directory: newdb/rust_gui
@@ -38,6 +40,10 @@ jobs:
       - name: Frontend build
         working-directory: newdb/rust_gui
         run: npm run build
+
+      - name: Frontend unit tests
+        working-directory: newdb/rust_gui
+        run: npm run test
 
       - name: Tauri build (smoke)
         working-directory: newdb/rust_gui
@@ -49,3 +55,8 @@ jobs:
         env:
           NEWDB_GUI_EXPECT_DLL: "1"
         run: cargo run --release -- --self-check
+
+      - name: Undo/Redo e2e check (no UI)
+        working-directory: newdb/rust_gui
+        shell: pwsh
+        run: npm run test:e2e:undo-redo

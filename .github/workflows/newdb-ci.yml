@@ -45,9 +45,9 @@ jobs:
         run: |
           cd build
           geninfo . --output-filename coverage.info --ignore-errors mismatch,gcov,negative
-          python3 ../scripts/ci/check_coverage_threshold.py coverage.info \
-            --require newdb/src/:70 \
-            --require newdb/demo/:40
+          python3 ../newdb/scripts/ci/check_coverage_threshold.py coverage.info \
+            --require newdb/engine/src/:70 \
+            --require newdb/cli/:40
 
       - name: Upload lcov artifact
         uses: actions/upload-artifact@v4

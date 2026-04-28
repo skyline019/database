@@ -167,10 +167,11 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     ASSERT_NE(h1, nullptr);
     ASSERT_NE(h2, nullptr);
 
-    char out[1024] = {};
+    char out[8192] = {};
     EXPECT_EQ(newdb_session_execute(h1, "CREATE TABLE(t1)", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h1, "USE(t1)", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h2, "USE(t1)", out, sizeof(out)), 1);
+    EXPECT_EQ(newdb_session_execute(h2, "TXNISOLATION read_committed", out, sizeof(out)), 1);
 
     EXPECT_EQ(newdb_session_execute(h1, "BEGIN(t1)", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h1, "INSERT(1,Alice,10)", out, sizeof(out)), 1);
@@ -178,22 +179,88 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     std::memset(out, 0, sizeof(out));
     EXPECT_EQ(newdb_session_runtime_stats(h2, out, sizeof(out)), 1);
     const std::string stats_json(out);
+    EXPECT_NE(stats_json.find("\"txn_isolation\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_trigger_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_execute_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_cooldown_skip_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_compact_success_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_compact_failure_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_compact_bytes_reclaimed\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_compact_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_queue_depth\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"vacuum_queue_depth_peak\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"write_conflicts\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"write_conflict_wait_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"write_conflict_wait_timeout_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lock_wait_ms_total\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lock_wait_max_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lock_deadlock_detect_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lock_deadlock_victim_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"wal_compact_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_runs\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_undo_ops\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_analyze_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_undo_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_finalize_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_records_scanned\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_dangling_txns\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_group_commit_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_group_commit_batch_commits\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_group_commit_pending_commits\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"txn_commit_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"txn_commit_p95_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_bytes_since_start\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_bytes_per_commit_avg\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lock_wait_p95_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"scheduler_throttle_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"hot_index_enabled\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"segment_target_bytes\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_memtable_flush_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_compaction_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_segment_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_memtable_bytes\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_read_segments_scanned\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_read_segments_scanned_p95\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_compaction_bytes_in\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"lsm_compaction_bytes_out\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_adaptive_enabled\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"group_commit_window_ms\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"group_commit_max_batch_commits\":"), std::string::npos);
 
     std::memset(out, 0, sizeof(out));
     EXPECT_EQ(newdb_session_execute(h2, "SHOW TUNING JSON", out, sizeof(out)), 1);
     const std::string tuning_json(out);
+    EXPECT_NE(tuning_json.find("\"txn_isolation\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"txn_isolation\":\"read_committed\""), std::string::npos);
     EXPECT_NE(tuning_json.find("\"vacuum_trigger_count\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"vacuum_execute_count\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"vacuum_cooldown_skip_count\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_compact_success_count\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_compact_failure_count\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_compact_bytes_reclaimed\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_compact_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_queue_depth\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"vacuum_queue_depth_peak\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"write_conflicts\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"lock_wait_ms_total\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"lock_wait_max_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"lock_deadlock_detect_count\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"lock_deadlock_victim_count\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"wal_compact_count\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_runs\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_undo_ops\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_analyze_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_undo_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_finalize_ms\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_records_scanned\":"), std::string::npos);
+    // NOTE: tail fields may be truncated in fixed C API buffers on long JSON payloads.
+    // NOTE: SHOW TUNING JSON can become long with extended counters; keep
+    // strict assertions on core gate fields above and avoid tail-field
+    // truncation sensitivity in fixed-size C API buffers.
 
     EXPECT_EQ(newdb_session_execute(h1, "ROLLBACK", out, sizeof(out)), 1);
 
@@ -214,6 +281,7 @@ TEST(CApi, RuntimeSnapshotAppendsJsonl) {
 
     EXPECT_EQ(newdb_session_execute(h, "CREATE TABLE(t1)", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h, "USE(t1)", out, sizeof(out)), 1);
+    EXPECT_EQ(newdb_session_execute(h, "TXNISOLATION read_committed", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h, "BEGIN(t1)", out, sizeof(out)), 1);
     EXPECT_EQ(newdb_session_execute(h, "INSERT(1,Alice,10)", out, sizeof(out)), 1);
 
@@ -229,8 +297,41 @@ TEST(CApi, RuntimeSnapshotAppendsJsonl) {
     EXPECT_NE(l1.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l1.find("\"label\":\"after_insert\""), std::string::npos);
     EXPECT_NE(l1.find("\"stats\":{"), std::string::npos);
+    EXPECT_NE(l1.find("\"txn_isolation\":\"read_committed\""), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_compact_success_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_compact_failure_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_compact_bytes_reclaimed\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_compact_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_queue_depth\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"vacuum_queue_depth_peak\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lock_wait_ms_total\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lock_wait_max_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lock_deadlock_detect_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lock_deadlock_victim_count\":"), std::string::npos);
     EXPECT_NE(l1.find("\"txn_begin_lock_conflicts\":"), std::string::npos);
     EXPECT_NE(l1.find("\"wal_compact_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_runs\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_undo_ops\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_last_elapsed_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_analyze_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_undo_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_finalize_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_records_scanned\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_dangling_txns\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_group_commit_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"scheduler_throttle_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_memtable_flush_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_compaction_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_segment_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_memtable_bytes\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_read_segments_scanned\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_read_segments_scanned_p95\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_compaction_bytes_in\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"lsm_compaction_bytes_out\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"txn_commit_count\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"txn_commit_p95_ms\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_bytes_since_start\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"scheduler_throttle_count\":"), std::string::npos);
     EXPECT_NE(l2.find("\"schema_version\":\"newdb.runtime_stats.v1\""), std::string::npos);
     EXPECT_NE(l2.find("\"label\":\"after_insert_2\""), std::string::npos);
     in.close();

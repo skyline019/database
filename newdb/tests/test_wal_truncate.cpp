@@ -49,3 +49,26 @@ TEST(WalManager, OpenResyncsLsnFromDisk) {
     }
     fs::remove_all(base);
 }
+
+TEST(WalManager, CheckpointWritesBeginAndEndMarkers) {
+    const fs::path base = fs::temp_directory_path() / ("newdb_wal_checkpoint_markers_" + std::to_string(std::rand()));
+    fs::create_directories(base);
+    const std::string dir = base.string();
+    newdb::WalManager w("checkpoint_markers_t", dir);
+    ASSERT_TRUE(w.open().ok);
+    ASSERT_TRUE(w.checkpoint(0).ok);
+    ASSERT_TRUE(w.flush().ok);
+
+    std::vector<newdb::WalDecodedRecord> recs;
+    ASSERT_TRUE(w.read_all_records(newdb::TableSchema{}, recs).ok);
+    std::size_t begin_count = 0;
+    std::size_t end_count = 0;
+    for (const auto& r : recs) {
+        if (r.op == newdb::WalOp::CHECKPOINT_BEGIN) ++begin_count;
+        if (r.op == newdb::WalOp::CHECKPOINT_END) ++end_count;
+    }
+    EXPECT_EQ(begin_count, 1u);
+    EXPECT_EQ(end_count, 1u);
+    w.close();
+    fs::remove_all(base);
+}

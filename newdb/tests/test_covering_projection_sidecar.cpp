@@ -1,4 +1,4 @@
-#include "covering_index_sidecar.h"
+#include "cli/modules/sidecar/covering/covering_index_sidecar.h"
 
 #include <newdb/schema_io.h>
 

@@ -1,0 +1,15 @@
+# Keep sorted for readability; check_c_api_abi.py compares as sets.
+newdb_abi_version
+newdb_api_version_major
+newdb_api_version_minor
+newdb_api_version_patch
+newdb_check_schema_file
+newdb_error_code_string
+newdb_negotiate_abi
+newdb_session_create
+newdb_session_destroy
+newdb_session_execute
+newdb_session_last_error
+newdb_session_set_table
+newdb_sum
+newdb_version_string

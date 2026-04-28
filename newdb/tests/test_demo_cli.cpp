@@ -1,6 +1,6 @@
-#include "demo_cli.h"
-#include "csv_export.h"
-#include "page_index_sidecar.h"
+#include "cli/shell/bootstrap/demo_cli.h"
+#include "cli/modules/import_export/csv_export.h"
+#include "cli/modules/sidecar/page/page_index_sidecar.h"
 
 #include <newdb/heap_table.h>
 #include <newdb/schema.h>

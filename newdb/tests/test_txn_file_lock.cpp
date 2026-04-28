@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
 
 #include <filesystem>
 #include <chrono>

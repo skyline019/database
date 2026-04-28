@@ -1,4 +1,4 @@
-#include "schema_catalog.h"
+#include "cli/modules/catalog/schema_catalog.h"
 
 #include <newdb/schema_io.h>
 

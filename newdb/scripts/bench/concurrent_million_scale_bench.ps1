@@ -12,7 +12,12 @@ $ErrorActionPreference = "Stop"
 $scriptsRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptsRoot)
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
-    $BuildDir = Join-Path $projectRoot $BuildDir
+    $cwdCandidate = Join-Path (Get-Location) $BuildDir
+    if (Test-Path -LiteralPath $cwdCandidate) {
+        $BuildDir = (Resolve-Path -LiteralPath $cwdCandidate).Path
+    } else {
+        $BuildDir = Join-Path $projectRoot $BuildDir
+    }
 }
 
 $exe = Join-Path $BuildDir "newdb_concurrent_perf.exe"
@@ -51,7 +56,7 @@ foreach ($th in $ThreadsSet) {
     $db = "conc_million_${stamp}_t${th}"
     $wal = Join-Path $DataDir ($db + ".wal")
     Get-ChildItem -Path $DataDir -Filter ($db + ".wal*") -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-    $out = & $exe --data-dir $DataDir --db-name $db --threads $th --total-ops $TotalOps --segment-bytes $SegmentBytes 2>&1 | Out-String
+    $out = & $exe --data-dir $DataDir --db-name $db --threads $th --total-ops $TotalOps --segment-bytes $SegmentBytes --json 2>&1 | Out-String
     Write-Host $out
     if ($LASTEXITCODE -ne 0) {
         throw "concurrent perf failed for threads=$th exit=$LASTEXITCODE"
@@ -59,10 +64,34 @@ foreach ($th in $ThreadsSet) {
     $elapsed = 0.0
     $tps = 0.0
     $walBytes = 0.0
+    $parsed = $null
     foreach ($ln in ($out -split "`r?`n")) {
-        if ($ln -match "^\s*elapsed_ms=(\d+(\.\d+)?)\s*$") { $elapsed = [double]$matches[1] }
-        if ($ln -match "^\s*tps=(\d+(\.\d+)?)\s*$") { $tps = [double]$matches[1] }
-        if ($ln -match "^\s*wal_bytes=(\d+(\.\d+)?)\s*$") { $walBytes = [double]$matches[1] }
+        $trimmed = $ln.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+        if (-not $trimmed.StartsWith("{")) { continue }
+        try {
+            $candidate = $trimmed | ConvertFrom-Json
+            if ($candidate.tool -eq "newdb_concurrent_perf") {
+                $parsed = $candidate
+                break
+            }
+        } catch {
+            # keep fallback parsing below for compatibility
+        }
+    }
+    if ($null -ne $parsed) {
+        if ($parsed.status -ne "ok") {
+            throw "concurrent perf returned non-ok status for threads=$th"
+        }
+        $elapsed = [double]$parsed.elapsed_ms
+        $tps = [double]$parsed.tps
+        $walBytes = [double]$parsed.wal_bytes
+    } else {
+        foreach ($ln in ($out -split "`r?`n")) {
+            if ($ln -match "^\s*elapsed_ms=(\d+(\.\d+)?)\s*$") { $elapsed = [double]$matches[1] }
+            if ($ln -match "^\s*tps=(\d+(\.\d+)?)\s*$") { $tps = [double]$matches[1] }
+            if ($ln -match "^\s*wal_bytes=(\d+(\.\d+)?)\s*$") { $walBytes = [double]$matches[1] }
+        }
     }
     $rows += [pscustomobject]@{
         threads = $th

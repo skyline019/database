@@ -1,4 +1,4 @@
-#include "equality_index_sidecar.h"
+#include "cli/modules/sidecar/eq/equality_index_sidecar.h"
 
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>

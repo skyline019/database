@@ -34,6 +34,9 @@ type State = { dataDir: string; currentTable: string; pageSize: number };
 type DllInfo = { loaded: boolean; version: string; path: string; message: string };
 type CommandExecResult = { ok: boolean; output: string; errorCode?: string | null };
 type ScriptExecResult = { ok: boolean; output: string; errorCode?: string | null; stopLine?: number | null };
+type TimedExecResult = { ok: boolean; output: string; errorCode?: string | null; elapsedMs: number };
+type TimedScriptResult = { ok: boolean; output: string; elapsedMs: number };
+type ExportBundleResult = { path: string };
 type RuntimeArtifactInfo = {
   guiExePath: string;
   guiExeModified: string;
@@ -45,6 +48,28 @@ type RuntimeArtifactInfo = {
   runtimeReportModified: string;
   dllPath: string;
   dllModified: string;
+};
+type PressureBenchProfile = {
+  jobs: number;
+  batches: number;
+  batchSize: number;
+  segmentTargetBytes: number;
+  sidecarInvalidateEveryN: number;
+  lsmCompactionWorkers: number;
+  lsmCompactionReapBudget: number;
+  lsmL0CompactTrigger: number;
+  lsmL0CompactBatch: number;
+  lsmFlushTriggerMultiplier: number;
+  repeatUntilFail: number;
+  sourceSummary: string;
+};
+type PressureBenchSummaryItem = {
+  path: string;
+  timestamp: string;
+  benchmarkProfile: string;
+  runtimeWalsyncMode: string;
+  runtimePressureTpsEst: number;
+  runtimePressureBatchMsP95: number;
 };
 type RuntimeTrendDashboard = {
   schema_version?: string;
@@ -74,6 +99,24 @@ type RuntimeTrendDashboard = {
     query_avg_ms_max?: number | null;
     cm_tps_min?: number | null;
   }>;
+  nightly?: {
+    crash_matrix?: {
+      schema_version?: string;
+      ts_ms?: number;
+      gate?: string;
+      summary?: { total?: number; passed?: number; failed?: number };
+      points?: Array<{ point: string; pass: boolean; elapsed_ms: number }>;
+    };
+  };
+};
+
+type CrashMatrixPoint = { point: string; pass: boolean; elapsed_ms: number };
+type CrashMatrixJson = {
+  schema_version?: string;
+  ts_ms?: number;
+  gate?: string;
+  summary?: { total?: number; passed?: number; failed?: number };
+  points?: CrashMatrixPoint[];
 };
 type TableTabState = {
   key: string;
@@ -91,6 +134,8 @@ type UiSettings = {
   bgImageUrl: string;
   bgImageOpacity: number;
   panelOpacity: number;
+  tableViewOpacity: number;
+  logPanelOpacity: number;
   fontScale: number;
   denseMode: boolean;
   animations: boolean;
@@ -121,13 +166,51 @@ type OperationType =
   | "txn_begin"
   | "txn_commit"
   | "txn_rollback"
+  | "txn_savepoint"
+  | "txn_rollback_to"
+  | "txn_release_savepoint"
+  | "pitr_recover_lsn"
+  | "pitr_recover_time"
   | "generic";
-type OperationRecord = {
+type UndoOp = {
   type: OperationType;
   title: string;
   forward: string;
   backward?: string;
+  inverseSource?: string;
+  table?: string;
   time: string;
+  ok?: boolean;
+};
+type UndoUnitStatus = "open" | "ready" | "applied" | "failed" | "frozen";
+type UndoUnit = {
+  unitId: string;
+  txnId: string;
+  savepointName: string;
+  tablesTouched: string[];
+  ops: UndoOp[];
+  createdAt: string;
+  status: UndoUnitStatus;
+  lastError?: string;
+};
+type TxnSessionRecorder = {
+  active: boolean;
+  txnId: string;
+  currentSavepoint: string;
+  pendingOps: UndoOp[];
+};
+type StackExecResult = {
+  ok: boolean;
+  appliedOps: number;
+  failedOp?: string | null;
+  executedCommands?: string[] | null;
+  repairAction: string;
+  elapsedMs: number;
+  message: string;
+};
+type InverseInferResult = {
+  backward?: string | null;
+  source?: string;
 };
 type MenuAction =
   | { kind: "command"; command: string; opType?: OperationType; title?: string; reversible?: boolean }
@@ -136,8 +219,14 @@ type MenuAction =
   | { kind: "logWindow" }
   | { kind: "cliTerminalWindow" }
   | { kind: "perfBench" }
+  | { kind: "pressureBench" }
   | { kind: "nightlySoak" }
   | { kind: "runtimeDashboard" }
+  | { kind: "txnRecovery" }
+  | { kind: "crashMatrix" }
+  | { kind: "walRecovery" }
+  | { kind: "gates" }
+  | { kind: "exportBundle" }
   | { kind: "settings" }
   | { kind: "createTableWizard" }
   | {
@@ -183,13 +272,39 @@ const runtimeDashboard = ref<RuntimeTrendDashboard | null>(null);
 const runtimeDashboardUpdatedAt = ref("");
 const runtimeDashboardPrevTier = ref<string>("");
 const runtimeDashboardTierChangeNote = ref("");
-const undoStack = ref<OperationRecord[]>([]);
-const redoStack = ref<OperationRecord[]>([]);
+const crashMatrixFiles = ref<string[]>([]);
+const crashMatrixSelected = ref("");
+const crashMatrixJson = ref<CrashMatrixJson | null>(null);
+const walRecoveryText = ref("");
+const gatesMode = ref<"both" | "lite" | "strict">("both");
+const gatesOutput = ref("");
+const exportBundlePath = ref("");
+const undoStack = ref<UndoUnit[]>([]);
+const redoStack = ref<UndoUnit[]>([]);
+const txnRecorder = ref<TxnSessionRecorder>({
+  active: false,
+  txnId: "",
+  currentSavepoint: "__autosave__",
+  pendingOps: []
+});
+const stackUndoPage = ref(1);
+const stackRedoPage = ref(1);
+const stackPageSize = 8;
+const stackPreviewUnit = ref<UndoUnit | null>(null);
 const selectedStackKey = ref("");
 const showHelp = ref(false);
 const showDllModal = ref(false);
 const showRuntimeDashboardModal = ref(false);
+const showTxnRecoveryModal = ref(false);
+const showCrashMatrixModal = ref(false);
+const showWalRecoveryModal = ref(false);
+const showGatesModal = ref(false);
+const showExportModal = ref(false);
 const showSettingsModal = ref(false);
+const showPressureBenchModal = ref(false);
+const txnRecoverySavepointName = ref("sp1");
+const txnRecoveryRecoverLsn = ref("0");
+const txnRecoveryRecoverTs = ref(String(Date.now()));
 const settingsNav = ref<"theme" | "layout" | "module">("theme");
 const showWorkspaceWarning = ref(false);
 const showDialog = ref(false);
@@ -211,6 +326,20 @@ const dialogFields = ref<{ key: string; label: string; value: string }[]>([]);
 const dialogTemplate = ref("");
 const dialogOpType = ref<OperationType>("generic");
 const dialogReversible = ref(false);
+const pressureBenchForm = ref<PressureBenchProfile>({
+  jobs: 16,
+  batches: 64,
+  batchSize: 500,
+  segmentTargetBytes: 256,
+  sidecarInvalidateEveryN: 16,
+  lsmCompactionWorkers: 2,
+  lsmCompactionReapBudget: 4,
+  lsmL0CompactTrigger: 8,
+  lsmL0CompactBatch: 12,
+  lsmFlushTriggerMultiplier: 2,
+  repeatUntilFail: 2,
+  sourceSummary: "default"
+});
 const contextMenu = ref({
   visible: false,
   x: 0,
@@ -350,8 +479,10 @@ function pushCliFeedback(line: string) {
 }
 const helpKeyword = ref("");
 const workspaceWarningText = ref("");
-const addRowId = ref("");
-const addRowValues = ref("");
+type QuickRowField = { name: string; ty: string; value: string };
+const showQuickRowModal = ref(false);
+const quickRowNextId = ref("1");
+const quickRowFields = ref<QuickRowField[]>([]);
 const addAttrName = ref("");
 const addAttrType = ref<
   "string" | "int" | "float" | "double" | "bool" | "date" | "datetime" | "timestamp" | "char"
@@ -374,6 +505,8 @@ const defaultSettings: UiSettings = {
   bgImageUrl: "",
   bgImageOpacity: 0.22,
   panelOpacity: 0.9,
+  tableViewOpacity: 0.96,
+  logPanelOpacity: 0.92,
   fontScale: 1,
   denseMode: false,
   animations: true,
@@ -390,22 +523,22 @@ const settingsPresets: SettingsPreset[] = [
   {
     key: "default",
     label: "默认",
-    settings: { accent: "#3b82f6", bgMode: "gradient", panelOpacity: 0.9, fontScale: 1, denseMode: false, animations: true, cornerScale: 1, shadowScale: 1, logFontScale: 1, logLineHeight: 1.5, borderContrast: 1, panelBrightness: 1, logHighlightIntensity: 1 }
+    settings: { accent: "#3b82f6", bgMode: "gradient", panelOpacity: 0.9, tableViewOpacity: 0.96, logPanelOpacity: 0.92, fontScale: 1, denseMode: false, animations: true, cornerScale: 1, shadowScale: 1, logFontScale: 1, logLineHeight: 1.5, borderContrast: 1, panelBrightness: 1, logHighlightIntensity: 1 }
   },
   {
     key: "midnight",
     label: "午夜蓝",
-    settings: { accent: "#60a5fa", bgMode: "gradient", panelOpacity: 0.92, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.05, shadowScale: 1.15, logFontScale: 1, logLineHeight: 1.55, borderContrast: 1.08, panelBrightness: 0.96, logHighlightIntensity: 1.1 }
+    settings: { accent: "#60a5fa", bgMode: "gradient", panelOpacity: 0.92, tableViewOpacity: 0.94, logPanelOpacity: 0.9, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.05, shadowScale: 1.15, logFontScale: 1, logLineHeight: 1.55, borderContrast: 1.08, panelBrightness: 0.96, logHighlightIntensity: 1.1 }
   },
   {
     key: "mint",
     label: "薄荷绿",
-    settings: { accent: "#34d399", bgMode: "gradient", panelOpacity: 0.88, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.1, shadowScale: 0.9, logFontScale: 1.02, logLineHeight: 1.55, borderContrast: 0.95, panelBrightness: 1.05, logHighlightIntensity: 0.95 }
+    settings: { accent: "#34d399", bgMode: "gradient", panelOpacity: 0.88, tableViewOpacity: 0.9, logPanelOpacity: 0.86, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.1, shadowScale: 0.9, logFontScale: 1.02, logLineHeight: 1.55, borderContrast: 0.95, panelBrightness: 1.05, logHighlightIntensity: 0.95 }
   },
   {
     key: "compact",
     label: "高密度",
-    settings: { accent: "#818cf8", bgMode: "gradient", panelOpacity: 0.95, fontScale: 0.96, denseMode: true, animations: false, sidebarWidth: 240, cornerScale: 0.9, shadowScale: 0.75, logFontScale: 0.94, logLineHeight: 1.4, borderContrast: 1.2, panelBrightness: 0.92, logHighlightIntensity: 1.2 }
+    settings: { accent: "#818cf8", bgMode: "gradient", panelOpacity: 0.95, tableViewOpacity: 0.98, logPanelOpacity: 0.96, fontScale: 0.96, denseMode: true, animations: false, sidebarWidth: 240, cornerScale: 0.9, shadowScale: 0.75, logFontScale: 0.94, logLineHeight: 1.4, borderContrast: 1.2, panelBrightness: 0.92, logHighlightIntensity: 1.2 }
   }
 ];
 const settings = ref<UiSettings>({ ...defaultSettings });
@@ -535,8 +668,18 @@ const tableStatusText = computed(() => {
   }
   return "暂无数据。";
 });
-const canUndo = computed(() => undoStack.value.some((x) => !!x.backward));
+const canUndo = computed(() => undoStack.value.length > 0);
 const canRedo = computed(() => redoStack.value.length > 0);
+const undoStackPaged = computed(() => {
+  const start = Math.max(0, undoStack.value.length - stackUndoPage.value * stackPageSize);
+  const end = undoStack.value.length - (stackUndoPage.value - 1) * stackPageSize;
+  return undoStack.value.slice(start, end).reverse();
+});
+const redoStackPaged = computed(() => {
+  const start = Math.max(0, redoStack.value.length - stackRedoPage.value * stackPageSize);
+  const end = redoStack.value.length - (stackRedoPage.value - 1) * stackPageSize;
+  return redoStack.value.slice(start, end).reverse();
+});
 const dashboardTier = computed(() => String(runtimeDashboard.value?.health?.tier || "unknown").toLowerCase());
 const dashboardTierClass = computed(() => {
   if (dashboardTier.value === "healthy") return "tier-healthy";
@@ -751,6 +894,8 @@ const layoutStyle = computed(() => {
   return {
     "--accent": s.accent,
     "--panel-opacity": String(s.panelOpacity),
+    "--table-view-opacity": String(s.tableViewOpacity),
+    "--log-panel-opacity": String(s.logPanelOpacity),
     "--font-scale": String(s.fontScale),
     "--sidebar-width": `${Math.round(s.sidebarWidth)}px`,
     "--corner-scale": String(s.cornerScale),
@@ -763,6 +908,33 @@ const layoutStyle = computed(() => {
     backgroundImage: bg
   } as Record<string, string>;
 });
+
+function syncThemeVarsToRoot() {
+  if (typeof document === "undefined") return;
+  const s = settings.value;
+  const root = document.documentElement;
+  root.style.setProperty("--accent", s.accent);
+  root.style.setProperty("--panel-opacity", String(s.panelOpacity));
+  root.style.setProperty("--table-view-opacity", String(s.tableViewOpacity));
+  root.style.setProperty("--log-panel-opacity", String(s.logPanelOpacity));
+  root.style.setProperty("--font-scale", String(s.fontScale));
+  root.style.setProperty("--sidebar-width", `${Math.round(s.sidebarWidth)}px`);
+  root.style.setProperty("--corner-scale", String(s.cornerScale));
+  root.style.setProperty("--shadow-scale", String(s.shadowScale));
+  root.style.setProperty("--log-font-scale", String(s.logFontScale));
+  root.style.setProperty("--log-line-height", String(s.logLineHeight));
+  root.style.setProperty("--border-contrast", String(s.borderContrast));
+  root.style.setProperty("--panel-brightness", String(s.panelBrightness));
+  root.style.setProperty("--log-highlight-intensity", String(s.logHighlightIntensity));
+}
+
+watch(
+  settings,
+  () => {
+    syncThemeVarsToRoot();
+  },
+  { deep: true, immediate: true }
+);
 const currentBreadcrumb = computed(() => {
   const root = state.value.dataDir || "(workspace)";
   const table = state.value.currentTable || "(no table)";
@@ -927,7 +1099,9 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     items: [
       { label: "开始事务", action: { kind: "command", command: "BEGIN", opType: "txn_begin", title: "开始事务" } },
       { label: "提交事务", action: { kind: "command", command: "COMMIT", opType: "txn_commit", title: "提交事务" } },
-      { label: "回滚事务", action: { kind: "command", command: "ROLLBACK", opType: "txn_rollback", title: "回滚事务" } }
+      { label: "回滚事务", action: { kind: "command", command: "ROLLBACK", opType: "txn_rollback", title: "回滚事务" } },
+      { divider: true, label: "-" },
+      { label: "Txn & Recovery 面板...", action: { kind: "txnRecovery" } }
     ]
   },
   {
@@ -938,8 +1112,13 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { label: "日志窗口", action: { kind: "logWindow" } },
       { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } },
       { label: "百万级性能压测(可执行)...", action: { kind: "perfBench" } },
+      { label: "Concurrent Pressure 压测(可执行)...", action: { kind: "pressureBench" } },
       { label: "Nightly Soak 趋势跑批...", action: { kind: "nightlySoak" } },
       { label: "Runtime Dashboard...", action: { kind: "runtimeDashboard" } },
+      { label: "Crash Matrix...", action: { kind: "crashMatrix" } },
+      { label: "WAL & Recovery...", action: { kind: "walRecovery" } },
+      { label: "Gates...", action: { kind: "gates" } },
+      { label: "导出诊断包(Export Bundle)...", action: { kind: "exportBundle" } },
       { divider: true, label: "-" },
       { label: "调优状态", action: { kind: "command", command: "SHOW TUNING", opType: "generic", title: "调优状态" } },
       { label: "WALSYNC normal 20", action: { kind: "command", command: "WALSYNC normal 20", opType: "generic", title: "WALSYNC normal 20" } },
@@ -1035,6 +1214,8 @@ function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
     bgImageUrl: String(input.bgImageUrl ?? ""),
     bgImageOpacity: clamp(num(input.bgImageOpacity, defaultSettings.bgImageOpacity), 0.05, 0.8),
     panelOpacity: clamp(num(input.panelOpacity, defaultSettings.panelOpacity), 0.6, 1),
+    tableViewOpacity: clamp(num(input.tableViewOpacity, defaultSettings.tableViewOpacity), 0.35, 1),
+    logPanelOpacity: clamp(num(input.logPanelOpacity, defaultSettings.logPanelOpacity), 0.35, 1),
     fontScale: clamp(num(input.fontScale, defaultSettings.fontScale), 0.9, 1.2),
     denseMode: Boolean(input.denseMode),
     animations: Boolean(input.animations),
@@ -1056,6 +1237,8 @@ function sameSettings(a: UiSettings, b: UiSettings) {
     a.bgImageUrl === b.bgImageUrl &&
     a.bgImageOpacity === b.bgImageOpacity &&
     a.panelOpacity === b.panelOpacity &&
+    a.tableViewOpacity === b.tableViewOpacity &&
+    a.logPanelOpacity === b.logPanelOpacity &&
     a.fontScale === b.fontScale &&
     a.denseMode === b.denseMode &&
     a.animations === b.animations &&
@@ -1153,14 +1336,30 @@ function appendSessionLogHeader() {
   logLine(`\n[SESSION] ${mode} started at ${ts}`);
 }
 
-function stackKey(item: OperationRecord) {
-  return `${item.time}::${item.forward}`;
+function stackKey(item: UndoUnit) {
+  return `${item.unitId}::${item.createdAt}`;
 }
 
-async function viewOperationLog(item: OperationRecord) {
+type StackExecTrace = { kind: "undo" | "redo"; at: string; commands: string[] };
+const stackExecTraceByUnitId = ref<Record<string, StackExecTrace>>({});
+
+function recordStackExecTrace(unit: UndoUnit, kind: "undo" | "redo", r: StackExecResult) {
+  const cmds = (r.executedCommands ?? []).filter((x) => !!x);
+  if (!cmds.length) return;
+  stackExecTraceByUnitId.value[unit.unitId] = { kind, at: now(), commands: cmds };
+}
+
+function isReversible(item: UndoUnit) {
+  return item.ops.some((x) => !!x.backward);
+}
+
+async function viewOperationLog(item: UndoUnit) {
   const all = logs.value.join("\n");
   const lines = all.split(/\r?\n/);
-  const needle = `> ${item.forward}`.trim();
+  const firstForward = item.ops[0]?.forward || "";
+  const trace = stackExecTraceByUnitId.value[item.unitId];
+  const primaryCommand = (trace?.commands?.[0] || firstForward || "").trim();
+  const needle = `> ${firstForward}`.trim();
   let hit = -1;
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const t = (lines[i] ?? "").trim();
@@ -1170,10 +1369,10 @@ async function viewOperationLog(item: OperationRecord) {
       break;
     }
   }
-  if (hit < 0 && item.forward && item.forward !== "[SCRIPT]") {
+  if (hit < 0 && firstForward && firstForward !== "[SCRIPT]") {
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const t = (lines[i] ?? "").trim();
-      if (t.includes(item.forward)) {
+      if (t.includes(firstForward)) {
         hit = i;
         break;
       }
@@ -1182,15 +1381,26 @@ async function viewOperationLog(item: OperationRecord) {
   const start = Math.max(0, (hit >= 0 ? hit : lines.length - 1) - 10);
   const end = Math.min(lines.length, (hit >= 0 ? hit : lines.length - 1) + 18);
   const snippet = lines.slice(start, end).join("\n");
+  const traceText = trace
+    ? `\n\n--- 最近一次 ${trace.kind === "undo" ? "回退" : "重做"} 追踪（${trace.at}）---\n${trace.commands
+        .map((c) => `- ${c}`)
+        .join("\n")}`
+    : "";
+  const inverseSource = item.ops[0]?.inverseSource?.trim() || "-";
+  const isTruncatedSnapshot = /truncated\s*=\s*true/i.test(inverseSource);
+  const snapshotWarn = isTruncatedSnapshot
+    ? "\n⚠ 注意：当前逆向脚本来自截断快照（非全量），超出上限的数据不会被本次回退恢复。"
+    : "";
   await openUiMessage(
     "alert",
-    `回看日志：${item.title}`,
-    `命令：${item.forward}\n时间：${item.time}\n\n--- 日志上下文（${start + 1}-${end}）---\n${snippet || "(日志为空)"}`
+    `回看日志：${item.savepointName}`,
+    `unit=${item.unitId}\nops=${item.ops.length}\n命令：${primaryCommand || "-"}\n逆向来源：${inverseSource}${snapshotWarn}\n时间：${item.createdAt}${traceText}\n\n--- 日志上下文（${start + 1}-${end}）---\n${snippet || "(日志为空)"}`
   );
 }
 
-async function selectStackItem(item: OperationRecord) {
+async function selectStackItem(item: UndoUnit) {
   selectedStackKey.value = stackKey(item);
+  stackPreviewUnit.value = item;
 }
 
 function extractScriptStopLine(raw: string): number | null {
@@ -1236,6 +1446,78 @@ function inferInverse(type: OperationType, forward: string): string | undefined 
   }
   if (cmd === "BEGIN") return "ROLLBACK";
   return undefined;
+}
+
+function inferUpdateInverseFromCurrentView(forward: string): string | undefined {
+  const m = /UPDATE\(([^)]*)\)/i.exec(forward);
+  if (!m) return undefined;
+  const args = m[1]
+    .split(",")
+    .map((x) => x.trim())
+    .filter((x) => x.length > 0);
+  if (args.length < 1) return undefined;
+  const id = args[0]!;
+  const idIdx = idColumnIndex.value;
+  if (idIdx < 0) return undefined;
+  const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
+  if (!hit) return undefined;
+  const oldValues = hit.filter((_, idx) => idx !== idIdx).map((x) => `${x ?? ""}`.trim());
+  return `UPDATE(${[id, ...oldValues].join(",")})`;
+}
+
+function inferDeleteInverseFromCurrentView(forward: string): string | undefined {
+  const m = /DELETE\(([^,)]+)\)/i.exec(forward);
+  if (!m) return undefined;
+  const id = m[1]?.trim();
+  if (!id) return undefined;
+  const idIdx = idColumnIndex.value;
+  if (idIdx < 0) return undefined;
+  const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
+  if (!hit) return undefined;
+  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim()).join(",")})`;
+}
+
+function inferOpTypeFromCommand(command: string): OperationType {
+  const up = normalizeCmd(command).toUpperCase();
+  if (up.startsWith("INSERT(") || up.startsWith("BULKINSERT(")) return "data_insert";
+  if (up.startsWith("UPDATE(")) return "data_update";
+  if (up.startsWith("DELETE(")) return "data_delete";
+  if (up.startsWith("CREATE TABLE(")) return "table_create";
+  if (up.startsWith("DROP TABLE(")) return "table_drop";
+  if (up.startsWith("RENAME TABLE(")) return "table_rename";
+  if (up.startsWith("USE(") || up.startsWith("USE ")) return "table_use";
+  if (up.startsWith("DEFATTR(")) return "schema_defattr";
+  if (up.startsWith("SET PRIMARY KEY(")) return "schema_set_pk";
+  if (up === "BEGIN") return "txn_begin";
+  if (up === "COMMIT") return "txn_commit";
+  if (up === "ROLLBACK") return "txn_rollback";
+  if (up.startsWith("SAVEPOINT ")) return "txn_savepoint";
+  if (up.startsWith("ROLLBACK TO ")) return "txn_rollback_to";
+  if (up.startsWith("RELEASE SAVEPOINT ")) return "txn_release_savepoint";
+  return "generic";
+}
+
+function inferBackwardForCommand(command: string, opType: OperationType): string | undefined {
+  const up = normalizeCmd(command).toUpperCase();
+  return (
+    inferInverse(opType, command) ??
+    (up.startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(command) : undefined) ??
+    (up.startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(command) : undefined)
+  );
+}
+
+async function inferBackwardPayloadByBackend(
+  command: string,
+  opType: OperationType
+): Promise<{ backward?: string; source?: string }> {
+  try {
+    const r = await invoke<InverseInferResult>("infer_inverse_command", { command, opType });
+    const backward = (r?.backward ?? "").trim() || undefined;
+    const source = (r?.source ?? "").trim() || undefined;
+    return { backward, source };
+  } catch {
+    return {};
+  }
 }
 
 function applyStateSideEffects(cmd: string) {
@@ -1512,42 +1794,69 @@ async function reindexIds() {
   await refreshPage();
 }
 
-async function quickAddRow() {
-  // Qt 版常用：INSERT(newId)；如需补全其它值，允许直接追加逗号参数。
-  const id = addRowId.value.trim();
-  const vals = addRowValues.value.trim();
-  let cmd = "";
-  if (id) {
-    cmd = vals ? `INSERT(${id},${vals})` : `INSERT(${id})`;
-  } else {
-    const idIdx = idColumnIndex.value >= 0 ? idColumnIndex.value : 1;
-    let maxId = 0;
-    for (const row of tableViewData.value.rows) {
-      const n = Number((row?.[idIdx] ?? "").trim());
-      if (Number.isFinite(n) && n > maxId) {
-        maxId = n;
-      }
+async function computeNextRowId(): Promise<string> {
+  try {
+    const pr = await invoke<PageResult>("query_page", {
+      pageNo: 1,
+      pageSize: 1,
+      orderKey: "id",
+      descending: true
+    });
+    const tv = pr.headers.length === 1 && pr.headers[0] === "raw" ? tableViewData.value : pr;
+    const idIdx = tv.headers.findIndex((h) => h.trim().toLowerCase() === "id");
+    const top = idIdx >= 0 ? (tv.rows?.[0]?.[idIdx] ?? "") : "";
+    const n = Number(String(top).trim());
+    if (Number.isFinite(n) && n > 0) {
+      return String(Math.floor(n) + 1);
     }
-    const next = String(maxId > 0 ? maxId + 1 : 1);
-    cmd = vals ? `INSERT(${next},${vals})` : `INSERT(${next})`;
+  } catch {
+    // fallback below
   }
-  await runCommand(cmd, { opType: "data_insert", title: "新增行" });
-  addRowId.value = "";
-  addRowValues.value = "";
+  const idIdx = idColumnIndex.value >= 0 ? idColumnIndex.value : 1;
+  let maxId = 0;
+  for (const row of tableViewData.value.rows) {
+    const n = Number((row?.[idIdx] ?? "").trim());
+    if (Number.isFinite(n) && n > maxId) {
+      maxId = n;
+    }
+  }
+  return String(maxId > 0 ? maxId + 1 : 1);
+}
+
+function buildQuickRowFieldsFromCurrentTable() {
+  const fields = tableColumns.value
+    .map((c) => ({ name: String(c.name ?? "").trim(), ty: String(c.ty ?? "string").trim() || "string" }))
+    .filter((c) => !!c.name && c.name !== "#" && c.name.toLowerCase() !== "id")
+    .map((c) => ({ ...c, value: "0" }));
+  quickRowFields.value = fields;
+}
+
+async function openQuickAddRowModal() {
+  if (!state.value.currentTable.trim()) {
+    await openUiMessage("alert", "未选择表", "请先在左侧选择当前表。");
+    return;
+  }
+  cancelEditRow();
+  buildQuickRowFieldsFromCurrentTable();
+  quickRowNextId.value = await computeNextRowId();
+  showQuickRowModal.value = true;
+}
+
+async function submitQuickAddRow() {
+  const vals = quickRowFields.value.map((f) => (f.value ?? "").trim() || "0");
+  const cmd = vals.length > 0 ? `INSERT(${[quickRowNextId.value, ...vals].join(",")})` : `INSERT(${quickRowNextId.value})`;
+  await runCommand(cmd, { opType: "data_insert", title: `新增行 id=${quickRowNextId.value}` });
+  showQuickRowModal.value = false;
 }
 
 function isEnterKey(ev: KeyboardEvent): boolean {
   return ev.key === "Enter" || ev.key === "NumpadEnter";
 }
 
-function handleQuickToolEnter(ev: KeyboardEvent, action: "addRow" | "addAttr" | "delAttr") {
+function handleQuickToolEnter(ev: KeyboardEvent, action: "addAttr" | "delAttr") {
   if (!isEnterKey(ev)) return;
   ev.preventDefault();
   ev.stopPropagation();
-  if (action === "addRow") {
-    void quickAddRow();
-    return;
-  }
   // Schema mutations can invalidate current row editor shape; close editor first.
   cancelEditRow();
   if (action === "addAttr") {
@@ -1726,10 +2035,94 @@ async function onPageSizeChange(v: number | undefined) {
   await refreshPage();
 }
 
-function pushHistory(item: OperationRecord) {
-  undoStack.value.push(item);
-  if (undoStack.value.length > 120) undoStack.value.shift();
+function buildUndoUnit(
+  savepointName: string,
+  ops: UndoOp[],
+  status: UndoUnitStatus = "ready"
+): UndoUnit {
+  const unitId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const tables = Array.from(new Set(ops.map((x) => x.table || state.value.currentTable).filter((x) => !!x)));
+  return {
+    unitId,
+    txnId: txnRecorder.value.txnId || `txn-${Date.now()}`,
+    savepointName,
+    tablesTouched: tables as string[],
+    ops,
+    createdAt: now(),
+    status
+  };
+}
+
+function pushHistoryUnit(unit: UndoUnit) {
+  undoStack.value.push(unit);
+  if (undoStack.value.length > 1000) undoStack.value.shift();
   redoStack.value = [];
+}
+
+async function persistStackState() {
+  try {
+    await invoke("save_stack_units", {
+      undoUnitsJson: JSON.stringify(undoStack.value),
+      redoUnitsJson: JSON.stringify(redoStack.value)
+    });
+  } catch (e) {
+    logLine(`[STACK][WARN] persist failed: ${String(e)}`);
+  }
+}
+
+async function loadStackState() {
+  try {
+    const raw = await invoke<string>("load_stack_units");
+    const v = JSON.parse(raw || "{}");
+    undoStack.value = Array.isArray(v.undo_units) ? (v.undo_units as UndoUnit[]) : [];
+    redoStack.value = Array.isArray(v.redo_units) ? (v.redo_units as UndoUnit[]) : [];
+    const warnings: string[] = Array.isArray(v.warnings) ? v.warnings : [];
+    for (const w of warnings) {
+      logLine(`[STACK][WARN] ${w}`);
+    }
+  } catch (e) {
+    logLine(`[STACK][WARN] load failed: ${String(e)}`);
+  }
+}
+
+function trackTxnCommand(op: UndoOp) {
+  const cmd = normalizeCmd(op.forward).toUpperCase();
+  if (cmd.startsWith("BEGIN")) {
+    txnRecorder.value.active = true;
+    txnRecorder.value.txnId = `txn-${Date.now()}`;
+    txnRecorder.value.currentSavepoint = "__autosave__";
+    txnRecorder.value.pendingOps = [];
+    return;
+  }
+  if (!txnRecorder.value.active) {
+    // Non-txn mode: each reversible op is still a savepoint-level unit.
+    const unit = buildUndoUnit("__single__", [op]);
+    pushHistoryUnit(unit);
+    return;
+  }
+  if (cmd.startsWith("SAVEPOINT ")) {
+    const sp = op.forward.replace(/^SAVEPOINT\s+/i, "").trim() || "__savepoint__";
+    const chunk = txnRecorder.value.pendingOps.splice(0);
+    if (chunk.length > 0) {
+      pushHistoryUnit(buildUndoUnit(sp, chunk));
+    }
+    txnRecorder.value.currentSavepoint = sp;
+    return;
+  }
+  if (cmd.startsWith("COMMIT")) {
+    const chunk = txnRecorder.value.pendingOps.splice(0);
+    if (chunk.length > 0) {
+      pushHistoryUnit(buildUndoUnit("__commit__", chunk, "ready"));
+    }
+    txnRecorder.value.active = false;
+    return;
+  }
+  if (cmd.startsWith("ROLLBACK")) {
+    txnRecorder.value.pendingOps = [];
+    txnRecorder.value.active = false;
+    return;
+  }
+  txnRecorder.value.pendingOps.push(op);
 }
 
 async function runCommand(
@@ -1737,6 +2130,15 @@ async function runCommand(
   opts?: { skipHistory?: boolean; opType?: OperationType; title?: string; backward?: string }
 ) {
   if (!text.trim()) return;
+  const opType = opts?.opType ?? "generic";
+  const backendInfer = await inferBackwardPayloadByBackend(text, opType);
+  const backendBackward = backendInfer.backward;
+  const presetBackward =
+    opts?.backward ??
+    backendBackward ??
+    inferInverse(opType, text) ??
+    (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
+    (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined);
   busy.value = true;
   try {
     const exec = await invoke<CommandExecResult>("execute_command_ex", { command: text });
@@ -1747,14 +2149,18 @@ async function runCommand(
     if (!failed) {
       applyStateSideEffects(text);
       if (!opts?.skipHistory) {
-        const backward = opts?.backward ?? inferInverse(opts?.opType ?? "generic", text);
-        pushHistory({
-          type: opts?.opType ?? "generic",
+        const op: UndoOp = {
+          type: opType,
           title: opts?.title ?? text,
           forward: text,
-          backward,
-          time: now()
-        });
+          backward: presetBackward,
+          inverseSource: backendInfer.source || (presetBackward ? "frontend:heuristic" : undefined),
+          table: state.value.currentTable || "",
+          time: now(),
+          ok: true
+        };
+        trackTxnCommand(op);
+        await persistStackState();
       }
     } else {
       logLine("[CMD] insert/update stopped due to command error.");
@@ -1763,6 +2169,151 @@ async function runCommand(
     await refreshTables();
     await refreshPage();
     return !failed;
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function runTimedOp(
+  kind:
+    | "txn_begin"
+    | "txn_commit"
+    | "txn_rollback"
+    | "txn_savepoint"
+    | "txn_rollback_to"
+    | "txn_release_savepoint"
+    | "pitr_recover_lsn"
+    | "pitr_recover_time",
+  payload: Record<string, any>,
+  forwardCmd: string,
+  title: string
+) {
+  busy.value = true;
+  try {
+    const map: Record<string, string> = {
+      txn_begin: "txn_begin",
+      txn_commit: "txn_commit",
+      txn_rollback: "txn_rollback",
+      txn_savepoint: "txn_savepoint",
+      txn_rollback_to: "txn_rollback_to",
+      txn_release_savepoint: "txn_release_savepoint",
+      pitr_recover_lsn: "pitr_recover_to_lsn",
+      pitr_recover_time: "pitr_recover_to_time"
+    };
+    const cmdName = map[kind];
+    const exec = await invoke<TimedExecResult>(cmdName, payload);
+    logLine(`> ${forwardCmd}`);
+    logLine(exec.output ?? "");
+    if (exec.ok) {
+      const op: UndoOp = {
+        type: kind as OperationType,
+        title,
+        forward: forwardCmd,
+        table: state.value.currentTable || "",
+        time: now(),
+        ok: true
+      };
+      trackTxnCommand(op);
+      await persistStackState();
+    } else {
+      await openUiMessage("alert", "操作失败", exec.output || exec.errorCode || "unknown error");
+    }
+    const st = await invoke<State>("get_state");
+    state.value = st;
+    await refreshTables();
+    await refreshPage();
+    return exec.ok;
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function refreshCrashMatrix() {
+  try {
+    const files = await invoke<string[]>("list_results_files", { prefix: "redo_undo_crash_matrix_", limit: 30 });
+    crashMatrixFiles.value = files ?? [];
+    if (!crashMatrixSelected.value && crashMatrixFiles.value.length > 0) {
+      crashMatrixSelected.value = crashMatrixFiles.value[0]!;
+    }
+    if (crashMatrixSelected.value) {
+      const text = await invoke<string>("read_results_json", { fileName: crashMatrixSelected.value });
+      crashMatrixJson.value = JSON.parse(text) as CrashMatrixJson;
+    } else {
+      crashMatrixJson.value = null;
+    }
+  } catch (e: any) {
+    crashMatrixJson.value = null;
+    crashMatrixFiles.value = [];
+    await openUiMessage("alert", "Crash Matrix 读取失败", String(e));
+  }
+}
+
+async function onSelectCrashMatrix(name: string) {
+  crashMatrixSelected.value = name;
+  await refreshCrashMatrix();
+}
+
+async function refreshWalRecoverySummary() {
+  // Minimal recovery summary: reuse CLI command output (keeps backend changes small).
+  const ok = await runCommand("SHOW TUNING", { skipHistory: true, opType: "generic", title: "WAL/Recovery Summary" });
+  if (!ok) {
+    walRecoveryText.value = "[SHOW TUNING] failed";
+    return;
+  }
+  // Use the latest logs slice as the modal content.
+  walRecoveryText.value = logs.value.slice(0, 60).join("\n");
+}
+
+async function runRedoUndoGate() {
+  busy.value = true;
+  try {
+    const r = await invoke<TimedScriptResult>("run_redo_undo_gate", { idempotentMode: gatesMode.value });
+    gatesOutput.value = r.output ?? "";
+    logs.value.unshift(`[${now()}] redo/undo gate (mode=${gatesMode.value}) elapsed_ms=${r.elapsedMs}\n${gatesOutput.value}`);
+    persistLogs();
+    await refreshCrashMatrix();
+    await refreshRuntimeDashboard();
+    if (!r.ok) {
+      await openUiMessage("alert", "Gate 失败", "redo/undo gate 执行失败（请查看输出并导出诊断包）");
+    }
+  } catch (e: any) {
+    gatesOutput.value = String(e);
+    await openUiMessage("alert", "Gate 运行失败", String(e));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function runNightlyPressureProfileCompare() {
+  busy.value = true;
+  try {
+    const r = await invoke<TimedScriptResult>("run_nightly_pressure_profile_compare");
+    gatesOutput.value = r.output ?? "";
+    logs.value.unshift(`[${now()}] nightly pressure profile compare elapsed_ms=${r.elapsedMs}\n${gatesOutput.value}`);
+    persistLogs();
+    await refreshCrashMatrix();
+    await refreshRuntimeDashboard();
+    if (!r.ok) {
+      await openUiMessage("alert", "Nightly 脚本失败", "nightly_pressure_profile_compare 执行失败（请查看输出）");
+    }
+  } catch (e: any) {
+    gatesOutput.value = String(e);
+    await openUiMessage("alert", "Nightly 脚本运行失败", String(e));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function exportBundle() {
+  busy.value = true;
+  try {
+    const path = await invoke<string>("export_bundle", { destZip: null });
+    exportBundlePath.value = path;
+    logs.value.unshift(`[${now()}] export bundle\n${path}`);
+    persistLogs();
+    await openUiMessage("alert", "导出完成", `诊断包已生成：\n${path}`);
+  } catch (e: any) {
+    await openUiMessage("alert", "导出失败", String(e));
   } finally {
     busy.value = false;
   }
@@ -1813,12 +2364,12 @@ async function runScript() {
       logLine(`[MDB] script stopped on line ${stopLine} due to command error.`);
       await openUiMessage("alert", "脚本已中断", `第 ${stopLine} 行执行失败，后续语句未执行。`);
     }
-    pushHistory({
-      type: "generic",
-      title: "执行脚本",
-      forward: "[SCRIPT]",
-      time: now()
-    });
+    pushHistoryUnit(
+      buildUndoUnit("__script__", [
+        { type: "generic", title: "执行脚本", forward: "[SCRIPT]", table: state.value.currentTable || "", time: now() }
+      ])
+    );
+    await persistStackState();
     const st = await invoke<State>("get_state");
     state.value = st;
     if (st.currentTable?.trim()) {
@@ -1833,40 +2384,214 @@ async function runScript() {
   }
 }
 
-async function undo() {
-  for (let i = undoStack.value.length - 1; i >= 0; i -= 1) {
-    if (undoStack.value[i].backward) {
-      const [item] = undoStack.value.splice(i, 1);
-      redoStack.value.push(item);
-      logLine(`[UNDO] ${item.title}`);
-      await runCommand(item.backward!, { skipHistory: true, opType: item.type, title: `UNDO:${item.title}` });
-      return;
+async function refreshAfterStackExec() {
+  await refreshTables();
+  await nextTick();
+  await refreshPage();
+}
+
+function undoGlobalIndexFromPaged(idx: number): number {
+  return undoStack.value.length - 1 - (stackUndoPage.value - 1) * stackPageSize - idx;
+}
+
+function redoGlobalIndexFromPaged(idx: number): number {
+  return redoStack.value.length - 1 - (stackRedoPage.value - 1) * stackPageSize - idx;
+}
+
+async function undoToIndex(targetIndex: number) {
+  if (busy.value) return;
+  if (targetIndex < 0 || targetIndex >= undoStack.value.length) return;
+  const steps = undoStack.value.length - targetIndex;
+  const item = undoStack.value[targetIndex];
+  if (!item) return;
+  const okConfirm = await openUiMessage(
+    "confirm",
+    "确认撤销到此处",
+    `将撤销 ${steps} 个单元（包含目标单元）\n目标：${item.savepointName}\nops=${item.ops.length}\ntables=${item.tablesTouched.join(", ") || "n/a"}`
+  );
+  if (!okConfirm) return;
+  busy.value = true;
+  try {
+    while (undoStack.value.length - 1 >= targetIndex) {
+      const top = undoStack.value[undoStack.value.length - 1];
+      if (!top) break;
+      const r = await invoke<StackExecResult>("stack_undo_unit", { unit: top });
+      recordStackExecTrace(top, "undo", r);
+      logLine(`[UNDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
+      if (r.ok) {
+        undoStack.value.pop();
+        redoStack.value.push({ ...top, status: "applied" });
+      } else {
+        top.status = r.repairAction === "hard_fail_rollback" ? "frozen" : "failed";
+        top.lastError = r.failedOp || r.message;
+        await openUiMessage("alert", "UNDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+        break;
+      }
     }
+    await persistStackState();
+    await refreshAfterStackExec();
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function redoToIndex(targetIndex: number, editable: boolean) {
+  if (busy.value) return;
+  if (targetIndex < 0 || targetIndex >= redoStack.value.length) return;
+  const steps = redoStack.value.length - targetIndex;
+  const item = redoStack.value[targetIndex];
+  if (!item) return;
+  const okConfirm = await openUiMessage(
+    "confirm",
+    "确认重做到此处",
+    `将重做 ${steps} 个单元（包含目标单元）\n目标：${item.savepointName}\nops=${item.ops.length}\ntables=${item.tablesTouched.join(", ") || "n/a"}`
+  );
+  if (!okConfirm) return;
+  busy.value = true;
+  try {
+    while (redoStack.value.length - 1 >= targetIndex) {
+      const topIndex = redoStack.value.length - 1;
+      const top = redoStack.value[topIndex];
+      if (!top) break;
+      // Editable only applies to the final target unit, to keep batch deterministic.
+      const wantEdit = editable && topIndex === targetIndex;
+      if (wantEdit) {
+        // Reuse existing single-item path (supports edited ops + backward inference).
+        await redoFromStack(topIndex, true);
+        break;
+      }
+      const r = await invoke<StackExecResult>("stack_redo_unit", { unit: top });
+      recordStackExecTrace(top, "redo", r);
+      logLine(`[REDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
+      if (r.ok) {
+        redoStack.value.pop();
+        undoStack.value.push({ ...top, status: "ready" });
+      } else {
+        top.status = "failed";
+        top.lastError = r.failedOp || r.message;
+        await openUiMessage("alert", "REDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+        break;
+      }
+    }
+    await persistStackState();
+    await refreshAfterStackExec();
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function undo() {
+  const item = undoStack.value[undoStack.value.length - 1];
+  if (!item) return;
+  stackPreviewUnit.value = item;
+  const okConfirm = await openUiMessage(
+    "confirm",
+    "确认撤销单元",
+    `savepoint=${item.savepointName}\nops=${item.ops.length}\ntables=${item.tablesTouched.join(", ") || "n/a"}`
+  );
+  if (!okConfirm) return;
+  busy.value = true;
+  try {
+    const r = await invoke<StackExecResult>("stack_undo_unit", { unit: item });
+    recordStackExecTrace(item, "undo", r);
+    logLine(`[UNDO][${r.repairAction}] ${item.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
+    if (r.ok) {
+      undoStack.value.pop();
+      redoStack.value.push({ ...item, status: "applied" });
+    } else {
+      item.status = r.repairAction === "hard_fail_rollback" ? "frozen" : "failed";
+      item.lastError = r.failedOp || r.message;
+      await openUiMessage("alert", "UNDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+    }
+    await persistStackState();
+    await refreshAfterStackExec();
+  } finally {
+    busy.value = false;
   }
 }
 
 async function redo() {
   if (!canRedo.value) return;
-  const last = redoStack.value.pop()!;
-  undoStack.value.push(last);
-  logLine(`[REDO] ${last.title}`);
-  await runCommand(last.forward, { skipHistory: true, opType: last.type, title: `REDO:${last.title}` });
+  const last = redoStack.value[redoStack.value.length - 1];
+  if (!last) return;
+  stackPreviewUnit.value = last;
+  const okConfirm = await openUiMessage(
+    "confirm",
+    "确认重做单元",
+    `savepoint=${last.savepointName}\nops=${last.ops.length}\ntables=${last.tablesTouched.join(", ") || "n/a"}`
+  );
+  if (!okConfirm) return;
+  busy.value = true;
+  try {
+    const r = await invoke<StackExecResult>("stack_redo_unit", { unit: last });
+    recordStackExecTrace(last, "redo", r);
+    logLine(`[REDO][${r.repairAction}] ${last.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
+    if (r.ok) {
+      redoStack.value.pop();
+      undoStack.value.push({ ...last, status: "ready" });
+    } else {
+      last.status = "failed";
+      last.lastError = r.failedOp || r.message;
+      await openUiMessage("alert", "REDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+    }
+    await persistStackState();
+    await refreshAfterStackExec();
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function redoFromStack(stackIndex: number, editable: boolean) {
   const item = redoStack.value[stackIndex];
   if (!item) return;
-  let command = item.forward;
+  if (busy.value) return;
+  let command = item.ops.map((x) => x.forward).join("\n");
+  let edited = false;
   if (editable) {
-    const edited = await openUiMessage("prompt", "编辑重做命令", "重做前可编辑命令", command);
-    if (typeof edited !== "string") return;
-    if (!edited) return;
-    command = edited;
+    const next = await openUiMessage("prompt", "编辑重做命令", "重做前可编辑命令", command);
+    if (typeof next !== "string") return;
+    if (!next) return;
+    edited = next !== command;
+    command = next;
   }
-  redoStack.value.splice(stackIndex, 1);
-  undoStack.value.push({ ...item, forward: command, title: item.title + (editable ? " (edited)" : "") });
-  logLine(`[REDO] ${item.title}${editable ? " (edited)" : ""}`);
-  await runCommand(command, { skipHistory: true, opType: item.type, title: `REDO:${item.title}` });
+  logLine(`[REDO] ${item.savepointName}${editable ? " (edited)" : ""}`);
+  let editedUnit: UndoUnit;
+  if (edited) {
+    const ops = command
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter((x) => !!x)
+      .map((cmd, idx) => {
+        const prev = item.ops[idx];
+        const sameAsPrev = prev ? normalizeCmd(prev.forward) === normalizeCmd(cmd) : false;
+        const opType = sameAsPrev && prev ? prev.type : inferOpTypeFromCommand(cmd);
+        const backward =
+          (sameAsPrev && prev?.backward ? prev.backward : undefined) ?? inferBackwardForCommand(cmd, opType);
+        return {
+          type: opType,
+          title: cmd,
+          forward: cmd,
+          backward,
+          table: prev?.table || state.value.currentTable || "",
+          time: now()
+        };
+      });
+    editedUnit = { ...item, ops, savepointName: item.savepointName + " (edited)" };
+  } else {
+    // Preserve original backward commands when no edit is applied.
+    editedUnit = { ...item };
+  }
+  const r = await invoke<StackExecResult>("stack_redo_unit", { unit: editedUnit });
+  recordStackExecTrace(editedUnit, "redo", r);
+  if (r.ok) {
+    redoStack.value.splice(stackIndex, 1);
+    undoStack.value.push(editedUnit);
+    await persistStackState();
+    await refreshAfterStackExec();
+  } else {
+    await openUiMessage("alert", "重做失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+    await refreshAfterStackExec();
+  }
 }
 
 async function useTable(name: string) {
@@ -2134,6 +2859,11 @@ async function runMenuAction(action: MenuAction) {
     }
     return;
   }
+  if (action.kind === "pressureBench") {
+    showPressureBenchModal.value = true;
+    await autofillPressureBenchProfile();
+    return;
+  }
   if (action.kind === "nightlySoak") {
     const runsRaw =
       (await openUiMessage("prompt", "Nightly Runs", "连续跑批次数（例如 7）", "3")) ?? "3";
@@ -2173,6 +2903,28 @@ async function runMenuAction(action: MenuAction) {
     await openRuntimeDashboardModal();
     return;
   }
+  if (action.kind === "txnRecovery") {
+    showTxnRecoveryModal.value = true;
+    return;
+  }
+  if (action.kind === "crashMatrix") {
+    showCrashMatrixModal.value = true;
+    await refreshCrashMatrix();
+    return;
+  }
+  if (action.kind === "walRecovery") {
+    showWalRecoveryModal.value = true;
+    await refreshWalRecoverySummary();
+    return;
+  }
+  if (action.kind === "gates") {
+    showGatesModal.value = true;
+    return;
+  }
+  if (action.kind === "exportBundle") {
+    showExportModal.value = true;
+    return;
+  }
   if (action.kind === "dialog") {
     openDialog(action.title, action.template, action.fields.map((x) => ({ ...x })), action.opType, !!action.reversible);
     return;
@@ -2191,6 +2943,68 @@ async function runMenuAction(action: MenuAction) {
     return;
   }
   await runCommand(action.command, { opType: action.opType, title: action.title });
+}
+
+async function autofillPressureBenchProfile() {
+  try {
+    const profile = await invoke<PressureBenchProfile>("suggest_concurrent_pressure_profile");
+    pressureBenchForm.value = profile;
+    logs.value.unshift(`[${now()}] pressure profile autofill\nsource=${profile.sourceSummary}`);
+    persistLogs();
+  } catch (e: any) {
+    await openUiMessage("alert", "自动回填失败", `读取最佳参数失败: ${String(e)}`);
+  }
+}
+
+async function submitPressureBench() {
+  busy.value = true;
+  try {
+    const f = pressureBenchForm.value;
+    const result = await invoke<string>("run_concurrent_pressure_bench", {
+      jobs: f.jobs,
+      batches: f.batches,
+      batchSize: f.batchSize,
+      segmentTargetBytes: f.segmentTargetBytes,
+      sidecarInvalidateEveryN: f.sidecarInvalidateEveryN,
+      lsmCompactionWorkers: f.lsmCompactionWorkers,
+      lsmCompactionReapBudget: f.lsmCompactionReapBudget,
+      lsmL0CompactTrigger: f.lsmL0CompactTrigger,
+      lsmL0CompactBatch: f.lsmL0CompactBatch,
+      lsmFlushTriggerMultiplier: f.lsmFlushTriggerMultiplier,
+      repeatUntilFail: f.repeatUntilFail
+    });
+    logs.value.unshift(`[${now()}] concurrent pressure bench\n${result}`);
+    persistLogs();
+    showPressureBenchModal.value = false;
+    await refreshTables();
+    await openUiMessage("alert", "压测完成", "Concurrent pressure bench 执行完成，请在日志中查看 summary 路径与 PRESSURE_TPS_LATENCY。");
+  } catch (e: any) {
+    logs.value.unshift(`[${now()}] concurrent pressure bench failed\n${String(e)}`);
+    persistLogs();
+    await openUiMessage("alert", "压测失败", `Concurrent pressure bench 执行失败: ${String(e)}`);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function showRecentPressureSummaries() {
+  try {
+    const rows = await invoke<PressureBenchSummaryItem[]>("list_concurrent_pressure_summaries", { limit: 8 });
+    if (!rows.length) {
+      await openUiMessage("alert", "最近压测结果", "未找到 concurrent_pressure_summary 结果文件。");
+      return;
+    }
+    const body = rows
+      .map((r, i) =>
+        `#${i + 1} tps=${r.runtimePressureTpsEst.toFixed(3)} p95=${r.runtimePressureBatchMsP95.toFixed(3)}ms profile=${r.benchmarkProfile || "-"} walsync=${r.runtimeWalsyncMode || "-"}\n${r.path}`
+      )
+      .join("\n\n");
+    logs.value.unshift(`[${now()}] recent concurrent pressure summaries\n${body}`);
+    persistLogs();
+    await openUiMessage("alert", "最近压测结果", "已写入日志面板，可直接复制路径做回放对比。");
+  } catch (e: any) {
+    await openUiMessage("alert", "读取失败", `读取最近压测结果失败: ${String(e)}`);
+  }
 }
 
 function onTableContextMenu(ev: MouseEvent, table: string) {
@@ -2249,6 +3063,7 @@ onMounted(async () => {
     logLine(`[RUNTIME][ERROR] ${String(e)}`);
   }
   await refreshRuntimeDashboard();
+  await loadStackState();
   await refreshTables();
   if (state.value.currentTable?.trim()) {
     const tab = ensureTableTab(state.value.currentTable.trim());
@@ -2381,17 +3196,7 @@ onUnmounted(() => {
               <el-form label-width="0">
                 <el-form-item>
                   <div class="tool-row sidebar-tool-row">
-                    <el-input
-                      v-model="addRowId"
-                      placeholder="id（可空）"
-                      @keydown="handleQuickToolEnter($event, 'addRow')"
-                    />
-                    <el-input
-                      v-model="addRowValues"
-                      placeholder="其它值（可空）"
-                      @keydown="handleQuickToolEnter($event, 'addRow')"
-                    />
-                    <el-button type="primary" :disabled="busy" @click="quickAddRow">新增</el-button>
+                    <el-button type="primary" :disabled="busy" @click="openQuickAddRowModal">新增（弹窗）</el-button>
                   </div>
                 </el-form-item>
               </el-form>
@@ -2465,7 +3270,7 @@ onUnmounted(() => {
             暂无可撤销/重做操作
           </div>
           <div
-            v-for="(item, idx) in undoStack.slice().reverse().slice(0, 8)"
+            v-for="(item, idx) in undoStackPaged"
             :key="`u2-${idx}`"
             class="stack-item clickable"
             :class="{ selected: selectedStackKey === stackKey(item) }"
@@ -2473,13 +3278,42 @@ onUnmounted(() => {
           >
             <span class="stack-badge">U</span>
             <span class="stack-item-text">
-              <span class="mono">{{ item.time }}</span>
-              <span class="stack-item-title">{{ item.title }}</span>
+              <span class="mono">{{ item.createdAt }}</span>
+              <span class="stack-item-title">
+                {{ item.savepointName }} (ops={{ item.ops.length }})
+                <el-tag
+                  v-if="!isReversible(item)"
+                  size="small"
+                  type="warning"
+                  effect="dark"
+                  style="margin-left: 6px;"
+                >
+                  不可逆
+                </el-tag>
+                <el-tag
+                  v-if="item.tablesTouched.length > 1"
+                  size="small"
+                  type="info"
+                  effect="dark"
+                  style="margin-left: 6px;"
+                >
+                  跨表
+                </el-tag>
+              </span>
             </span>
-            <button class="secondary mini" @click.stop="viewOperationLog(item)">回看</button>
+            <div class="stack-row-actions">
+              <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
+              <button
+                class="secondary mini"
+                :disabled="busy"
+                @click.stop="undoToIndex(undoGlobalIndexFromPaged(idx))"
+              >
+                撤销到此
+              </button>
+            </div>
           </div>
           <div
-            v-for="(item, idx) in redoStack.slice().reverse().slice(0, 6)"
+            v-for="(item, idx) in redoStackPaged"
             :key="`r-${idx}`"
             class="stack-item redo clickable"
             :class="{ selected: selectedStackKey === stackKey(item) }"
@@ -2487,15 +3321,25 @@ onUnmounted(() => {
           >
             <span class="stack-badge">R</span>
             <span class="stack-item-text">
-              <span class="mono">{{ item.time }}</span>
-              <span class="stack-item-title">{{ item.title }}</span>
+              <span class="mono">{{ item.createdAt }}</span>
+              <span class="stack-item-title">{{ item.savepointName }} (ops={{ item.ops.length }})</span>
             </span>
             <div class="stack-row-actions">
-              <button class="secondary mini" @click.stop="viewOperationLog(item)">回看</button>
-              <button class="secondary mini" @click.stop="redoFromStack(redoStack.length - 1 - idx, false)">重做</button>
-              <button class="secondary mini" @click.stop="redoFromStack(redoStack.length - 1 - idx, true)">编辑</button>
+              <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
+              <button class="secondary mini" :disabled="busy" @click.stop="redoToIndex(redoGlobalIndexFromPaged(idx), false)">重做到此</button>
+              <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), false)">重做</button>
+              <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), true)">编辑</button>
             </div>
           </div>
+        </div>
+        <div class="stack-actions" style="margin-top:8px;">
+          <button class="secondary mini" :disabled="stackUndoPage <= 1" @click="stackUndoPage -= 1">Undo上一页</button>
+          <button class="secondary mini" :disabled="undoStack.length <= stackUndoPage * stackPageSize" @click="stackUndoPage += 1">Undo下一页</button>
+          <button class="secondary mini" :disabled="stackRedoPage <= 1" @click="stackRedoPage -= 1">Redo上一页</button>
+          <button class="secondary mini" :disabled="redoStack.length <= stackRedoPage * stackPageSize" @click="stackRedoPage += 1">Redo下一页</button>
+        </div>
+        <div v-if="stackPreviewUnit" class="stack-empty" style="margin-top:8px;">
+          预览：{{ stackPreviewUnit.savepointName }} | tables={{ stackPreviewUnit.tablesTouched.join(',') || 'n/a' }} | status={{ stackPreviewUnit.status }}
         </div>
       </div>
     </aside>
@@ -2912,12 +3756,237 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+
+        <div style="height: 10px" />
+        <div class="tool-card">
+          <div class="tool-title">Nightly Crash Matrix（nightly.crash_matrix）</div>
+          <div v-if="!runtimeDashboard.nightly?.crash_matrix" class="mini-tip">暂无 crash matrix（先跑 nightly gate / merge 脚本）</div>
+          <template v-else>
+            <div class="mini-tip mono">
+              gate={{ runtimeDashboard.nightly.crash_matrix.gate || "n/a" }}
+              | total={{ runtimeDashboard.nightly.crash_matrix.summary?.total ?? (runtimeDashboard.nightly.crash_matrix.points?.length ?? 0) }}
+              | pass={{ runtimeDashboard.nightly.crash_matrix.summary?.passed ?? "n/a" }}
+              | fail={{ runtimeDashboard.nightly.crash_matrix.summary?.failed ?? "n/a" }}
+            </div>
+            <div v-if="runtimeDashboard.nightly.crash_matrix.points?.length" class="recent-runs-list" style="margin-top: 6px">
+              <div
+                v-for="(p, idx) in runtimeDashboard.nightly.crash_matrix.points.slice(0, 12)"
+                :key="`nightly-cm-${idx}`"
+                class="recent-run-row"
+              >
+                <span class="mono">{{ p.point }}</span>
+                <span :style="{ color: p.pass ? '#22c55e' : '#ef4444' }">{{ p.pass ? "pass" : "fail" }}</span>
+                <span class="mono">elapsed_ms={{ p.elapsed_ms }}</span>
+              </div>
+            </div>
+          </template>
+        </div>
       </template>
       <template v-else>
         <div class="mini-tip">未找到 runtime_trend_dashboard.json（先运行 test_loop/nightly_soak 产样）</div>
       </template>
       <template #footer>
         <el-button @click="showRuntimeDashboardModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showTxnRecoveryModal" class="settings-modal" width="760px">
+      <template #header>
+        <div class="settings-header">
+          <h3 style="margin: 0">Txn & Recovery</h3>
+          <span class="mini-tip mono">Soak-ready 操作面板（事务/Savepoint/PITR）</span>
+        </div>
+      </template>
+      <div class="tool-grid">
+        <div class="tool-card">
+          <div class="tool-title">事务</div>
+          <div class="tool-row">
+            <el-button size="small" :disabled="busy" @click="runTimedOp('txn_begin', { table: state.currentTable }, `BEGIN ${state.currentTable || ''}`.trim(), '开始事务')">BEGIN</el-button>
+            <el-button size="small" type="primary" :disabled="busy" @click="runTimedOp('txn_commit', {}, 'COMMIT', '提交事务')">COMMIT</el-button>
+            <el-button size="small" type="danger" :disabled="busy" @click="runTimedOp('txn_rollback', {}, 'ROLLBACK', '回滚事务')">ROLLBACK</el-button>
+          </div>
+          <div class="mini-tip">当前表：<span class="mono">{{ state.currentTable || "n/a" }}</span></div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">Savepoint</div>
+          <div class="tool-row">
+            <el-input v-model="txnRecoverySavepointName" placeholder="savepoint 名称" size="small" style="max-width: 220px" />
+            <el-button size="small" :disabled="busy" @click="runTimedOp('txn_savepoint', { name: txnRecoverySavepointName }, `SAVEPOINT ${txnRecoverySavepointName}`, '设置 Savepoint')">SET</el-button>
+            <el-button size="small" :disabled="busy" @click="runTimedOp('txn_rollback_to', { name: txnRecoverySavepointName }, `ROLLBACK TO ${txnRecoverySavepointName}`, '回退到 Savepoint')">ROLLBACK TO</el-button>
+            <el-button size="small" :disabled="busy" @click="runTimedOp('txn_release_savepoint', { name: txnRecoverySavepointName }, `RELEASE SAVEPOINT ${txnRecoverySavepointName}`, '释放 Savepoint')">RELEASE</el-button>
+          </div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">PITR</div>
+          <div class="tool-row">
+            <el-input v-model="txnRecoveryRecoverLsn" placeholder="target lsn" size="small" style="max-width: 220px" />
+            <el-button size="small" :disabled="busy" @click="runTimedOp('pitr_recover_lsn', { lsn: Number(txnRecoveryRecoverLsn) || 0 }, `RECOVER TO LSN ${txnRecoveryRecoverLsn}`, 'PITR: RecoverToLSN')">RecoverToLSN</el-button>
+          </div>
+          <div class="tool-row" style="margin-top: 8px">
+            <el-input v-model="txnRecoveryRecoverTs" placeholder="target ts_ms" size="small" style="max-width: 220px" />
+            <el-button size="small" :disabled="busy" @click="runTimedOp('pitr_recover_time', { tsMs: Number(txnRecoveryRecoverTs) || 0 }, `RECOVER TO TIME ${txnRecoveryRecoverTs}`, 'PITR: RecoverToTime')">RecoverToTime</el-button>
+            <el-button size="small" plain :disabled="busy" @click="txnRecoveryRecoverTs = String(Date.now())">now()</el-button>
+          </div>
+          <div class="mini-tip">提示：RecoverToTime 使用 WAL 记录时间戳映射到 LSN 截止点。</div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showTxnRecoveryModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showCrashMatrixModal" class="dashboard-modal" width="860px">
+      <template #header>
+        <div class="dashboard-modal-header">
+          <h3 style="margin:0;">Crash Matrix</h3>
+          <div class="dashboard-modal-header-right">
+            <el-button size="small" plain :disabled="busy" @click="refreshCrashMatrix">刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <div class="tool-card">
+        <div class="tool-title">选择结果文件</div>
+        <div class="tool-row">
+          <el-select
+            v-model="crashMatrixSelected"
+            size="small"
+            filterable
+            placeholder="选择 redo_undo_crash_matrix_*.json"
+            style="min-width: 360px"
+            @change="onSelectCrashMatrix"
+          >
+            <el-option v-for="f in crashMatrixFiles" :key="f" :label="f" :value="f" />
+          </el-select>
+          <span class="mini-tip mono">count={{ crashMatrixFiles.length }}</span>
+        </div>
+      </div>
+      <div style="height: 10px" />
+      <template v-if="crashMatrixJson">
+        <div class="tool-grid">
+          <div class="tool-card">
+            <div class="tool-title">Summary</div>
+            <div><strong>gate:</strong> {{ crashMatrixJson.gate || "n/a" }}</div>
+            <div><strong>total:</strong> {{ crashMatrixJson.summary?.total ?? (crashMatrixJson.points?.length ?? 0) }}</div>
+            <div><strong>passed:</strong> {{ crashMatrixJson.summary?.passed ?? "n/a" }}</div>
+            <div><strong>failed:</strong> {{ crashMatrixJson.summary?.failed ?? "n/a" }}</div>
+          </div>
+          <div class="tool-card">
+            <div class="tool-title">Schema</div>
+            <div class="mono">{{ crashMatrixJson.schema_version || "n/a" }}</div>
+            <div class="mini-tip mono">ts_ms={{ crashMatrixJson.ts_ms ?? "n/a" }}</div>
+          </div>
+        </div>
+        <div style="height: 10px" />
+        <div class="tool-card">
+          <div class="tool-title">Points</div>
+          <div v-if="!crashMatrixJson.points?.length" class="mini-tip">无 points 数据</div>
+          <div v-else class="recent-runs-list">
+            <div v-for="(p, idx) in crashMatrixJson.points" :key="`cm-${idx}`" class="recent-run-row">
+              <span class="mono">{{ p.point }}</span>
+              <span :style="{ color: p.pass ? '#22c55e' : '#ef4444' }">{{ p.pass ? "pass" : "fail" }}</span>
+              <span class="mono">elapsed_ms={{ p.elapsed_ms }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
+      <template v-else>
+        <div class="mini-tip">未加载 crash matrix（先运行 redo/undo gate 生成 results）</div>
+      </template>
+      <template #footer>
+        <el-button @click="showCrashMatrixModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showWalRecoveryModal" class="dashboard-modal" width="860px">
+      <template #header>
+        <div class="dashboard-modal-header">
+          <h3 style="margin:0;">WAL & Recovery</h3>
+          <div class="dashboard-modal-header-right">
+            <el-button size="small" plain :disabled="busy" @click="refreshWalRecoverySummary">刷新</el-button>
+          </div>
+        </div>
+      </template>
+      <div class="tool-card">
+        <div class="tool-title">Summary (SHOW TUNING output)</div>
+        <pre class="mono" style="white-space: pre-wrap; margin: 0">{{ walRecoveryText || "n/a" }}</pre>
+      </div>
+      <template #footer>
+        <el-button @click="showWalRecoveryModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showGatesModal" class="dashboard-modal" width="860px">
+      <template #header>
+        <div class="dashboard-modal-header">
+          <h3 style="margin:0;">Gates</h3>
+          <div class="dashboard-modal-header-right">
+            <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新看板</el-button>
+          </div>
+        </div>
+      </template>
+      <div class="tool-grid">
+        <div class="tool-card">
+          <div class="tool-title">Redo/Undo Gate</div>
+          <div class="tool-row">
+            <el-select v-model="gatesMode" size="small" style="max-width: 220px">
+              <el-option label="both(lite+strict)" value="both" />
+              <el-option label="lite" value="lite" />
+              <el-option label="strict" value="strict" />
+            </el-select>
+            <el-button size="small" type="primary" :disabled="busy" @click="runRedoUndoGate">运行</el-button>
+          </div>
+          <div class="mini-tip">产物会写入 scripts/results，并可在 Crash Matrix / Dashboard 中查看。</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">Nightly Pressure Profile Compare</div>
+          <div class="tool-row">
+            <el-button size="small" type="primary" :disabled="busy" @click="runNightlyPressureProfileCompare">运行</el-button>
+          </div>
+          <div class="mini-tip">该脚本会合并 crash matrix 进 runtime_trend_dashboard.json（nightly section）。</div>
+        </div>
+      </div>
+      <div style="height: 10px" />
+      <div class="tool-card">
+        <div class="tool-title">Output</div>
+        <pre class="mono" style="white-space: pre-wrap; margin: 0">{{ gatesOutput || "n/a" }}</pre>
+      </div>
+      <template #footer>
+        <el-button @click="showGatesModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showExportModal" class="dashboard-modal" width="860px">
+      <template #header>
+        <div class="dashboard-modal-header">
+          <h3 style="margin:0;">Export Bundle</h3>
+          <div class="dashboard-modal-header-right">
+            <el-button size="small" plain :disabled="busy" @click="refreshRuntimeArtifacts">刷新版本</el-button>
+          </div>
+        </div>
+      </template>
+      <div class="tool-grid">
+        <div class="tool-card">
+          <div class="tool-title">一键导出诊断包（zip）</div>
+          <div class="mini-tip">包含：scripts/results、workspace 下的 wal/bin/attr（best-effort）、manifest.json（版本/路径/工作区快照）。</div>
+          <div class="tool-row" style="margin-top: 8px">
+            <el-button size="small" type="primary" :disabled="busy" @click="exportBundle">生成</el-button>
+            <span class="mini-tip mono" v-if="exportBundlePath">path={{ exportBundlePath }}</span>
+          </div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">Artifacts</div>
+          <div v-if="runtimeArtifacts" class="mini-tip mono">
+            gui={{ runtimeArtifacts.guiExePath }}\n
+            demo={{ runtimeArtifacts.demoPath }}\n
+            perf={{ runtimeArtifacts.perfPath }}\n
+            report={{ runtimeArtifacts.runtimeReportPath }}\n
+            dll={{ runtimeArtifacts.dllPath }}
+          </div>
+          <div v-else class="mini-tip">未加载 artifacts（点“刷新版本”）</div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="showExportModal = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -3039,6 +4108,32 @@ onUnmounted(() => {
                   @change="onSettingsSliderChange"
                 />
                 <span class="settings-slider-value mono">{{ settings.panelOpacity.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="表格视图透明度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.tableViewOpacity"
+                  :min="0.35"
+                  :max="1"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.tableViewOpacity.toFixed(2) }}</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="日志面板透明度">
+              <div class="settings-slider-row">
+                <el-slider
+                  v-model="settings.logPanelOpacity"
+                  :min="0.35"
+                  :max="1"
+                  :step="0.01"
+                  @input="onSettingsSliderInput"
+                  @change="onSettingsSliderChange"
+                />
+                <span class="settings-slider-value mono">{{ settings.logPanelOpacity.toFixed(2) }}</span>
               </div>
             </el-form-item>
             <el-form-item label="字体缩放">
@@ -3240,6 +4335,54 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
+    <el-dialog v-model="showPressureBenchModal" class="settings-modal" width="760px">
+      <template #header>
+        <h3>Concurrent Pressure 压测</h3>
+      </template>
+      <el-form label-width="260px">
+        <el-form-item label="并发 jobs">
+          <el-input-number v-model="pressureBenchForm.jobs" :min="1" :max="256" />
+        </el-form-item>
+        <el-form-item label="批次数 batches">
+          <el-input-number v-model="pressureBenchForm.batches" :min="1" :max="20000" />
+        </el-form-item>
+        <el-form-item label="每批写入 batchSize">
+          <el-input-number v-model="pressureBenchForm.batchSize" :min="1" :max="100000" />
+        </el-form-item>
+        <el-form-item label="LSM segmentTargetBytes">
+          <el-input-number v-model="pressureBenchForm.segmentTargetBytes" :min="64" :max="8192" />
+        </el-form-item>
+        <el-form-item label="sidecarInvalidateEveryN">
+          <el-input-number v-model="pressureBenchForm.sidecarInvalidateEveryN" :min="1" :max="4096" />
+        </el-form-item>
+        <el-form-item label="lsmCompactionWorkers">
+          <el-input-number v-model="pressureBenchForm.lsmCompactionWorkers" :min="1" :max="32" />
+        </el-form-item>
+        <el-form-item label="lsmCompactionReapBudget">
+          <el-input-number v-model="pressureBenchForm.lsmCompactionReapBudget" :min="1" :max="1024" />
+        </el-form-item>
+        <el-form-item label="lsmL0CompactTrigger">
+          <el-input-number v-model="pressureBenchForm.lsmL0CompactTrigger" :min="1" :max="512" />
+        </el-form-item>
+        <el-form-item label="lsmL0CompactBatch">
+          <el-input-number v-model="pressureBenchForm.lsmL0CompactBatch" :min="1" :max="512" />
+        </el-form-item>
+        <el-form-item label="lsmFlushTriggerMultiplier">
+          <el-input-number v-model="pressureBenchForm.lsmFlushTriggerMultiplier" :min="1" :max="64" />
+        </el-form-item>
+        <el-form-item label="repeatUntilFail">
+          <el-input-number v-model="pressureBenchForm.repeatUntilFail" :min="1" :max="64" />
+        </el-form-item>
+      </el-form>
+      <div class="dialog-preview">参数来源: {{ pressureBenchForm.sourceSummary || "default" }}</div>
+      <template #footer>
+        <el-button :disabled="busy" @click="showRecentPressureSummaries">最近结果回放</el-button>
+        <el-button :disabled="busy" @click="autofillPressureBenchProfile">自动回填最佳参数</el-button>
+        <el-button :disabled="busy" @click="showPressureBenchModal = false">取消</el-button>
+        <el-button type="primary" :disabled="busy" @click="submitPressureBench">执行压测</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="showDialog" width="560px">
       <template #header>
         <h3>{{ dialogTitle }}</h3>
@@ -3253,6 +4396,24 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="showDialog = false">取消</el-button>
         <el-button type="primary" @click="submitDialog">执行</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showQuickRowModal" width="620px" :close-on-click-modal="false">
+      <template #header>
+        <h3>新增行（快捷）</h3>
+      </template>
+      <el-form label-width="120px">
+        <el-form-item label="id（自动）">
+          <el-input v-model="quickRowNextId" disabled />
+        </el-form-item>
+        <el-form-item v-for="(f, idx) in quickRowFields" :key="`quick-row-${f.name}-${idx}`" :label="`${f.name} (${f.ty})`">
+          <el-input v-model="f.value" placeholder="默认 0" @keyup.enter="submitQuickAddRow" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showQuickRowModal = false">取消</el-button>
+        <el-button type="primary" :disabled="busy" @click="submitQuickAddRow">执行新增</el-button>
       </template>
     </el-dialog>
 

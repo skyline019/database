@@ -1,0 +1,610 @@
+#include <waterfall/config.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <newdb/page_io.h>
+
+#include "cli/modules/sidecar/covering/covering_index_sidecar.h"
+#include "cli/shell/dispatch/internal/dispatch_internal.h"
+#include "cli/modules/import_export/demo_export.h"
+#include "cli/modules/import_export/import.h"
+#include "cli/modules/logging/logging.h"
+#include "cli/modules/sidecar/page/page_index_sidecar.h"
+#include "cli/modules/catalog/schema_catalog.h"
+#include "cli/shell/state/shell_state.h"
+#include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
+#include "cli/modules/view/table_view.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/util/utils.h"
+#include "cli/modules/where/executor/where.h"
+
+bool handle_query_page_command(ShellState& st,
+                               const char* line,
+                               const char* log_file,
+                               const std::string& eff_data,
+                               newdb::HeapTable& tbl) {
+    if (strncasecmp_ascii(line, "PAGE", 4) != 0) {
+        return false;
+    }
+    std::vector<std::string> args;
+    if (!parse_comma_args(line + 4, args) || args.size() < 2 || args.size() > 4) {
+        log_and_print(log_file,
+                      "[PAGE] usage: PAGE(page, page_size, [order_key], [desc])\n");
+        return true;
+    }
+    int page = 0;
+    int page_size = 0;
+    try {
+        page = std::stoi(args[0]);
+        page_size = std::stoi(args[1]);
+    } catch (...) {
+        log_and_print(log_file,
+                      "[PAGE] page and page_size must be integers.\n");
+        return true;
+    }
+    std::string order_key = "id";
+    bool desc = false;
+    if (args.size() >= 3 && !args[2].empty()) {
+        order_key = args[2];
+    }
+    if (args.size() == 4) {
+        if (args[3].size() == 4 && strcasecmp_ascii(args[3].c_str(), "desc") == 0) {
+            desc = true;
+        }
+    }
+    const std::vector<std::size_t> sorted_idx = load_or_build_page_index_sidecar(
+        PageSidecarRequest{
+            .data_file = eff_data,
+            .table_name = st.session.table_name,
+            .order_key = order_key,
+            .descending = desc,
+        },
+        st.session.schema,
+        tbl);
+    log_and_print(log_file,
+                  "[PAGE] table=%s order_by=%s %s\n",
+                  tbl.name.c_str(),
+                  order_key.c_str(),
+                  desc ? "desc" : "asc");
+    table_view::print_page_indexed(st.session.schema,
+                                   tbl,
+                                   sorted_idx,
+                                   static_cast<std::size_t>(page),
+                                   static_cast<std::size_t>(page_size));
+    return true;
+}
+
+
+bool handle_query_where_count_commands(ShellState& st,
+                                       const char* line,
+                                       const char* log_file,
+                                       const std::string& eff_data,
+                                       const std::string& current_table,
+                                       newdb::HeapTable& tbl) {
+    if (strncasecmp_ascii(line, "WHEREP", 6) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 6, args) || args.size() < 5) {
+            log_and_print(log_file,
+                          "[WHEREP] usage: WHEREP(proj_attr, WHERE, key_attr, =, key_value)\n");
+            return true;
+        }
+        // WHEREP(proj_attr, WHERE, key_attr, =, key_value)
+        if (args[1].empty() || strcasecmp_ascii(args[1].c_str(), "WHERE") != 0) {
+            log_and_print(log_file,
+                          "[WHEREP] usage: WHEREP(proj_attr, WHERE, key_attr, =, key_value)\n");
+            return true;
+        }
+        const std::string proj_attr = args[0];
+        const std::string key_attr = args[2];
+        const std::string op = args[3];
+        const std::string key_value = args[4];
+        if (op != "=") {
+            log_and_print(log_file, "[WHEREP] only '=' is supported.\n");
+            return true;
+        }
+        if (key_attr == "id") {
+            log_and_print(log_file, "[WHEREP] key_attr must be non-id equality (use FIND).\n");
+            return true;
+        }
+        const std::size_t limit = 50;
+        const auto rows = lookup_or_build_covering_proj_sidecar(
+            eff_data, key_attr, proj_attr, key_value, limit, st.session.schema, tbl);
+        log_and_print(log_file,
+                      "[WHEREP] key=%s=%s proj=%s rows=%zu (covering sidecar)\n",
+                      key_attr.c_str(),
+                      key_value.c_str(),
+                      proj_attr.c_str(),
+                      rows.size());
+        for (const auto& r : rows) {
+            log_and_print(log_file, "  id=%d %s=%s\n", r.id, proj_attr.c_str(), r.value.c_str());
+        }
+        return true;
+    }
+
+    if (strncasecmp_ascii(line, "WHERE", 5) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 5, args) || args.empty()) {
+            log_and_print(log_file,
+                          "[WHERE] usage: WHERE(attr, op, value [, AND|OR, attr, op, value] ...)\n");
+            return true;
+        }
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_where_args_to_conds(args, conds, err_msg)) {
+            log_and_print(log_file,
+                          "[WHERE] invalid arguments: %s\n", err_msg.c_str());
+            log_and_print(log_file,
+                          "[WHERE] usage: WHERE(attr, op, value [, AND|OR, attr, op, value] ...)\n");
+            return true;
+        }
+        const std::vector<std::size_t> matched_idx = query_with_index(tbl, st.session.schema, conds, &st.where_ctx);
+        if (where_policy_last_blocked(&st.where_ctx)) {
+            log_and_print(log_file, "[WHERE] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+            return true;
+        }
+        log_and_print(log_file,
+                      "[WHERE] matched %zu / %zu rows\n",
+                      matched_idx.size(),
+                      tbl.logical_row_count(),
+                      "");
+        if (matched_idx.empty()) {
+            return true;
+        }
+        const std::size_t page_size = std::min<std::size_t>(50, matched_idx.size());
+        table_view::print_page_indexed(st.session.schema, tbl, matched_idx, 1, page_size);
+        if (matched_idx.size() > page_size) {
+            log_and_print(log_file,
+                          "[WHERE] showing first %zu rows.\n",
+                          page_size);
+        }
+        return true;
+    }
+
+    if (strcasecmp_ascii(line, "COUNT") == 0) {
+        const std::size_t visible = tbl.logical_row_count();
+        log_and_print(log_file,
+                      "[COUNT] table='%s' rows=%zu decode_calls=%llu decode_hits=%llu decode_misses=%llu\n",
+                      current_table.c_str(),
+                      visible,
+                      static_cast<unsigned long long>(tbl.decode_heap_slot_calls),
+                      static_cast<unsigned long long>(tbl.decode_heap_slot_hits),
+                      static_cast<unsigned long long>(tbl.decode_heap_slot_misses));
+        return true;
+    }
+    if (strncasecmp_ascii(line, "COUNT", 5) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 5, args) || args.empty()) {
+            log_and_print(log_file,
+                          "[COUNT] usage: COUNT  or  COUNT(attr, op, value [, AND|OR, attr, op, value] ...)\n");
+            return true;
+        }
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_where_args_to_conds(args, conds, err_msg)) {
+            log_and_print(log_file,
+                          "[COUNT] invalid arguments: %s\n", err_msg.c_str());
+            log_and_print(log_file,
+                          "[COUNT] usage: COUNT  or  COUNT(attr, op, value [, AND|OR, attr, op, value] ...)\n");
+            return true;
+        }
+        if (conds.size() == 1 && conds[0].op == CondOp::Eq && conds[0].attr != "id") {
+            const std::uint64_t before_calls = tbl.decode_heap_slot_calls;
+            const CoveringAggLookup cov = lookup_or_build_covering_agg_sidecar(
+                eff_data, conds[0].attr, "__count__", conds[0].value, st.session.schema, tbl);
+            const std::uint64_t after_calls = tbl.decode_heap_slot_calls;
+            if (cov.used) {
+                log_and_print(log_file,
+                              "[COUNT] %zu / %zu rows (with conditions, covering sidecar, decode_delta=%llu)\n",
+                              cov.count,
+                              tbl.logical_row_count(),
+                              static_cast<unsigned long long>(after_calls - before_calls));
+                return true;
+            }
+        }
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
+        if (where_policy_last_blocked(&st.where_ctx)) {
+            log_and_print(log_file, "[COUNT] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+            return true;
+        }
+        const std::size_t cnt = candidates.size();
+        log_and_print(log_file,
+                      "[COUNT] %zu / %zu rows (with conditions)\n",
+                      cnt,
+                      tbl.logical_row_count());
+        return true;
+    }
+    return false;
+}
+
+
+bool handle_query_min_max_commands(ShellState& st,
+                                   const char* line,
+                                   const char* log_file,
+                                   newdb::HeapTable& tbl) {
+    if (strncasecmp_ascii(line, "MIN", 3) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 3, args) || args.empty()) {
+            log_and_print(log_file,
+                          "[MIN] usage: MIN(attr) or MIN(attr, WHERE, attr1, op1, value [, AND|OR, attr2, op2, value] ...)\n");
+            return true;
+        }
+        std::string attr;
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_agg_args_with_optional_where(args, attr, conds, err_msg)) {
+            log_and_print(log_file, "[MIN] invalid arguments: %s\n", err_msg.c_str());
+            return true;
+        }
+        newdb::AttrType tp = st.session.schema.type_of(attr);
+        if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
+            log_and_print(log_file,
+                          "[MIN] attribute '%s' is not numeric (int/float/double)\n",
+                          attr.c_str());
+            return true;
+        }
+        bool has_val = false;
+        std::string best;
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
+        if (where_policy_last_blocked(&st.where_ctx)) {
+            log_and_print(log_file, "[MIN] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+            return true;
+        }
+        newdb::Row r;
+        for (const std::size_t slot : candidates) {
+            if (!row_at_slot_read(tbl, slot, r)) {
+                continue;
+            }
+            std::string vstr;
+            if (attr == "id") {
+                vstr = std::to_string(r.id);
+            } else {
+                auto it = r.attrs.find(attr);
+                if (it == r.attrs.end()) {
+                    continue;
+                }
+                vstr = it->second;
+            }
+            if (!has_val) {
+                best = vstr;
+                has_val = true;
+            } else {
+                int cmp = st.session.schema.compare_attr(attr, vstr, best);
+                if (cmp < 0) {
+                    best = vstr;
+                }
+            }
+        }
+        if (!has_val) {
+            log_and_print(log_file,
+                          "[MIN] attr='%s' no rows with this attribute\n",
+                          attr.c_str());
+        } else {
+            log_and_print(log_file,
+                          "[MIN] attr='%s' min=%s%s\n",
+                          attr.c_str(), best.c_str(),
+                          conds.empty() ? "" : " (with conditions)");
+        }
+        return true;
+    }
+
+    if (strncasecmp_ascii(line, "MAX", 3) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 3, args) || args.empty()) {
+            log_and_print(log_file,
+                          "[MAX] usage: MAX(attr) or MAX(attr, WHERE, attr1, op1, value [, AND|OR, attr2, op2, value] ...)\n");
+            return true;
+        }
+        std::string attr;
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_agg_args_with_optional_where(args, attr, conds, err_msg)) {
+            log_and_print(log_file, "[MAX] invalid arguments: %s\n", err_msg.c_str());
+            return true;
+        }
+        newdb::AttrType tp = st.session.schema.type_of(attr);
+        if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
+            log_and_print(log_file,
+                          "[MAX] attribute '%s' is not numeric (int/float/double)\n",
+                          attr.c_str());
+            return true;
+        }
+        bool has_val = false;
+        std::string best;
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
+        if (where_policy_last_blocked(&st.where_ctx)) {
+            log_and_print(log_file, "[MAX] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+            return true;
+        }
+        newdb::Row r;
+        for (const std::size_t slot : candidates) {
+            if (!row_at_slot_read(tbl, slot, r)) {
+                continue;
+            }
+            std::string vstr;
+            if (attr == "id") {
+                vstr = std::to_string(r.id);
+            } else {
+                auto it = r.attrs.find(attr);
+                if (it == r.attrs.end()) {
+                    continue;
+                }
+                vstr = it->second;
+            }
+            if (!has_val) {
+                best = vstr;
+                has_val = true;
+            } else {
+                int cmp = st.session.schema.compare_attr(attr, vstr, best);
+                if (cmp > 0) {
+                    best = vstr;
+                }
+            }
+        }
+        if (!has_val) {
+            log_and_print(log_file,
+                          "[MAX] attr='%s' no rows with this attribute\n",
+                          attr.c_str());
+        } else {
+            log_and_print(log_file,
+                          "[MAX] attr='%s' max=%s%s\n",
+                          attr.c_str(), best.c_str(),
+                          conds.empty() ? "" : " (with conditions)");
+        }
+        return true;
+    }
+    return false;
+}
+
+
+bool handle_query_find_commands(ShellState& st,
+                                const char* line,
+                                const char* log_file,
+                                const std::string& eff_data,
+                                newdb::HeapTable& tbl) {
+    if (strncasecmp_ascii(line, "FIND(", 5) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 4, args) || args.size() != 1) {
+            log_and_print(log_file, "[FIND] usage: FIND(id)\n");
+            return true;
+        }
+        int id = 0;
+        try { id = std::stoi(args[0]); } catch (...) {
+            log_and_print(log_file, "[FIND] argument must be integer id.\n");
+            return true;
+        }
+        const auto lsm_hit = lsm_lite_find_by_id(st, eff_data, id);
+        if (lsm_hit.has_value()) {
+            if (lsm_hit->deleted) {
+                log_and_print(log_file, "[FIND] id=%d lsm_tombstone not found\n", id);
+                return true;
+            }
+            log_and_print(log_file, "[FIND] id=%d", lsm_hit->row.id);
+            for (const auto& kv : lsm_hit->row.attrs) {
+                log_and_print(log_file, " %s=%s", kv.first.c_str(), kv.second.c_str());
+            }
+            log_and_print(log_file, "\n");
+            return true;
+        }
+        const newdb::Row* r = tbl.find_by_id(id);
+        if (r) {
+            log_and_print(log_file, "[FIND] id=%d", r->id);
+            for (const auto& kv : r->attrs) {
+                log_and_print(log_file, " %s=%s", kv.first.c_str(), kv.second.c_str());
+            }
+            log_and_print(log_file, "\n");
+        } else {
+            log_and_print(log_file, "[FIND] id=%d not found\n", id);
+        }
+        return true;
+    }
+
+    if (strncasecmp_ascii(line, "FINDPK", 6) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 6, args) || args.size() != 1) {
+            log_and_print(log_file, "[FINDPK] usage: FINDPK(value)\n");
+            return true;
+        }
+        const std::string pk = st.session.schema.primary_key.empty() ? "id" : st.session.schema.primary_key;
+        const std::string& val = args[0];
+        newdb::Row scratch;
+        const newdb::Row* found = nullptr;
+        for (std::size_t i = 0; i < tbl.logical_row_count(); ++i) {
+            newdb::Row r;
+            if (!row_at_slot_read(tbl, i, r)) continue;
+            std::string v;
+            if (!newdb::HeapTable::row_get_pk_value(r, pk, v)) continue;
+            if (v == val) {
+                scratch = std::move(r);
+                found = &scratch;
+                break;
+            }
+        }
+        if (!found) {
+            log_and_print(log_file, "[FINDPK] not found: %s=%s\n", pk.c_str(), val.c_str());
+            return true;
+        }
+        log_and_print(log_file, "[FINDPK] %s=%s id=%d", pk.c_str(), val.c_str(), found->id);
+        for (const auto& kv : found->attrs) {
+            log_and_print(log_file, " %s=%s", kv.first.c_str(), kv.second.c_str());
+        }
+        log_and_print(log_file, "\n");
+        return true;
+    }
+
+    if (strncasecmp_ascii(line, "QBAL", 4) == 0) {
+        std::vector<std::string> args;
+        if (!parse_comma_args(line + 4, args) || args.size() != 1) {
+            log_and_print(log_file, "[QBAL] usage: QBAL(min_balance)\n");
+            return true;
+        }
+        int min_bal = 0;
+        try { min_bal = std::stoi(args[0]); } catch (...) {
+            log_and_print(log_file, "[QBAL] argument must be integer.\n");
+            return true;
+        }
+        newdb::io::query_attr_int_ge(eff_data.c_str(),
+                                     st.session.schema.default_int_predicate_attr().c_str(),
+                                     min_bal);
+        return true;
+    }
+    return false;
+}
+
+
+bool handle_query_sum_avg_commands(ShellState& st,
+                                   const char* line,
+                                   const char* log_file,
+                                   const std::string& eff_data,
+                                   newdb::HeapTable& tbl) {
+    auto run_numeric_agg = [&](const char* tag, bool is_avg, const char* args_text) -> bool {
+        std::vector<std::string> args;
+        if (!parse_comma_args(args_text, args) || args.empty()) {
+            log_and_print(log_file, "[%s] usage: %s(attr) or %s(attr, WHERE, ...)\n", tag, tag, tag);
+            return true;
+        }
+        std::string attr;
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_agg_args_with_optional_where(args, attr, conds, err_msg)) {
+            log_and_print(log_file, "[%s] invalid arguments: %s\n", tag, err_msg.c_str());
+            return true;
+        }
+        newdb::AttrType tp = st.session.schema.type_of(attr);
+        if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
+            log_and_print(log_file, "[%s] attribute '%s' is not numeric (int/float/double)\n", tag, attr.c_str());
+            return true;
+        }
+        if (conds.size() == 1 && conds[0].op == CondOp::Eq && conds[0].attr != "id") {
+            const std::uint64_t before_calls = tbl.decode_heap_slot_calls;
+            const CoveringAggLookup cov = lookup_or_build_covering_agg_sidecar(
+                eff_data, conds[0].attr, attr, conds[0].value, st.session.schema, tbl);
+            const std::uint64_t after_calls = tbl.decode_heap_slot_calls;
+            if (cov.used) {
+                const std::uint64_t decode_delta = after_calls - before_calls;
+                if (is_avg) {
+                    if (cov.count == 0) {
+                        log_and_print(log_file, "[AVG] attr='%s' no numeric rows\n", attr.c_str());
+                    } else {
+                        log_and_print(log_file,
+                                      "[AVG] attr='%s' avg=%.6Lf (matched=%zu / %zu rows) with conditions, covering sidecar, decode_delta=%llu\n",
+                                      attr.c_str(),
+                                      cov.sum / static_cast<long double>(cov.count),
+                                      cov.count,
+                                      tbl.logical_row_count(),
+                                      static_cast<unsigned long long>(decode_delta));
+                    }
+                } else {
+                    log_and_print(log_file,
+                                  "[SUM] attr='%s' sum=%.6Lf (matched=%zu / %zu rows) with conditions, covering sidecar, decode_delta=%llu\n",
+                                  attr.c_str(),
+                                  cov.sum,
+                                  cov.count,
+                                  tbl.logical_row_count(),
+                                  static_cast<unsigned long long>(decode_delta));
+                }
+                return true;
+            }
+        }
+        long double sum = 0.0L;
+        long long sum_int = 0;
+        std::size_t matched = 0;
+        newdb::Row r;
+        const bool int_fast_path = (tp == newdb::AttrType::Int);
+        auto accumulate_row = [&](const newdb::Row& row) {
+            if (int_fast_path) {
+                long long v = 0;
+                if (attr == "id") {
+                    v = static_cast<long long>(row.id);
+                } else {
+                    auto it = row.attrs.find(attr);
+                    if (it == row.attrs.end()) return;
+                    if (!parse_int64_fast(it->second, v)) return;
+                }
+                sum_int += v;
+                ++matched;
+                return;
+            }
+            std::string vstr;
+            if (attr == "id") vstr = std::to_string(row.id);
+            else {
+                auto it = row.attrs.find(attr);
+                if (it == row.attrs.end()) return;
+                vstr = it->second;
+            }
+            try { sum += std::stold(vstr); ++matched; } catch (...) { return; }
+        };
+
+        bool fused_done = false;
+        if (!conds.empty() && conds.size() >= 3 && all_and_chain_fast(conds)) {
+            std::size_t seed_idx = conds.size();
+            std::size_t best_cost = std::numeric_limits<std::size_t>::max();
+            for (std::size_t i = 0; i < conds.size(); ++i) {
+                if (!is_index_friendly_single(conds[i], st.session.schema)) {
+                    continue;
+                }
+                const std::size_t cost = seed_cost_simple(conds[i], st.session.schema);
+                if (cost < best_cost) {
+                    best_cost = cost;
+                    seed_idx = i;
+                }
+            }
+            if (seed_idx < conds.size()) {
+                std::vector<WhereCond> seed_cond{conds[seed_idx]};
+                const std::vector<std::size_t> seed_slots = build_candidate_slots(tbl, st.session.schema, seed_cond, &st.where_ctx);
+                if (where_policy_last_blocked(&st.where_ctx)) {
+                    log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&st.where_ctx).c_str());
+                    return true;
+                }
+                for (const std::size_t slot : seed_slots) {
+                    if (!row_at_slot_read(tbl, slot, r)) continue;
+                    if (!row_match_multi_conditions(r, st.session.schema, conds)) continue;
+                    accumulate_row(r);
+                }
+                fused_done = true;
+            }
+        }
+
+        if (!fused_done) {
+            const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
+            if (where_policy_last_blocked(&st.where_ctx)) {
+                log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&st.where_ctx).c_str());
+                return true;
+            }
+            for (const std::size_t slot : candidates) {
+                if (!row_at_slot_read(tbl, slot, r)) continue;
+                accumulate_row(r);
+            }
+        }
+        if (int_fast_path) {
+            sum = static_cast<long double>(sum_int);
+        }
+        if (is_avg) {
+            if (matched == 0) log_and_print(log_file, "[AVG] attr='%s' no numeric rows\n", attr.c_str());
+            else log_and_print(log_file, "[AVG] attr='%s' avg=%.6Lf (matched=%zu / %zu rows)%s\n",
+                               attr.c_str(), sum / static_cast<long double>(matched), matched, tbl.logical_row_count(),
+                               conds.empty() ? "" : " with conditions");
+        } else {
+            log_and_print(log_file, "[SUM] attr='%s' sum=%.6Lf (matched=%zu / %zu rows)%s\n",
+                          attr.c_str(), sum, matched, tbl.logical_row_count(),
+                          conds.empty() ? "" : " with conditions");
+        }
+        return true;
+    };
+    if (strncasecmp_ascii(line, "SUM", 3) == 0) return run_numeric_agg("SUM", false, line + 3);
+    if (strncasecmp_ascii(line, "AVG", 3) == 0) return run_numeric_agg("AVG", true, line + 3);
+    return false;
+}
+
+
+
+

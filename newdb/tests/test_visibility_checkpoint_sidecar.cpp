@@ -1,4 +1,4 @@
-#include "visibility_checkpoint_sidecar.h"
+#include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
 
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>

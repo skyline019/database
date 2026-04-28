@@ -1,0 +1,62 @@
+{
+  "schema_version": "newdb.ci_thresholds.v1",
+  "profiles": {
+    "newdb-default": {
+      "max_vacuum_compact_failure_delta": 0.0,
+      "max_vacuum_queue_depth_peak": 6.0,
+      "max_wal_recovery_last_elapsed_ms": 800.0,
+      "max_lock_deadlock_detect_delta": 2.0,
+      "max_lock_deadlock_victim_delta": 2.0,
+      "max_lock_wait_max_ms_delta": 120.0,
+      "max_scheduler_throttle_delta": 300.0,
+      "min_wal_group_commit_batch_commits_delta": -1.0,
+      "max_lsm_segment_count": 80.0,
+      "min_lsm_memtable_flush_delta": 1.0,
+      "max_lsm_read_segments_scanned_p95": 20.0,
+      "min_lsm_compaction_bytes_amp_efficiency": 0.45
+    },
+    "leveldb-like": {
+      "max_vacuum_compact_failure_delta": 0.0,
+      "max_vacuum_queue_depth_peak": 8.0,
+      "max_wal_recovery_last_elapsed_ms": 1000.0,
+      "max_lock_deadlock_detect_delta": 2.0,
+      "max_lock_deadlock_victim_delta": 2.0,
+      "max_lock_wait_max_ms_delta": 160.0,
+      "max_scheduler_throttle_delta": 500.0,
+      "min_wal_group_commit_batch_commits_delta": -1.0,
+      "max_lsm_segment_count": 96.0,
+      "min_lsm_memtable_flush_delta": 1.0,
+      "max_lsm_read_segments_scanned_p95": 24.0,
+      "min_lsm_compaction_bytes_amp_efficiency": 0.4
+    },
+    "innodb-like": {
+      "max_vacuum_compact_failure_delta": 0.0,
+      "max_vacuum_queue_depth_peak": 6.0,
+      "max_wal_recovery_last_elapsed_ms": 600.0,
+      "max_lock_deadlock_detect_delta": 1.0,
+      "max_lock_deadlock_victim_delta": 1.0,
+      "max_lock_wait_max_ms_delta": 100.0,
+      "max_scheduler_throttle_delta": 250.0,
+      "min_wal_group_commit_batch_commits_delta": -1.0,
+      "max_lsm_segment_count": 72.0,
+      "min_lsm_memtable_flush_delta": 1.0,
+      "max_lsm_read_segments_scanned_p95": 18.0,
+      "min_lsm_compaction_bytes_amp_efficiency": 0.5
+    },
+    "hybrid-balanced": {
+      "max_vacuum_compact_failure_delta": 0.0,
+      "max_vacuum_queue_depth_peak": 6.0,
+      "max_wal_recovery_last_elapsed_ms": 700.0,
+      "max_lock_deadlock_detect_delta": 2.0,
+      "max_lock_deadlock_victim_delta": 2.0,
+      "max_lock_wait_max_ms_delta": 110.0,
+      "max_scheduler_throttle_delta": 280.0,
+      "min_wal_group_commit_batch_commits_delta": -1.0,
+      "max_lsm_segment_count": 76.0,
+      "min_lsm_memtable_flush_delta": 1.0,
+      "max_lsm_read_segments_scanned_p95": 19.0,
+      "min_lsm_compaction_bytes_amp_efficiency": 0.48
+    }
+  }
+}
+

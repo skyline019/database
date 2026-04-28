@@ -292,5 +292,31 @@ Write-Progress -Id 1 -Activity "Million-scale benchmark" -Completed
 $all | ConvertTo-Json -Depth 5 | Set-Content -Path $resultJson
 $all | Export-Csv -Path $resultCsv -NoTypeInformation -Encoding UTF8
 
+$buildRows = @($all | Where-Object { $_.phase -eq "build" })
+$queryRows = @($all | Where-Object { $_.phase -eq "query" })
+$txnRows = @($all | Where-Object { $_.phase -eq "txn" })
+$buildAvgTps = 0.0
+$txnAvgTps = 0.0
+if ($buildRows.Count -gt 0) {
+    $buildAvgTps = [double](($buildRows | Measure-Object -Property tps -Average).Average)
+}
+if ($txnRows.Count -gt 0) {
+    $txnAvgTps = [double](($txnRows | Measure-Object -Property tps -Average).Average)
+}
+$summary = [pscustomobject]@{
+    tool = "million_scale_bench"
+    status = "ok"
+    data_dir = $DataDir
+    rows_stages = $sortedSizes
+    build_records = $buildRows.Count
+    query_records = $queryRows.Count
+    txn_records = $txnRows.Count
+    build_avg_tps = [math]::Round($buildAvgTps, 3)
+    txn_avg_tps = [math]::Round($txnAvgTps, 3)
+    result_json = $resultJson
+    result_csv = $resultCsv
+}
+
 Write-Host ("Million-scale bench done. json={0}" -f $resultJson)
 Write-Host ("Million-scale bench done. csv={0}" -f $resultCsv)
+Write-Host ("NEWDB_PERF_SUMMARY " + ($summary | ConvertTo-Json -Depth 5 -Compress))

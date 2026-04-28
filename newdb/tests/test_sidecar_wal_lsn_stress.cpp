@@ -1,5 +1,5 @@
-#include "sidecar_wal_lsn.h"
-#include "txn_manager.h"
+#include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
 
 #include <cstdlib>
 #include <filesystem>

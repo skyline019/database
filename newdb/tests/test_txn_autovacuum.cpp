@@ -1,13 +1,17 @@
 #include <gtest/gtest.h>
 
-#include "txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
+
+#include <newdb/page_io.h>
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 std::filesystem::path unique_temp_subdir(const char* tag) {
@@ -130,6 +134,59 @@ TEST(TxnAutoVacuum, CooldownIsScopedPerTable) {
     EXPECT_EQ(txn.vacuumCooldownSkipCount(), 0u);
 
     txn.stopVacuumThread();
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
+TEST(TxnAutoVacuum, DefaultVacuumCompactsHeapFileWithoutCallback) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_autovac_default_compact");
+    const fs::path data_file = ws / "users.bin";
+
+    std::vector<newdb::Row> seed;
+    seed.reserve(320);
+    const std::string payload(512, 'x');
+    for (int i = 0; i < 300; ++i) {
+        seed.push_back(newdb::Row{1, {{"name", "v" + std::to_string(i) + payload}}, {}});
+    }
+    seed.push_back(newdb::Row{2, {{"name", "will_delete"}}, {}});
+    seed.push_back(newdb::Row{2, {{"__deleted", "1"}, {"name", "will_delete"}}, {}});
+    ASSERT_TRUE(newdb::io::create_heap_file(data_file.string().c_str(), seed).ok);
+
+    const auto before_bytes = fs::file_size(data_file);
+
+    TxnCoordinator txn;
+    txn.set_workspace_root(ws.string());
+    txn.setVacuumOpsThreshold(1);
+    txn.setVacuumMinIntervalSec(0);
+    txn.startVacuumThread();
+
+    ASSERT_TRUE(txn.begin("users").isOk());
+    txn.recordOperation("INSERT", "users", "999", "", "name=trigger");
+    ASSERT_TRUE(txn.commit().isOk());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (txn.vacuumExecuteCount() < 1u && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    EXPECT_GE(txn.vacuumExecuteCount(), 1u);
+    EXPECT_GE(txn.vacuumCompactSuccessCount(), 1u);
+
+    txn.stopVacuumThread();
+
+    newdb::HeapTable tbl;
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    ASSERT_TRUE(newdb::io::load_heap_file(data_file.string().c_str(), "users", schema, tbl).ok);
+    ASSERT_EQ(tbl.rows.size(), 1u);
+    EXPECT_EQ(tbl.rows[0].id, 1);
+
+    const auto after_bytes = fs::file_size(data_file);
+    EXPECT_LT(after_bytes, before_bytes);
+    EXPECT_GT(txn.vacuumCompactBytesReclaimed(), 0u);
+    EXPECT_EQ(txn.vacuumCompactFailureCount(), 0u);
+    EXPECT_GE(txn.vacuumCompactLastElapsedMs(), 0u);
+
     std::error_code ec;
     fs::remove_all(ws, ec);
 }

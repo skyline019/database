@@ -1,0 +1,12 @@
+# single-process query benchmark script
+WHERE(dept,=,ENG,AND,age,>,20)
+COUNT(dept,=,ENG,AND,age,>,20)
+AVG(salary,WHERE,dept,=,ENG,AND,age,>,20)
+WHERE(dept,=,ENG,AND,age,>,20)
+COUNT(dept,=,ENG,AND,age,>,20)
+AVG(salary,WHERE,dept,=,ENG,AND,age,>,20)
+WHERE(dept,=,ENG,AND,age,>,20)
+COUNT(dept,=,ENG,AND,age,>,20)
+AVG(salary,WHERE,dept,=,ENG,AND,age,>,20)
+WHERE(id,=,2,OR,dept,=,HR,OR,name,=,Alice)
+WHERE(id,=,2,OR,dept,=,HR,OR,name,=,Alice)

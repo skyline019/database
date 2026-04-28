@@ -28,6 +28,22 @@ param(
     [double]$CriticalMinCmTps = 15000.0,
     [double]$WarnMinNightlyPassRate = 0.90,
     [double]$CriticalMinNightlyPassRate = 0.70,
+    [double]$MaxRuntimeVacuumCompactFailureDelta = 0.0,
+    [double]$MinRuntimeVacuumCompactReclaimedBytesDelta = -1.0,
+    [double]$MaxRuntimeVacuumQueueDepthPeak = -1.0,
+    [double]$MaxRuntimeWalRecoveryLastElapsedMs = -1.0,
+    [double]$MaxRuntimeLockDeadlockDetectDelta = -1.0,
+    [double]$MaxRuntimeLockDeadlockVictimDelta = -1.0,
+    [double]$MaxRuntimeLockWaitMaxMsDelta = -1.0,
+    [double]$MaxRuntimeSchedulerThrottleDelta = -1.0,
+    [double]$MinRuntimeWalGroupCommitBatchCommitsDelta = -1.0,
+    [double]$MaxRuntimeLsmSegmentCount = -1.0,
+    [double]$MinRuntimeLsmMemtableFlushDelta = -1.0,
+    [int]$RuntimeLsmSegmentTargetBytes = 128,
+    [double]$MaxRuntimeLsmReadSegmentsScannedP95 = -1.0,
+    [double]$MinRuntimeLsmCompactionBytesAmpEfficiency = -1.0,
+    [ValidateSet("newdb-default", "leveldb-like", "innodb-like", "hybrid-balanced")]
+    [string]$ConcurrentPressureProfile = "newdb-default",
     [switch]$LiteProfile
 )
 
@@ -37,14 +53,24 @@ $scriptsRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptsRoot)
 
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
-    $BuildDir = Join-Path $projectRoot $BuildDir
+    $cwdCandidate = Join-Path (Get-Location) $BuildDir
+    if (Test-Path -LiteralPath $cwdCandidate) {
+        $BuildDir = (Resolve-Path -LiteralPath $cwdCandidate).Path
+    } else {
+        $BuildDir = Join-Path $projectRoot $BuildDir
+    }
 }
 $isWin = ($env:OS -eq "Windows_NT")
 if ([string]::IsNullOrWhiteSpace($DemoExe)) {
     $exeName = if ($isWin) { "newdb_demo.exe" } else { "newdb_demo" }
     $DemoExe = Join-Path $BuildDir $exeName
 } elseif (-not [System.IO.Path]::IsPathRooted($DemoExe)) {
-    $DemoExe = Join-Path $projectRoot $DemoExe
+    $cwdCandidate = Join-Path (Get-Location) $DemoExe
+    if (Test-Path -LiteralPath $cwdCandidate) {
+        $DemoExe = (Resolve-Path -LiteralPath $cwdCandidate).Path
+    } else {
+        $DemoExe = Join-Path $projectRoot $DemoExe
+    }
 }
 
 if ($Runs -lt 1) {
@@ -173,7 +199,22 @@ for ($i = 1; $i -le $Runs; $i++) {
         "-MaxHighPressureQueryAvgMs1M", $MaxHighPressureQueryAvgMs1M,
         "-MaxHighPressureQueryAvgMs3M", $MaxHighPressureQueryAvgMs3M,
         "-TelemetryEnvironment", $TelemetryEnvironment,
-        "-TelemetryProfile", $TelemetryProfile
+        "-TelemetryProfile", $TelemetryProfile,
+        "-ConcurrentPressureProfile", $ConcurrentPressureProfile,
+        "-MaxRuntimeVacuumCompactFailureDelta", $MaxRuntimeVacuumCompactFailureDelta,
+        "-MinRuntimeVacuumCompactReclaimedBytesDelta", $MinRuntimeVacuumCompactReclaimedBytesDelta,
+        "-MaxRuntimeVacuumQueueDepthPeak", $MaxRuntimeVacuumQueueDepthPeak,
+        "-MaxRuntimeWalRecoveryLastElapsedMs", $MaxRuntimeWalRecoveryLastElapsedMs,
+        "-MaxRuntimeLockDeadlockDetectDelta", $MaxRuntimeLockDeadlockDetectDelta,
+        "-MaxRuntimeLockDeadlockVictimDelta", $MaxRuntimeLockDeadlockVictimDelta,
+        "-MaxRuntimeLockWaitMaxMsDelta", $MaxRuntimeLockWaitMaxMsDelta,
+        "-MaxRuntimeSchedulerThrottleDelta", $MaxRuntimeSchedulerThrottleDelta,
+        "-MinRuntimeWalGroupCommitBatchCommitsDelta", $MinRuntimeWalGroupCommitBatchCommitsDelta,
+        "-MaxRuntimeLsmSegmentCount", $MaxRuntimeLsmSegmentCount,
+        "-MinRuntimeLsmMemtableFlushDelta", $MinRuntimeLsmMemtableFlushDelta,
+        "-RuntimeLsmSegmentTargetBytes", $RuntimeLsmSegmentTargetBytes,
+        "-MaxRuntimeLsmReadSegmentsScannedP95", $MaxRuntimeLsmReadSegmentsScannedP95,
+        "-MinRuntimeLsmCompactionBytesAmpEfficiency", $MinRuntimeLsmCompactionBytesAmpEfficiency
     )
     if ($LiteProfile) {
         # P13: stable nightly sample mode, avoid high-pressure branches.
@@ -283,6 +324,15 @@ for ($i = 1; $i -le $Runs; $i++) {
         runtime_conflict_rate_p95 = if ($perf) { $perf.runtime_conflict_rate_p95 } else { $null }
         runtime_txn_begin_lock_conflict_delta = if ($perf) { $perf.runtime_txn_begin_lock_conflict_delta } else { $null }
         runtime_wal_compact_delta = if ($perf) { $perf.runtime_wal_compact_delta } else { $null }
+        runtime_vacuum_queue_depth_peak_max = if ($perf) { $perf.runtime_vacuum_queue_depth_peak_max } else { $null }
+        runtime_wal_recovery_runs_delta = if ($perf) { $perf.runtime_wal_recovery_runs_delta } else { $null }
+        runtime_wal_recovery_undo_ops_delta = if ($perf) { $perf.runtime_wal_recovery_undo_ops_delta } else { $null }
+        runtime_wal_recovery_last_elapsed_ms_max = if ($perf) { $perf.runtime_wal_recovery_last_elapsed_ms_max } else { $null }
+        runtime_lock_deadlock_detect_delta = if ($perf) { $perf.runtime_lock_deadlock_detect_delta } else { $null }
+        runtime_lock_deadlock_victim_delta = if ($perf) { $perf.runtime_lock_deadlock_victim_delta } else { $null }
+        runtime_lock_wait_max_ms_delta = if ($perf) { $perf.runtime_lock_wait_max_ms_delta } else { $null }
+        runtime_scheduler_throttle_delta = if ($perf) { $perf.runtime_scheduler_throttle_delta } else { $null }
+        runtime_wal_group_commit_batch_commits_delta = if ($perf) { $perf.runtime_wal_group_commit_batch_commits_delta } else { $null }
         runtime_run_id = if ($perf) { $perf.runtime_run_id } else { $null }
         soak_repeat = if ($soak) { $soak.repeat } else { $null }
         soak_summary = if ($soak) { $soak.summary } else { $null }

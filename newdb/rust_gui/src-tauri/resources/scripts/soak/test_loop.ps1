@@ -44,7 +44,23 @@ param(
     [int]$BenchPrepChunkSize = 500,
     [bool]$TimestampIsolatedDataDir = $true,
     [string]$TelemetryEnvironment = "dev",
-    [string]$TelemetryProfile = "default"
+    [string]$TelemetryProfile = "default",
+    [ValidateSet("newdb-default", "leveldb-like", "innodb-like", "hybrid-balanced")]
+    [string]$ConcurrentPressureProfile = "newdb-default",
+    [double]$MaxRuntimeVacuumCompactFailureDelta = -1.0,
+    [double]$MinRuntimeVacuumCompactReclaimedBytesDelta = -1.0,
+    [double]$MaxRuntimeVacuumQueueDepthPeak = -1.0,
+    [double]$MaxRuntimeWalRecoveryLastElapsedMs = -1.0,
+    [double]$MaxRuntimeLockDeadlockDetectDelta = -1.0,
+    [double]$MaxRuntimeLockDeadlockVictimDelta = -1.0,
+    [double]$MaxRuntimeLockWaitMaxMsDelta = -1.0,
+    [double]$MaxRuntimeSchedulerThrottleDelta = -1.0,
+    [double]$MinRuntimeWalGroupCommitBatchCommitsDelta = -1.0,
+    [double]$MaxRuntimeLsmSegmentCount = -1.0,
+    [double]$MinRuntimeLsmMemtableFlushDelta = -1.0,
+    [int]$RuntimeLsmSegmentTargetBytes = 128,
+    [double]$MaxRuntimeLsmReadSegmentsScannedP95 = -1.0,
+    [double]$MinRuntimeLsmCompactionBytesAmpEfficiency = -1.0
 )
 
 Set-StrictMode -Version Latest
@@ -54,14 +70,24 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $scriptsRoot)
 $scriptsBase = Split-Path -Parent $scriptsRoot
 
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
-    $BuildDir = Join-Path $projectRoot $BuildDir
+    $cwdCandidate = Join-Path (Get-Location) $BuildDir
+    if (Test-Path -LiteralPath $cwdCandidate) {
+        $BuildDir = (Resolve-Path -LiteralPath $cwdCandidate).Path
+    } else {
+        $BuildDir = Join-Path $projectRoot $BuildDir
+    }
 }
 $isWin = ($env:OS -eq "Windows_NT")
 if ([string]::IsNullOrWhiteSpace($DemoExe)) {
     $exeName = if ($isWin) { "newdb_demo.exe" } else { "newdb_demo" }
     $DemoExe = Join-Path $BuildDir $exeName
 } elseif (-not [System.IO.Path]::IsPathRooted($DemoExe)) {
-    $DemoExe = Join-Path $projectRoot $DemoExe
+    $cwdCandidate = Join-Path (Get-Location) $DemoExe
+    if (Test-Path -LiteralPath $cwdCandidate) {
+        $DemoExe = (Resolve-Path -LiteralPath $cwdCandidate).Path
+    } else {
+        $DemoExe = Join-Path $projectRoot $DemoExe
+    }
 }
 
 $baseDataDir = $DataDir
@@ -83,6 +109,29 @@ function Exec([string]$label, [scriptblock]$cmd) {
     if ($LASTEXITCODE -ne 0) {
         throw "$label failed: exit_code=$LASTEXITCODE"
     }
+}
+
+function Apply-ConcurrentPressureProfileDefaults {
+    $helper = Join-Path $scriptsBase "ci/profile_thresholds.ps1"
+    if (-not (Test-Path -LiteralPath $helper)) {
+        throw "missing profile thresholds helper: $helper"
+    }
+    . $helper
+    Apply-NewdbPressureProfileThresholdsIfUnset `
+        -Profile $ConcurrentPressureProfile `
+        -ProjectRoot $projectRoot `
+        -MaxVacuumCompactFailureDelta ([ref]$script:MaxRuntimeVacuumCompactFailureDelta) `
+        -MaxVacuumQueueDepthPeak ([ref]$script:MaxRuntimeVacuumQueueDepthPeak) `
+        -MaxWalRecoveryLastElapsedMs ([ref]$script:MaxRuntimeWalRecoveryLastElapsedMs) `
+        -MaxLockDeadlockDetectDelta ([ref]$script:MaxRuntimeLockDeadlockDetectDelta) `
+        -MaxLockDeadlockVictimDelta ([ref]$script:MaxRuntimeLockDeadlockVictimDelta) `
+        -MaxLockWaitMaxMsDelta ([ref]$script:MaxRuntimeLockWaitMaxMsDelta) `
+        -MaxSchedulerThrottleDelta ([ref]$script:MaxRuntimeSchedulerThrottleDelta) `
+        -MinWalGroupCommitBatchCommitsDelta ([ref]$script:MinRuntimeWalGroupCommitBatchCommitsDelta) `
+        -MaxLsmSegmentCount ([ref]$script:MaxRuntimeLsmSegmentCount) `
+        -MinLsmMemtableFlushDelta ([ref]$script:MinRuntimeLsmMemtableFlushDelta) `
+        -MaxLsmReadSegmentsScannedP95 ([ref]$script:MaxRuntimeLsmReadSegmentsScannedP95) `
+        -MinLsmCompactionBytesAmpEfficiency ([ref]$script:MinRuntimeLsmCompactionBytesAmpEfficiency)
 }
 
 function Parse-TxnBenchAvg([string]$text, [string]$mode) {
@@ -355,6 +404,22 @@ $perf = [ordered]@{
     runtime_conflict_rate_p95 = $null
     runtime_txn_begin_lock_conflict_delta = $null
     runtime_wal_compact_delta = $null
+    runtime_vacuum_compact_failure_delta = $null
+    runtime_vacuum_compact_reclaimed_bytes_delta = $null
+    runtime_vacuum_compact_success_delta = $null
+    runtime_vacuum_queue_depth_peak_max = $null
+    runtime_wal_recovery_runs_delta = $null
+    runtime_wal_recovery_undo_ops_delta = $null
+    runtime_wal_recovery_last_elapsed_ms_max = $null
+    runtime_lock_deadlock_detect_delta = $null
+    runtime_lock_deadlock_victim_delta = $null
+    runtime_lock_wait_max_ms_delta = $null
+    runtime_scheduler_throttle_delta = $null
+    runtime_wal_group_commit_batch_commits_delta = $null
+    runtime_lsm_memtable_flush_delta = $null
+    runtime_lsm_compaction_delta = $null
+    runtime_lsm_segment_count_max = $null
+    runtime_lsm_memtable_bytes_max = $null
     runtime_run_id = $null
     soak_repeat = $null
     soak_summary = $null
@@ -481,8 +546,24 @@ if ($RunHighPressure) {
 
 if ($RunConcurrentPressure) {
     Write-Host "==> Perf: concurrent_pressure_bench.ps1 (repeat=$ConcurrentRepeatUntilFail)"
+    Apply-ConcurrentPressureProfileDefaults
     $cpOut = & powershell -ExecutionPolicy Bypass -File (Join-Path $scriptsBase "bench/concurrent_pressure_bench.ps1") `
-        -BuildDir $BuildDir -Jobs $CtestJobs -RepeatUntilFail $ConcurrentRepeatUntilFail -RunRuntimeGate | Out-String
+        -BuildDir $BuildDir -Jobs $CtestJobs -RepeatUntilFail $ConcurrentRepeatUntilFail -RunRuntimeGate `
+        -BenchmarkProfile $ConcurrentPressureProfile `
+        -MaxVacuumCompactFailureDelta $MaxRuntimeVacuumCompactFailureDelta `
+        -MinVacuumCompactReclaimedBytesDelta $MinRuntimeVacuumCompactReclaimedBytesDelta `
+        -MaxVacuumQueueDepthPeak $MaxRuntimeVacuumQueueDepthPeak `
+        -MaxWalRecoveryLastElapsedMs $MaxRuntimeWalRecoveryLastElapsedMs `
+        -MaxLockDeadlockDetectDelta $MaxRuntimeLockDeadlockDetectDelta `
+        -MaxLockDeadlockVictimDelta $MaxRuntimeLockDeadlockVictimDelta `
+        -MaxLockWaitMaxMsDelta $MaxRuntimeLockWaitMaxMsDelta `
+        -MaxSchedulerThrottleDelta $MaxRuntimeSchedulerThrottleDelta `
+        -MinWalGroupCommitBatchCommitsDelta $MinRuntimeWalGroupCommitBatchCommitsDelta `
+        -MaxLsmSegmentCount $MaxRuntimeLsmSegmentCount `
+        -MinLsmMemtableFlushDelta $MinRuntimeLsmMemtableFlushDelta `
+        -RuntimeLsmSegmentTargetBytes $RuntimeLsmSegmentTargetBytes `
+        -MaxLsmReadSegmentsScannedP95 $MaxRuntimeLsmReadSegmentsScannedP95 `
+        -MinLsmCompactionBytesAmpEfficiency $MinRuntimeLsmCompactionBytesAmpEfficiency | Out-String
     Write-Host $cpOut
     if ($LASTEXITCODE -ne 0) {
         throw "concurrent_pressure_bench failed: exit_code=$LASTEXITCODE"
@@ -495,6 +576,24 @@ if ($RunConcurrentPressure) {
         $perf.runtime_conflict_rate_p95 = $cpSummary.runtime_gate_summary.conflict_rate_p95
         $perf.runtime_txn_begin_lock_conflict_delta = $cpSummary.runtime_gate_summary.txn_begin_lock_conflict_delta
         $perf.runtime_wal_compact_delta = $cpSummary.runtime_gate_summary.wal_compact_delta
+        $perf.runtime_vacuum_compact_failure_delta = $cpSummary.runtime_gate_summary.vacuum_compact_failure_delta
+        $perf.runtime_vacuum_compact_reclaimed_bytes_delta = $cpSummary.runtime_gate_summary.vacuum_compact_reclaimed_bytes_delta
+        $perf.runtime_vacuum_compact_success_delta = $cpSummary.runtime_gate_summary.vacuum_compact_success_delta
+        $perf.runtime_vacuum_queue_depth_peak_max = $cpSummary.runtime_gate_summary.vacuum_queue_depth_peak_max
+        $perf.runtime_wal_recovery_runs_delta = $cpSummary.runtime_gate_summary.wal_recovery_runs_delta
+        $perf.runtime_wal_recovery_undo_ops_delta = $cpSummary.runtime_gate_summary.wal_recovery_undo_ops_delta
+        $perf.runtime_wal_recovery_last_elapsed_ms_max = $cpSummary.runtime_gate_summary.wal_recovery_last_elapsed_ms_max
+        $perf.runtime_lock_deadlock_detect_delta = $cpSummary.runtime_gate_summary.lock_deadlock_detect_delta
+        $perf.runtime_lock_deadlock_victim_delta = $cpSummary.runtime_gate_summary.lock_deadlock_victim_delta
+        $perf.runtime_lock_wait_max_ms_delta = $cpSummary.runtime_gate_summary.lock_wait_max_ms_delta
+        $perf.runtime_scheduler_throttle_delta = $cpSummary.runtime_gate_summary.scheduler_throttle_delta
+        $perf.runtime_wal_group_commit_batch_commits_delta = $cpSummary.runtime_gate_summary.wal_group_commit_batch_commits_delta
+        $perf.runtime_lsm_memtable_flush_delta = $cpSummary.runtime_gate_summary.lsm_memtable_flush_delta
+        $perf.runtime_lsm_compaction_delta = $cpSummary.runtime_gate_summary.lsm_compaction_delta
+        $perf.runtime_lsm_segment_count_max = $cpSummary.runtime_gate_summary.lsm_segment_count_max
+        $perf.runtime_lsm_memtable_bytes_max = $cpSummary.runtime_gate_summary.lsm_memtable_bytes_max
+        $perf.runtime_lsm_read_segments_scanned_p95_max = $cpSummary.runtime_gate_summary.lsm_read_segments_scanned_p95_max
+        $perf.runtime_lsm_compaction_bytes_amp_efficiency = $cpSummary.runtime_gate_summary.lsm_compaction_bytes_amp_efficiency
         $perf.runtime_run_id = $cpSummary.runtime_run_id
         Add-TelemetryEvent -Phase "concurrent_pressure" -Metrics @{
             runtime_samples = $perf.runtime_samples
@@ -502,6 +601,22 @@ if ($RunConcurrentPressure) {
             runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
             runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
             runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
+            runtime_vacuum_compact_failure_delta = $perf.runtime_vacuum_compact_failure_delta
+            runtime_vacuum_compact_reclaimed_bytes_delta = $perf.runtime_vacuum_compact_reclaimed_bytes_delta
+            runtime_vacuum_compact_success_delta = $perf.runtime_vacuum_compact_success_delta
+            runtime_vacuum_queue_depth_peak_max = $perf.runtime_vacuum_queue_depth_peak_max
+            runtime_wal_recovery_runs_delta = $perf.runtime_wal_recovery_runs_delta
+            runtime_wal_recovery_undo_ops_delta = $perf.runtime_wal_recovery_undo_ops_delta
+            runtime_wal_recovery_last_elapsed_ms_max = $perf.runtime_wal_recovery_last_elapsed_ms_max
+            runtime_lock_deadlock_detect_delta = $perf.runtime_lock_deadlock_detect_delta
+            runtime_lock_deadlock_victim_delta = $perf.runtime_lock_deadlock_victim_delta
+            runtime_lock_wait_max_ms_delta = $perf.runtime_lock_wait_max_ms_delta
+            runtime_scheduler_throttle_delta = $perf.runtime_scheduler_throttle_delta
+            runtime_wal_group_commit_batch_commits_delta = $perf.runtime_wal_group_commit_batch_commits_delta
+            runtime_lsm_memtable_flush_delta = $perf.runtime_lsm_memtable_flush_delta
+            runtime_lsm_compaction_delta = $perf.runtime_lsm_compaction_delta
+            runtime_lsm_segment_count_max = $perf.runtime_lsm_segment_count_max
+            runtime_lsm_memtable_bytes_max = $perf.runtime_lsm_memtable_bytes_max
             runtime_run_id = $perf.runtime_run_id
             summary = $cpSummaryPath
         }
@@ -561,6 +676,24 @@ if ($SoakMinutes -gt 0) {
         $perf.runtime_conflict_rate_p95 = $soakSummary.runtime_gate_summary.conflict_rate_p95
         $perf.runtime_txn_begin_lock_conflict_delta = $soakSummary.runtime_gate_summary.txn_begin_lock_conflict_delta
         $perf.runtime_wal_compact_delta = $soakSummary.runtime_gate_summary.wal_compact_delta
+        $perf.runtime_vacuum_compact_failure_delta = $soakSummary.runtime_gate_summary.vacuum_compact_failure_delta
+        $perf.runtime_vacuum_compact_reclaimed_bytes_delta = $soakSummary.runtime_gate_summary.vacuum_compact_reclaimed_bytes_delta
+        $perf.runtime_vacuum_compact_success_delta = $soakSummary.runtime_gate_summary.vacuum_compact_success_delta
+        $perf.runtime_vacuum_queue_depth_peak_max = $soakSummary.runtime_gate_summary.vacuum_queue_depth_peak_max
+        $perf.runtime_wal_recovery_runs_delta = $soakSummary.runtime_gate_summary.wal_recovery_runs_delta
+        $perf.runtime_wal_recovery_undo_ops_delta = $soakSummary.runtime_gate_summary.wal_recovery_undo_ops_delta
+        $perf.runtime_wal_recovery_last_elapsed_ms_max = $soakSummary.runtime_gate_summary.wal_recovery_last_elapsed_ms_max
+        $perf.runtime_lock_deadlock_detect_delta = $soakSummary.runtime_gate_summary.lock_deadlock_detect_delta
+        $perf.runtime_lock_deadlock_victim_delta = $soakSummary.runtime_gate_summary.lock_deadlock_victim_delta
+        $perf.runtime_lock_wait_max_ms_delta = $soakSummary.runtime_gate_summary.lock_wait_max_ms_delta
+        $perf.runtime_scheduler_throttle_delta = $soakSummary.runtime_gate_summary.scheduler_throttle_delta
+        $perf.runtime_wal_group_commit_batch_commits_delta = $soakSummary.runtime_gate_summary.wal_group_commit_batch_commits_delta
+        $perf.runtime_lsm_memtable_flush_delta = $soakSummary.runtime_gate_summary.lsm_memtable_flush_delta
+        $perf.runtime_lsm_compaction_delta = $soakSummary.runtime_gate_summary.lsm_compaction_delta
+        $perf.runtime_lsm_segment_count_max = $soakSummary.runtime_gate_summary.lsm_segment_count_max
+        $perf.runtime_lsm_memtable_bytes_max = $soakSummary.runtime_gate_summary.lsm_memtable_bytes_max
+        $perf.runtime_lsm_read_segments_scanned_p95_max = $soakSummary.runtime_gate_summary.lsm_read_segments_scanned_p95_max
+        $perf.runtime_lsm_compaction_bytes_amp_efficiency = $soakSummary.runtime_gate_summary.lsm_compaction_bytes_amp_efficiency
         $perf.runtime_run_id = $soakSummary.runtime_run_id
     }
     Add-TelemetryEvent -Phase "soak" -Metrics @{
@@ -571,6 +704,22 @@ if ($SoakMinutes -gt 0) {
         runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
         runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
         runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
+        runtime_vacuum_compact_failure_delta = $perf.runtime_vacuum_compact_failure_delta
+        runtime_vacuum_compact_reclaimed_bytes_delta = $perf.runtime_vacuum_compact_reclaimed_bytes_delta
+        runtime_vacuum_compact_success_delta = $perf.runtime_vacuum_compact_success_delta
+        runtime_vacuum_queue_depth_peak_max = $perf.runtime_vacuum_queue_depth_peak_max
+        runtime_wal_recovery_runs_delta = $perf.runtime_wal_recovery_runs_delta
+        runtime_wal_recovery_undo_ops_delta = $perf.runtime_wal_recovery_undo_ops_delta
+        runtime_wal_recovery_last_elapsed_ms_max = $perf.runtime_wal_recovery_last_elapsed_ms_max
+        runtime_lock_deadlock_detect_delta = $perf.runtime_lock_deadlock_detect_delta
+        runtime_lock_deadlock_victim_delta = $perf.runtime_lock_deadlock_victim_delta
+        runtime_lock_wait_max_ms_delta = $perf.runtime_lock_wait_max_ms_delta
+        runtime_scheduler_throttle_delta = $perf.runtime_scheduler_throttle_delta
+        runtime_wal_group_commit_batch_commits_delta = $perf.runtime_wal_group_commit_batch_commits_delta
+        runtime_lsm_memtable_flush_delta = $perf.runtime_lsm_memtable_flush_delta
+        runtime_lsm_compaction_delta = $perf.runtime_lsm_compaction_delta
+        runtime_lsm_segment_count_max = $perf.runtime_lsm_segment_count_max
+        runtime_lsm_memtable_bytes_max = $perf.runtime_lsm_memtable_bytes_max
     }
 }
 
@@ -617,6 +766,22 @@ $trendPath = Join-Path $resultDir "test_loop_trend.jsonl"
     runtime_conflict_rate_p95 = $perf.runtime_conflict_rate_p95
     runtime_txn_begin_lock_conflict_delta = $perf.runtime_txn_begin_lock_conflict_delta
     runtime_wal_compact_delta = $perf.runtime_wal_compact_delta
+    runtime_vacuum_compact_failure_delta = $perf.runtime_vacuum_compact_failure_delta
+    runtime_vacuum_compact_reclaimed_bytes_delta = $perf.runtime_vacuum_compact_reclaimed_bytes_delta
+    runtime_vacuum_compact_success_delta = $perf.runtime_vacuum_compact_success_delta
+    runtime_vacuum_queue_depth_peak_max = $perf.runtime_vacuum_queue_depth_peak_max
+    runtime_wal_recovery_runs_delta = $perf.runtime_wal_recovery_runs_delta
+    runtime_wal_recovery_undo_ops_delta = $perf.runtime_wal_recovery_undo_ops_delta
+    runtime_wal_recovery_last_elapsed_ms_max = $perf.runtime_wal_recovery_last_elapsed_ms_max
+    runtime_lock_deadlock_detect_delta = $perf.runtime_lock_deadlock_detect_delta
+    runtime_lock_deadlock_victim_delta = $perf.runtime_lock_deadlock_victim_delta
+    runtime_lock_wait_max_ms_delta = $perf.runtime_lock_wait_max_ms_delta
+    runtime_scheduler_throttle_delta = $perf.runtime_scheduler_throttle_delta
+    runtime_wal_group_commit_batch_commits_delta = $perf.runtime_wal_group_commit_batch_commits_delta
+    runtime_lsm_memtable_flush_delta = $perf.runtime_lsm_memtable_flush_delta
+    runtime_lsm_compaction_delta = $perf.runtime_lsm_compaction_delta
+    runtime_lsm_segment_count_max = $perf.runtime_lsm_segment_count_max
+    runtime_lsm_memtable_bytes_max = $perf.runtime_lsm_memtable_bytes_max
     runtime_run_id = $perf.runtime_run_id
     cm_tps_min = $perf.cm_tps_min
     soak_repeat = $perf.soak_repeat

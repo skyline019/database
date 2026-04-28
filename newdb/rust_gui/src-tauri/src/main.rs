@@ -14,5 +14,13 @@ fn main() {
         println!("[self-check] ok");
         return;
     }
+    if std::env::args().any(|a| a == "--e2e-undo-redo-check") {
+        if let Err(e) = newdb_rust_vue_gui_lib::e2e_undo_redo_check() {
+            eprintln!("[e2e-undo-redo-check] failed: {e}");
+            std::process::exit(3);
+        }
+        println!("[e2e-undo-redo-check] ok");
+        return;
+    }
     newdb_rust_vue_gui_lib::run()
 }

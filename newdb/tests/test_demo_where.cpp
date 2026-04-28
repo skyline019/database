@@ -1,5 +1,5 @@
-#include "condition.h"
-#include "where.h"
+#include "cli/modules/where/parser/condition.h"
+#include "cli/modules/where/executor/where.h"
 
 #include <newdb/schema.h>
 

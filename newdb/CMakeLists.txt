@@ -30,21 +30,22 @@ if(NEWDB_ENABLE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_library(newdb_core STATIC
-    src/schema.cpp
-    src/schema_io.cpp
-    src/heap_table.cpp
-    src/heap_file_read_view.cpp
-    src/tuple_codec.cpp
-    src/heap_page_waterfall.cpp
-    src/page_io.cpp
-    src/session.cpp
-    src/catalog.cpp
-    src/wal_manager.cpp
-    src/wal_codec.cpp
-    src/mvcc.cpp
-    src/session_history.cpp
-    src/error_format.cpp
-    src/crc32c_compat.cpp
+    engine/src/schema/schema.cpp
+    engine/src/schema/schema_io.cpp
+    engine/src/heap/heap_table.cpp
+    engine/src/heap/heap_file_read_view.cpp
+    engine/src/codec/tuple_codec.cpp
+    engine/src/heap/heap_page_waterfall.cpp
+    engine/src/io/page/page_io.cpp
+    engine/src/lsm/lsm_lite.cpp
+    engine/src/session/api/session.cpp
+    engine/src/catalog/catalog.cpp
+    engine/src/wal/writer/wal_manager.cpp
+    engine/src/wal/codec/wal_codec.cpp
+    engine/src/mvcc/snapshot/mvcc.cpp
+    engine/src/session/table_access/session_history.cpp
+    engine/src/error/error_format.cpp
+    engine/src/util/crc32c_compat.cpp
     "${NEWDB_REPO_ROOT}/waterfall/storage/page.cc"
     "${NEWDB_REPO_ROOT}/waterfall/storage/record.cc"
     "${NEWDB_REPO_ROOT}/waterfall/storage/error.cc"
@@ -55,7 +56,7 @@ add_library(newdb_core STATIC
 set_target_properties(newdb_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(newdb_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
     "${NEWDB_REPO_ROOT}"
 )
 
@@ -64,11 +65,11 @@ newdb_force_include_waterfall_config(newdb_core)
 option(NEWDB_BUILD_SHARED "Build shared library (C ABI) for cross-language usage" ON)
 if(NEWDB_BUILD_SHARED)
     add_library(newdb_shared SHARED
-        src/c_api.cpp
+        engine/src/c_api/c_api.cpp
     )
     target_include_directories(newdb_shared PUBLIC
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/demo"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
         "${NEWDB_REPO_ROOT}"
     )
     target_link_libraries(newdb_shared PRIVATE newdb_core)
@@ -89,48 +90,68 @@ if(CRC32C_FOUND)
     target_link_libraries(newdb_core PUBLIC ${CRC32C_LIBRARIES})
 endif()
 
-add_executable(newdb_smoke tools/newdb_smoke.cpp)
+add_executable(newdb_smoke tools/smoke/newdb_smoke.cpp)
 target_link_libraries(newdb_smoke PRIVATE newdb_core)
 newdb_force_include_waterfall_config(newdb_smoke)
 
-add_executable(newdb_perf tools/newdb_perf.cpp)
+add_executable(newdb_perf tools/perf/newdb_perf.cpp)
 newdb_force_include_waterfall_config(newdb_perf)
 
-add_executable(newdb_concurrent_perf tools/newdb_concurrent_perf.cpp)
+add_executable(newdb_concurrent_perf tools/perf/newdb_concurrent_perf.cpp)
 target_link_libraries(newdb_concurrent_perf PRIVATE newdb_core)
 newdb_force_include_waterfall_config(newdb_concurrent_perf)
 
-add_executable(newdb_runtime_report tools/newdb_runtime_report.cpp)
+add_executable(newdb_runtime_report tools/report/newdb_runtime_report.cpp)
 newdb_force_include_waterfall_config(newdb_runtime_report)
 
 set(NEWDB_DEMO_LIB_SOURCES
-    demo/demo_runner.cc
-    demo/demo_diag.cc
-    demo/demo_shell.cc
-    demo/demo_export.cc
-    demo/demo_commands.cc
-    demo/demo_cli.cpp
-    demo/table_view.cc
-    demo/where.cc
-    demo/schema_catalog.cc
-    demo/condition.cc
-    demo/utils.cc
-    demo/logging.cc
-    demo/import.cc
-    demo/txn_manager.cc
-    demo/bptree_index.cc
-    demo/page_index_sidecar.cc
-    demo/equality_index_sidecar.cc
-    demo/eq_bloom.cc
-    demo/covering_index_sidecar.cc
-    demo/visibility_checkpoint_sidecar.cc
-    demo/sidecar_wal_lsn.cpp
+    cli/shell/bootstrap/demo_runner.cc
+    cli/shell/diag/demo_diag.cc
+    cli/shell/repl/demo_shell.cc
+    cli/modules/import_export/demo_export.cc
+    cli/shell/dispatch/dispatch.cc
+    cli/shell/dispatch/handlers/session/session_handler.cc
+    cli/shell/dispatch/handlers/txn/txn_handler.cc
+    cli/shell/dispatch/handlers/ddl/ddl_handler.cc
+    cli/shell/dispatch/handlers/dml/dml_handler.cc
+    cli/shell/dispatch/handlers/query/query_handler.cc
+    cli/shell/dispatch/handlers/io/io_handler.cc
+    cli/shell/dispatch/handlers/workspace/workspace_handler.cc
+    cli/shell/dispatch/impl/args/args_impl.cc
+    cli/shell/dispatch/impl/index/fast_index_impl.cc
+    cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc
+    cli/shell/dispatch/services/lsm/lsm_lite_service.cc
+    cli/shell/bootstrap/demo_cli.cpp
+    cli/modules/view/table_view.cc
+    cli/modules/where/executor/match/match_impl.cc
+    cli/modules/where/executor/cache/cache_impl.cc
+    cli/modules/where/executor/policy/policy_service.cc
+    cli/modules/where/executor/plan/plan_impl.cc
+    cli/modules/catalog/schema_catalog.cc
+    cli/modules/where/parser/condition.cc
+    cli/modules/util/utils.cc
+    cli/modules/logging/logging.cc
+    cli/modules/import_export/import.cc
+    cli/modules/txn/coordinator/core/core_impl.cc
+    cli/modules/txn/coordinator/lock/lock_service.cc
+    cli/modules/txn/coordinator/wal/wal_service.cc
+    cli/modules/txn/coordinator/recovery/recovery_service.cc
+    cli/modules/txn/coordinator/write_conflict/write_conflict_service.cc
+    cli/modules/txn/coordinator/vacuum/vacuum_service.cc
+    cli/modules/txn/coordinator/stats/stats_impl.cc
+    cli/modules/sidecar/common/bptree_index.cc
+    cli/modules/sidecar/page/page_index_sidecar.cc
+    cli/modules/sidecar/eq/equality_index_sidecar.cc
+    cli/modules/sidecar/eq/eq_bloom.cc
+    cli/modules/sidecar/covering/covering_index_sidecar.cc
+    cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.cc
+    cli/modules/sidecar/common/sidecar_wal_lsn.cpp
 )
 add_library(newdb_demo_lib STATIC ${NEWDB_DEMO_LIB_SOURCES})
 set_target_properties(newdb_demo_lib PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(newdb_demo_lib PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/demo"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
     "${NEWDB_REPO_ROOT}"
 )
 target_link_libraries(newdb_demo_lib PUBLIC newdb_core)
@@ -140,7 +161,7 @@ if(NEWDB_BUILD_SHARED)
     target_link_libraries(newdb_shared PRIVATE newdb_demo_lib)
 endif()
 
-add_executable(newdb_demo demo/demo_main.cc)
+add_executable(newdb_demo cli/app/demo_main.cc)
 target_link_libraries(newdb_demo PRIVATE newdb_demo_lib)
 target_compile_definitions(newdb_demo PRIVATE "NEWDB_DISPLAY_PROJECT=\"newdb\"")
 newdb_force_include_waterfall_config(newdb_demo)
@@ -192,8 +213,8 @@ if(NEWDB_BUILD_GUI)
     add_executable(newdb_gui ${NEWDB_GUI_SOURCES})
     target_include_directories(newdb_gui PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/gui"
-        "${CMAKE_CURRENT_SOURCE_DIR}/demo"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
         "${NEWDB_REPO_ROOT}"
     )
     target_link_libraries(newdb_gui PRIVATE newdb_demo_lib ${NEWDB_GUI_QT})
@@ -225,6 +246,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_session.cpp
         tests/test_catalog.cpp
         tests/test_mvcc_visibility.cpp
+        tests/test_lsm_lite_engine.cpp
         tests/test_demo_logging_history.cpp
         tests/test_demo_txn_wal.cpp
         tests/test_demo_where.cpp
@@ -232,6 +254,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_demo_cli.cpp
         tests/test_demo_mdb_stop.cpp
         tests/test_demo_utils.cpp
+        tests/test_demo_lsm_lite.cpp
         tests/test_c_api.cpp
         tests/test_error_format.cpp
         tests/test_wal_codec.cpp
@@ -250,32 +273,52 @@ if(NEWDB_BUILD_TESTS)
         tests/test_eq_bloom.cpp
         tests/test_where_concurrency.cpp
         tests/test_ci_microbench.cpp
-        demo/sidecar_wal_lsn.cpp
-        demo/demo_runner.cc
-        demo/demo_diag.cc
-        demo/demo_export.cc
-        demo/demo_shell.cc
-        demo/demo_commands.cc
-        demo/import.cc
-        demo/table_view.cc
-        demo/bptree_index.cc
-        demo/page_index_sidecar.cc
-        demo/demo_cli.cpp
-        demo/condition.cc
-        demo/where.cc
-        demo/equality_index_sidecar.cc
-        demo/eq_bloom.cc
-        demo/covering_index_sidecar.cc
-        demo/visibility_checkpoint_sidecar.cc
-        demo/schema_catalog.cc
-        demo/utils.cc
-        demo/logging.cc
-        demo/txn_manager.cc
-        src/c_api.cpp
+        cli/modules/sidecar/common/sidecar_wal_lsn.cpp
+        cli/shell/bootstrap/demo_runner.cc
+        cli/shell/diag/demo_diag.cc
+        cli/modules/import_export/demo_export.cc
+        cli/shell/repl/demo_shell.cc
+        cli/shell/dispatch/dispatch.cc
+        cli/shell/dispatch/handlers/session/session_handler.cc
+        cli/shell/dispatch/handlers/txn/txn_handler.cc
+        cli/shell/dispatch/handlers/ddl/ddl_handler.cc
+        cli/shell/dispatch/handlers/dml/dml_handler.cc
+        cli/shell/dispatch/handlers/query/query_handler.cc
+        cli/shell/dispatch/handlers/io/io_handler.cc
+        cli/shell/dispatch/handlers/workspace/workspace_handler.cc
+        cli/shell/dispatch/impl/args/args_impl.cc
+        cli/shell/dispatch/impl/index/fast_index_impl.cc
+        cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc
+        cli/shell/dispatch/services/lsm/lsm_lite_service.cc
+        cli/modules/import_export/import.cc
+        cli/modules/view/table_view.cc
+        cli/modules/sidecar/common/bptree_index.cc
+        cli/modules/sidecar/page/page_index_sidecar.cc
+        cli/shell/bootstrap/demo_cli.cpp
+        cli/modules/where/parser/condition.cc
+        cli/modules/where/executor/match/match_impl.cc
+        cli/modules/where/executor/cache/cache_impl.cc
+        cli/modules/where/executor/policy/policy_service.cc
+        cli/modules/where/executor/plan/plan_impl.cc
+        cli/modules/sidecar/eq/equality_index_sidecar.cc
+        cli/modules/sidecar/eq/eq_bloom.cc
+        cli/modules/sidecar/covering/covering_index_sidecar.cc
+        cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.cc
+        cli/modules/catalog/schema_catalog.cc
+        cli/modules/util/utils.cc
+        cli/modules/logging/logging.cc
+        cli/modules/txn/coordinator/core/core_impl.cc
+        cli/modules/txn/coordinator/lock/lock_service.cc
+        cli/modules/txn/coordinator/wal/wal_service.cc
+        cli/modules/txn/coordinator/recovery/recovery_service.cc
+        cli/modules/txn/coordinator/write_conflict/write_conflict_service.cc
+        cli/modules/txn/coordinator/vacuum/vacuum_service.cc
+        cli/modules/txn/coordinator/stats/stats_impl.cc
+        engine/src/c_api/c_api.cpp
     )
     target_include_directories(newdb_tests PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/demo"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
         "${NEWDB_REPO_ROOT}"
     )
     target_link_libraries(newdb_tests PRIVATE newdb_core GTest::gtest_main)
@@ -284,3 +327,5 @@ if(NEWDB_BUILD_TESTS)
     include(GoogleTest)
     gtest_discover_tests(newdb_tests)
 endif()
+
+

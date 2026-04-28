@@ -1,9 +1,10 @@
 #include <gtest/gtest.h>
 
-#include "txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
 
 #include <filesystem>
 #include <chrono>
+#include <thread>
 
 namespace {
 std::filesystem::path unique_temp_subdir(const char* tag) {
@@ -122,6 +123,78 @@ TEST(TxnWriteConflict, RollbackReleasesWriteIntent) {
     EXPECT_TRUE(b2.tryReserveWriteKey("users", 42, &reason));
     ASSERT_TRUE(b2.commit().isOk());
 
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
+TEST(TxnWriteConflict, WaitPolicyCanAcquireAfterPeerCommit) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_conflict_wait_success");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+    TxnCoordinator b;
+    b.set_workspace_root(ws.string());
+
+    ASSERT_TRUE(a.begin("users").isOk());
+    ASSERT_TRUE(b.begin("orders").isOk());
+    ASSERT_TRUE(a.tryReserveWriteKey("users", 88, nullptr));
+
+    b.setWriteConflictPolicy(WriteConflictPolicy::Wait);
+    b.setWriteConflictWaitTimeoutMs(300);
+
+    std::thread releaser([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        ASSERT_TRUE(a.commit().isOk());
+    });
+
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string reason;
+    const bool ok = b.tryReserveWriteKey("users", 88, &reason);
+    const auto waited_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    releaser.join();
+
+    EXPECT_TRUE(ok);
+    EXPECT_GE(waited_ms, 40);
+    EXPECT_GE(b.writeConflictWaitCount(), 1u);
+    EXPECT_EQ(b.writeConflictWaitTimeoutCount(), 0u);
+
+    ASSERT_TRUE(b.commit().isOk());
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
+TEST(TxnWriteConflict, WaitPolicyTimeoutReturnsConflict) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_conflict_wait_timeout");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+    TxnCoordinator b;
+    b.set_workspace_root(ws.string());
+
+    ASSERT_TRUE(a.begin("users").isOk());
+    ASSERT_TRUE(b.begin("orders").isOk());
+    ASSERT_TRUE(a.tryReserveWriteKey("users", 99, nullptr));
+
+    b.setWriteConflictPolicy(WriteConflictPolicy::Wait);
+    b.setWriteConflictWaitTimeoutMs(60);
+
+    std::string reason;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = b.tryReserveWriteKey("users", 99, &reason);
+    const auto waited_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+
+    EXPECT_FALSE(ok);
+    EXPECT_NE(reason.find("timeout"), std::string::npos);
+    EXPECT_GE(waited_ms, 40);
+    EXPECT_GE(b.writeConflictCount(), 1u);
+    EXPECT_GE(b.writeConflictWaitTimeoutCount(), 1u);
+
+    ASSERT_TRUE(a.commit().isOk());
+    ASSERT_TRUE(b.commit().isOk());
     std::error_code ec;
     fs::remove_all(ws, ec);
 }

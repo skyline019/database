@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
+    "test:e2e:undo-redo": "powershell -ExecutionPolicy Bypass -File ./scripts/e2e_undo_redo_stack.ps1",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

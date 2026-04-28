@@ -1,5 +1,5 @@
-#include "demo_shell.h"
-#include "shell_state.h"
+#include "cli/shell/repl/demo_shell.h"
+#include "cli/shell/state/shell_state.h"
 #include "test_util.h"
 
 #include <newdb/page_io.h>

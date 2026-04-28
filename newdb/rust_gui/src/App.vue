@@ -1508,6 +1508,21 @@ function inferBackwardForCommand(command: string, opType: OperationType): string
   );
 }
 
+function sanitizeCommandDefaultFill(cmd: string | undefined): string | undefined {
+  const t = String(cmd ?? "").trim();
+  if (!t) return undefined;
+  const m = /^(UPDATE|INSERT)\(([\s\S]*)\)$/i.exec(t);
+  if (!m) return t;
+  const op = m[1]!.toUpperCase();
+  const inner = m[2] ?? "";
+  const parts = inner.split(",").map((x) => x.trim());
+  const fixed = parts.map((x) => (x.length ? x : "0"));
+  const rebuilt = `${op}(${fixed.join(",")})`;
+  // Safety: if something unexpected still produced empty args, keep original.
+  if (rebuilt.includes(",,")) return t;
+  return rebuilt;
+}
+
 async function inferBackwardPayloadByBackend(
   command: string,
   opType: OperationType
@@ -2135,12 +2150,13 @@ async function runCommand(
   const opType = opts?.opType ?? "generic";
   const backendInfer = await inferBackwardPayloadByBackend(text, opType);
   const backendBackward = backendInfer.backward;
-  const presetBackward =
+  const presetBackward = sanitizeCommandDefaultFill(
     opts?.backward ??
-    backendBackward ??
-    inferInverse(opType, text) ??
-    (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
-    (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined);
+      backendBackward ??
+      inferInverse(opType, text) ??
+      (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
+      (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined)
+  );
   busy.value = true;
   try {
     const exec = await invoke<CommandExecResult>("execute_command_ex", { command: text });
@@ -2417,7 +2433,11 @@ async function undoToIndex(targetIndex: number) {
     while (undoStack.value.length - 1 >= targetIndex) {
       const top = undoStack.value[undoStack.value.length - 1];
       if (!top) break;
-      const r = await invoke<StackExecResult>("stack_undo_unit", { unit: top });
+      const safeUnit = {
+        ...top,
+        ops: top.ops.map((op) => ({ ...op, backward: sanitizeCommandDefaultFill(op.backward) }))
+      };
+      const r = await invoke<StackExecResult>("stack_undo_unit", { unit: safeUnit });
       recordStackExecTrace(top, "undo", r);
       logLine(`[UNDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
       if (r.ok) {
@@ -2462,7 +2482,11 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
         await redoFromStack(topIndex, true);
         break;
       }
-      const r = await invoke<StackExecResult>("stack_redo_unit", { unit: top });
+      const safeUnit = {
+        ...top,
+        ops: top.ops.map((op) => ({ ...op, forward: sanitizeCommandDefaultFill(op.forward) }))
+      };
+      const r = await invoke<StackExecResult>("stack_redo_unit", { unit: safeUnit });
       recordStackExecTrace(top, "redo", r);
       logLine(`[REDO][${r.repairAction}] ${top.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
       if (r.ok) {
@@ -2494,7 +2518,11 @@ async function undo() {
   if (!okConfirm) return;
   busy.value = true;
   try {
-    const r = await invoke<StackExecResult>("stack_undo_unit", { unit: item });
+    const safeUnit = {
+      ...item,
+      ops: item.ops.map((op) => ({ ...op, backward: sanitizeCommandDefaultFill(op.backward) }))
+    };
+    const r = await invoke<StackExecResult>("stack_undo_unit", { unit: safeUnit });
     recordStackExecTrace(item, "undo", r);
     logLine(`[UNDO][${r.repairAction}] ${item.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
     if (r.ok) {
@@ -2525,7 +2553,11 @@ async function redo() {
   if (!okConfirm) return;
   busy.value = true;
   try {
-    const r = await invoke<StackExecResult>("stack_redo_unit", { unit: last });
+    const safeUnit = {
+      ...last,
+      ops: last.ops.map((op) => ({ ...op, forward: sanitizeCommandDefaultFill(op.forward) }))
+    };
+    const r = await invoke<StackExecResult>("stack_redo_unit", { unit: safeUnit });
     recordStackExecTrace(last, "redo", r);
     logLine(`[REDO][${r.repairAction}] ${last.savepointName} applied=${r.appliedOps} ok=${r.ok}`);
     if (r.ok) {

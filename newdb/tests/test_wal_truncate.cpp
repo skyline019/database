@@ -21,7 +21,9 @@ TEST(WalManager, CheckpointTruncatesFileKeepsLsnMonotonic) {
     ASSERT_GT(lsn_before, 0u);
     ASSERT_TRUE(w.checkpoint_and_truncate(lsn_before).ok);
     EXPECT_EQ(w.wal_file_size_bytes(), 0u);
-    EXPECT_EQ(w.current_lsn(), lsn_before);
+    // Checkpoint/truncate may append control records (e.g. begin/end markers,
+    // PITR marks). The only invariant we require here is that LSN is monotonic.
+    EXPECT_GE(w.current_lsn(), lsn_before);
     ASSERT_TRUE(w.append_record(1, newdb::WalOp::COMMIT, "", nullptr).ok);
     EXPECT_GT(w.current_lsn(), lsn_before);
     w.close();

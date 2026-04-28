@@ -2065,6 +2065,53 @@ fn parse_find_row_map(output: &str, id: &str) -> Option<HashMap<String, String>>
     }
 }
 
+fn find_row_map_by_id_via_query_page(
+    state: State<'_, AppState>,
+    id: &str,
+    max_pages: usize,
+    page_size: usize,
+) -> Option<HashMap<String, String>> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    let mut page_no = 1usize;
+    for _ in 0..max_pages {
+        let page = query_page(state.clone(), page_no, page_size, "id".to_string(), false).ok()?;
+        if page.rows.is_empty() {
+            break;
+        }
+        let id_idx = page
+            .headers
+            .iter()
+            .position(|h| h.trim().eq_ignore_ascii_case("id"))?;
+        for row in &page.rows {
+            if row.len() <= id_idx {
+                continue;
+            }
+            if row[id_idx].trim() != id {
+                continue;
+            }
+            let mut kv = HashMap::new();
+            for (i, h) in page.headers.iter().enumerate() {
+                let key = h.trim();
+                if key.is_empty() || key == "#" {
+                    continue;
+                }
+                let val = row.get(i).cloned().unwrap_or_default();
+                kv.insert(key.to_string(), val);
+            }
+            if kv.get("id").map(|x| x.trim() == id).unwrap_or(false) {
+                return Some(kv);
+            }
+        }
+        if page.rows.len() < page_size {
+            break;
+        }
+        page_no += 1;
+    }
+    None
+}
+
 fn run_compound_command<F>(
     cmd_text: &str,
     run: &mut F,
@@ -2365,8 +2412,10 @@ fn infer_inverse_backend(state: State<'_, AppState>, command: &str, op_type: Opt
         if id.is_empty() || attr.is_empty() {
             return None;
         }
-        let find_out = execute_command(state, format!("FIND({id})")).ok()?;
-        let row_map = parse_find_row_map(&find_out, id)?;
+        let row_map = find_row_map_by_id_via_query_page(state.clone(), id, 64, 200).or_else(|| {
+            let find_out = execute_command(state.clone(), format!("FIND({id})")).ok()?;
+            parse_find_row_map(&find_out, id)
+        })?;
         let old_val = row_map.get(attr).cloned().unwrap_or_default();
         return Some((
             format!("SETATTR({id},{attr},{old_val})"),
@@ -2392,8 +2441,10 @@ fn infer_inverse_backend(state: State<'_, AppState>, command: &str, op_type: Opt
     }
     let show_attr_out = execute_command(state.clone(), "SHOW ATTR".to_string()).ok()?;
     let attr_order = parse_show_attr_order(&show_attr_out);
-    let find_out = execute_command(state, format!("FIND({id})")).ok()?;
-    let row_map = parse_find_row_map(&find_out, &id)?;
+    let row_map = find_row_map_by_id_via_query_page(state.clone(), &id, 64, 200).or_else(|| {
+        let find_out = execute_command(state.clone(), format!("FIND({id})")).ok()?;
+        parse_find_row_map(&find_out, &id)
+    })?;
 
     let mut ordered = Vec::new();
     ordered.push(id.clone());

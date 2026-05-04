@@ -2,6 +2,8 @@
 
 本文档描述 [skyline019/database](https://github.com/skyline019/database) 仓库内**各顶层组件、newdb 子系统、外部进程与观测数据**之间的依赖与数据流向，便于 onboarding、排障与扩展设计时对照。
 
+**CLI 内模块/子模块的先后次序、责任链与写/WHERE 微观路径**见 [§11](#11-模块与子模块间流动详解)。
+
 > 模块边界与 include 规则见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；构建与测试命令见 [BUILD.md](../dev/BUILD.md)。
 
 ---
@@ -291,12 +293,245 @@ flowchart TB
 
 ---
 
-## 11. 维护说明
+## 11. 模块与子模块间流动详解
+
+本节在 §3–§10 的粗粒度图之上，按**真实调用顺序**与**数据载体**说明 `cli` 内各 handler、`modules/*`、`shell/state` 与 `engine` 之间如何衔接。实现以 `process_command_line`（`cli/shell/dispatch/router/dispatch.cc`）为准。
+
+### 11.1 命令入口：从 REPL 到两阶段分发
+
+```mermaid
+flowchart TB
+  subgraph entry["进程入口"]
+    APP["cli/app/demo_main"]
+    BOOT["shell/bootstrap/demo_runner"]
+    REPL["shell/repl/demo_shell"]
+  end
+  subgraph dispatch["dispatch/router"]
+    PCL["process_command_line"]
+    P1["Phase-1：无需已加载 HeapTable"]
+    P2["Phase-2：需 get_cached_table → HeapTable&"]
+  end
+  subgraph state["shell/state"]
+    SS["ShellState：session、WHERE 上下文、表缓存 guard"]
+  end
+  subgraph eng["engine（经 public API）"]
+    SESS["Session / HeapTable"]
+  end
+
+  APP --> BOOT
+  BOOT --> REPL
+  REPL --> PCL
+  PCL --> SS
+  PCL -->|会话级命令先处理| P1
+  PCL --> P2
+  P2 --> SS
+  SS --> SESS
+```
+
+**控制流要点**
+
+1. `logging_bind_shell` 与 `append_session_log_line`：把当前行绑定到日志后端并写入会话日志文件（与业务模块正交）。
+2. **会话子通道**：`handle_session_commands` 若命中则直接返回，不进入 phase-1/2。
+3. **Phase-1 短路**：若 `shell_line_targets_phase2_only(line)` 为真（前缀如 `WHERE`/`PAGE`/`UPDATE`/`EXPORT` 等），**整段 phase-1 跳过**，直接进入 phase-2，避免无表时对 txn/DDL 链的空转。
+4. **Phase-2 前置条件**：`get_cached_table` 失败则 phase-2 静默 no-op（保持与历史 shell 行为一致：无表时不报错直接返回）。
+
+### 11.2 Phase-1：handler 链顺序与模块落点
+
+下列顺序为源码中的**固定数组顺序**：前者返回 `true` 则后续不再执行。
+
+```mermaid
+flowchart LR
+  H1["txn_handler\nBEGIN/COMMIT/…"]
+  H2["workspace_handler\n数据目录/工作区"]
+  H3["io_handler\nIMPORTDIR 等"]
+  H4["ddl_handler\n目录/USE"]
+  H5["ddl_handler\nCREATE/ALTER 类"]
+  H6["ddl_handler\nRENAME 等"]
+  H7["ddl_handler\nSHOW SCHEMA"]
+  H8["dml_handler\nINSERT"]
+
+  H1 --> H2 --> H3 --> H4 --> H5 --> H6 --> H7 --> H8
+```
+
+| 顺序 | Handler 入口（概念） | 常触达的 `cli/modules` / 服务 |
+|------|----------------------|-------------------------------|
+| 1 | `handle_txn_commands` | `txn/coordinator/*`（锁、WAL、恢复、vacuum、写冲突、**stats_impl**） |
+| 2 | `handle_workspace_admin_commands` | `common/*`、工作区路径解析 |
+| 3 | `handle_import_defattr_commands` | `import_export`、磁盘 attr |
+| 4–6 | DDL / catalog 系列 | `catalog`、模式文件、引擎表创建 |
+| 7 | `handle_schema_show_commands` | 目录与表元数据展示 |
+| 8 | `handle_dml_insert_command` | `txn` + 堆写入路径、可能触发 WAL |
+
+**典型载体**：`ShellState&`、`current_table` / `data_path` 字符串、日志路径、`eff_data`（effective 后的数据根）。
+
+### 11.3 Phase-2：handler 链顺序与查询落点
+
+```mermaid
+flowchart LR
+  Q0["schema_key"]
+  Q1["WHERE/COUNT/WHEREP"]
+  Q2["UPDATE/DELETE"]
+  Q3["SETATTR/RENATTR/DELATTR"]
+  Q4["FIND/SUM/AVG/MIN/MAX"]
+  Q5["PAGE"]
+  Q6["EXPORT"]
+
+  Q0 --> Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6
+```
+
+| 顺序 | Handler | 主要向下调用 |
+|------|---------|----------------|
+| 1 | `handle_schema_key_command` | 目录 / 主键元数据、引擎表句柄 |
+| 2 | `handle_query_where_count_commands` | **`where/*`**（parser → executor → plan/policy/cache）、**sidecar**、`table_stats` |
+| 3 | `handle_dml_update_delete_commands` | `txn`、行级写、WAL、写冲突检测 |
+| 4 | `handle_dml_attr_commands` | 属性列、堆行更新 |
+| 5 | `handle_query_*_commands`（FIND/SUM…） | `where` 或表扫描聚合 |
+| 6 | `handle_query_page_command` | 页级扫描 + **page_index_sidecar** 等 |
+| 7 | `handle_export_command` | `import_export`、流式写出 |
+
+**典型载体**：`HeapTable& tbl`、WHERE 文本 → 解析树 → 候选行 id / 聚合标量；`SHOW PLAN` / `EXPLAIN WHERE` 为同一路径上的**观测侧输出**（计划 JSON + stale 标记）。
+
+### 11.4 写路径：从 DML handler 到磁盘
+
+```mermaid
+flowchart TB
+  subgraph handlers["handlers/dml"]
+    DML["UPDATE/DELETE/INSERT 处理"]
+  end
+  subgraph txn["modules/txn/coordinator"]
+    TM["txn_manager / core_impl"]
+    LS["lock_service"]
+    WS["wal_service"]
+    WCF["write_conflict_service"]
+    ST["stats_impl → TxnRuntimeStats"]
+    VS["vacuum_service"]
+  end
+  subgraph engine["engine"]
+    WM["WalManager"]
+    HT["HeapTable + page_io"]
+  end
+
+  DML --> TM
+  TM --> LS
+  TM --> WCF
+  TM --> WS
+  WS --> WM
+  TM --> HT
+  TM --> ST
+  VS -.异步或显式命令.-> HT
+```
+
+**数据流摘要**：命令参数 → 事务状态机 →（必要时）**锁键** → **WAL 记录**追加 → 堆页/sidecar 就地更新 → 计数器进入 **runtime stats**；冲突时 `write_conflict_service` 在提交前短路。
+
+### 11.5 WHERE 执行子图：parser → plan → 策略与缓存
+
+```mermaid
+flowchart TB
+  subgraph where_mod["modules/where"]
+    PAR["parser → WhereCond"]
+    PLN["plan_impl"]
+    POL["policy_service"]
+    CAC["cache_impl"]
+    STA["table_stats"]
+  end
+  subgraph side["modules/sidecar"]
+    EQ["equality_index_sidecar"]
+    CV["covering_index_sidecar"]
+    PG["page_index_sidecar"]
+    VC["visibility_checkpoint_sidecar"]
+    IC["index_catalog"]
+  end
+  subgraph heap["engine HeapTable"]
+    SCAN["行/页迭代 + MVCC"]
+  end
+
+  PAR --> PLN
+  PLN --> STA
+  PLN --> POL
+  PLN --> CAC
+  PLN --> EQ
+  PLN --> CV
+  PLN --> PG
+  PLN --> VC
+  EQ --> IC
+  CV --> IC
+  PLN --> SCAN
+  CAC -.命中则缩短扫描.-> SCAN
+```
+
+**流动说明**：`plan_impl` 汇聚「统计是否过期、缓存是否命中、哪类 sidecar 可剪枝」；**不可剪枝或 miss** 时仍回落到 `HeapTable` 全表/分页扫描。`*.tablestats` 为 **executor** 与磁盘之间的可选持久化层（见 §5）。
+
+### 11.6 跨 handler 服务：`dispatch/services`
+
+```mermaid
+flowchart LR
+  subgraph svc["dispatch/services"]
+    INV["sidecar_invalidate_service 等"]
+  end
+  subgraph writers["DDL/DML/LSM 写路径"]
+    W["表结构或数据变更"]
+  end
+  subgraph sc["sidecar 文件"]
+    F["*.eqbloom / covering / page idx …"]
+  end
+
+  W -->|"结构或数据使索引失效"| INV
+  INV -->|"删除或标记过时"| F
+```
+
+**意图**：避免每个 handler 直接散落文件删除逻辑；**失效事件**（表名、索引类）从写路径注入服务，读路径在 `plan_impl` 侧视为「可能 miss」。
+
+### 11.7 观测子系统：从协调器到 GUI / CI
+
+```mermaid
+flowchart LR
+  ST2["stats_impl 内存字段"]
+  SH["shell：SHOW TUNING JSON"]
+  RP["tools：newdb_runtime_report"]
+  PY2["scripts/validate/*.py"]
+  GU["rust_gui Runtime Dashboard"]
+
+  ST2 --> SH
+  ST2 --> RP
+  RP --> PY2
+  SH -.用户复制或导出.-> GU
+  PY2 --> GU
+```
+
+**耦合性质**：`stats_impl` 与 **GUI 无直接链接**；流动靠 **JSON 文本 / 文件 / 子进程 stdout**，与 §7 一致。
+
+### 11.8 引擎内部（只标与 CLI 接壤的边界）
+
+CLI **不得** include `engine/src/**`；合法流动为：
+
+| 方向 | 载体 | 说明 |
+|------|------|------|
+| CLI → Engine | `newdb::HeapTable*`、`Session` API、C API 封装 | 经 `include/newdb/*.h` |
+| Engine → CLI | 行缓冲、错误码、LSN 可见性 | 由 session/table_access 返回 |
+| Engine ↔ 磁盘 | WAL codec、`wal_segment_scanner`（恢复） | 对 CLI 透明，仅通过打开表 / recovery 命令暴露效果 |
+
+### 11.9 子模块→子模块矩阵（速查）
+
+| 源 | 经载体 | 典型目标 | 语义 |
+|----|--------|----------|------|
+| `repl` | 原始行文本 | `dispatch` | 一行一调度 |
+| `dispatch` | `ShellState` | `handlers/*` | 两阶段、责任链 |
+| `query_handler` | WHERE 字符串 | `where/parser` | 语法树 |
+| `where/plan_impl` | 计划上下文 | `policy` / `cache` / `sidecar` | 剪枝与限流 |
+| `where/executor` | 行 id / 列缓冲 | `HeapTable` | 取列、判条件 |
+| `dml_handler` | 键与列值 | `txn` → `wal_service` | 持久化顺序 |
+| `txn` | LSN、锁集合 | `engine` WAL + heap | 一致性与隔离 |
+| `ddl` | schema diff | `catalog` + `sidecar_invalidate` | 元数据与索引一致 |
+| `stats_impl` | 计数器 | `SHOW TUNING` / `runtime_report` | 可观测性出口 |
+
+---
+
+## 12. 维护说明
 
 - 新增 CLI 子模块时：在 **handlers** 注册命令，避免从 `engine/src` 私有头拉依赖；遵守 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)。
-- 新增磁盘产物时：在本文件 **§5** 与 **§10** 补充条目，并在 `STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md`（若适用）对齐恢复预算。
+- 新增磁盘产物时：在本文件 **§5**、**§10** 与 **§11** 补充条目，并在 `STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md`（若适用）对齐恢复预算。
 - Mermaid 在 GitHub/GitLab 预览良好；本地若需 PNG 可导出后附在 `docs/handout/` 一类目录（按需）。
 
 ---
 
-*文档版本：与仓库 `main` 上 newdb 二阶段模块划分一致；若目录重构，请同步更新 §2 表格与图表中的节点名。*
+*文档版本：与仓库 `main` 上 newdb 二阶段模块划分一致；若目录重构，请同步更新 §2 表格、§11 分发链与图表中的节点名。*

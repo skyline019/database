@@ -2,6 +2,11 @@
 
 这里用于沉淀 `newdb/engine` + `newdb/cli` 重构后的源码解析文档，采用 **LaTeX** 编写，并按“每次解析一个主题/模块建一个文件夹”的方式组织。
 
+与 Markdown 文档的对应关系：
+
+- 模块边界与目录约定：`../docs/architecture/MODULE_BOUNDARIES.md`
+- **全仓库数据流总览**（含 `waterfall/`、`rust_gui/`、脚本与 CI）：`../docs/architecture/PROJECT_DATAFLOW_WHOLE.md`
+
 ---
 
 ## 目录结构约定

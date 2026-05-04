@@ -29,13 +29,16 @@
 
 \subsubsection{C. 资源与交付层（脚本）}
 \begin{itemize}
-  \item \texttt{sync\_runtime\_binaries.ps1} 统一同步 demo/perf/runtime\_report/DLL 与脚本、results 种子文件。
+  \item \texttt{sync\_runtime\_binaries.ps1} 统一同步 \texttt{newdb\_demo}/\texttt{newdb\_perf}/\texttt{newdb\_runtime\_report}/\texttt{libnewdb.dll}/\texttt{libgtest\_capi.dll} 与脚本、results 种子文件；构建产物支持在构建根、\texttt{bin/}、以及 MSVC 多配置子目录（\texttt{Release/} 等）中自动解析。
+  \item 若 GoogleTest 以 DLL 形态存在，脚本会优先从 \texttt{libgtest\_capi.dll} 同目录拷贝同伴 \texttt{gtest}/\texttt{gmock} DLL，便于打包自洽。
   \item GUI 在离线打包后可直接读取 trend/dashboard 所需资源，减少“本地有文件但 GUI 读不到”的环境差异。
 \end{itemize}
 
 \subsection{近期关键变更归档（本轮）}
 
 \begin{itemize}
+  \item \textbf{顶栏菜单分组}：下拉项使用不可点的分组标题（section）归类为“文件/编辑/表/数据/事务/工具与观测”，集中放置 \texttt{SHOW TUNING JSON}、\texttt{SHOW STORAGE}、\texttt{SHOW PLAN}/\texttt{EXPLAIN WHERE}、\texttt{PAGE}（含 keyset）等与会话调优相关的入口，减少功能散装。
+  \item \textbf{运行时诊断键展示}：\fpath{src/commandPolicy.ts} 中 \texttt{RUNTIME\_TUNING\_DIAGNOSTIC\_GROUPS} 与 \fpath{scripts/validate/RUNTIME_STATS_SCHEMA.md} 对齐，导出诊断包前可对照 \texttt{table\_storage\_health\_*} 等字段。
   \item \textbf{日志可观测性}：新增会话分隔头（\texttt{[SESSION] ...}）并设为专属高亮类型。
   \item \textbf{回看效率}：回看窗口支持“命中统计 + 上/下条跳转 + 自动定位命中行”。
   \item \textbf{布局能力}：侧栏支持显示/隐藏、宽度拖拽并持久化（\texttt{sidebarWidth}）。

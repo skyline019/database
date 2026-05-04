@@ -4,7 +4,7 @@
 
 \subsection{端到端处理流程图}
 
-图~\ref{fig:newdb-end-to-end-dataflow} 概括\textbf{整个项目}从交互入口到引擎存储的主数据流（细部分支可在后续章节展开）。依赖方向与仓库约定一致：\fpath{cli/app} $\rightarrow$ \fpath{cli/shell} $\rightarrow$ \fpath{cli/modules} $\rightarrow$ \fpath{engine/include/newdb}（见 \fpath{docs/architecture/MODULE_BOUNDARIES.md}、\fpath{docs/architecture/NEWDB_DESIGN_POINT_TO_FILE_MAP.md}）。
+图~\ref{fig:newdb-end-to-end-dataflow} 概括\textbf{整个项目}从交互入口到引擎存储的主数据流（细部分支可在后续章节展开）。依赖方向与仓库约定一致：\fpath{cli/app} $\rightarrow$ \fpath{cli/shell} $\rightarrow$ \fpath{cli/modules} $\rightarrow$ \fpath{engine/include/newdb}（见 \fpath{docs/architecture/MODULE_BOUNDARIES.md}、\fpath{docs/architecture/NEWDB_DESIGN_POINT_TO_FILE_MAP.md}）。\textbf{跨模块数据流总览}（含 \fpath{waterfall/}、\fpath{rust_gui/}、脚本与 CI 观测链）见 \fpath{docs/architecture/PROJECT_DATAFLOW_WHOLE.md}。
 
 \begin{figure}[htbp]
 \centering
@@ -19,7 +19,7 @@
 \node[nd, below=7mm of n2] (n3) {\textbf{路由：\texttt{process\_command\_line}}\quad Phase\,1：无需已装载 \texttt{HeapTable} 的命令先尝试（\fpath{cli/shell/dispatch/router/dispatch.cc}）；Phase\,2：需表时经 \texttt{get\_cached\_table}/\texttt{Session::lock\_heap}。可与 \fpath{dispatch_routing.cc} 的 phase-2 前缀判定组合，跳过整条 Phase\,1 handler 链。};
 \node[nd, below=7mm of n3] (n4) {\textbf{handlers（业务编排）}\quad DDL、事务与 workspace、DML、WHERE/PAGE/FIND 等查询、导入导出（\fpath{cli/shell/dispatch/handlers/}）。};
 \node[nd, below=7mm of n4] (n5) {\textbf{cli modules}\quad 事务侧 WAL、文件锁、vacuum、recovery（\fpath{cli/modules/txn/coordinator/}）；\texttt{where} 解析与执行；sidecar（覆盖索引、可见性检查点等）；\texttt{lsm\_lite\_service} 等。};
-\node[nd, below=7mm of n5] (n6) {\textbf{引擎}\quad \texttt{Session::ensure\_loaded}/\texttt{reload}；\texttt{HeapTable} 与页级 I/O（\fpath{engine/src/heap/}、\fpath{engine/src/io/page/}）；\texttt{WalManager} 编解码；MVCC 快照与读路径可见性过滤。};
+\node[nd, below=7mm of n5] (n6) {\textbf{引擎}\quad \texttt{Session::ensure\_loaded}/\texttt{reload}；\texttt{HeapTable} 与页级 I/O（\fpath{engine/src/heap/}、\fpath{engine/src/io/page/}）；可选 \texttt{page\_cache}/\texttt{memory\_budget}（\fpath{engine/src/cache/}）；\texttt{WalManager} 编解码与恢复辅助（\fpath{engine/src/wal/recovery/}）；MVCC 快照与读路径可见性过滤。};
 \draw[arr] (n1.south) -- (n2.north);
 \draw[arr] (n2.south) -- (n3.north);
 \draw[arr] (n3.south) -- (n4.north);
@@ -30,7 +30,7 @@
 \label{fig:newdb-end-to-end-dataflow}
 \end{figure}
 
-\textbf{读路径}多在 Phase\,2 $\rightarrow$ \texttt{where} + sidecar $\rightarrow$ 惰性解码或索引访问 \texttt{HeapTable}。\textbf{写路径}经 \texttt{TxnCoordinator} $\rightarrow$ WAL 追加 $\rightarrow$ 堆文件持久化，并触发 sidecar/缓存失效策略。
+\textbf{读路径}多在 Phase\,2 $\rightarrow$ \texttt{where} + sidecar（含可选 \texttt{table\_stats} 提示与 \texttt{SHOW PLAN} JSON）$\rightarrow$ 惰性解码或索引访问 \texttt{HeapTable}。\textbf{写路径}经 \texttt{TxnCoordinator} $\rightarrow$ WAL 追加 $\rightarrow$ 堆文件持久化，并触发 sidecar/缓存失效策略；\texttt{SHOW TUNING JSON} 等路径导出运行时计数（含 \texttt{table\_storage\_health\_*}）。
 
 \subsection{核心对象关系}
 
@@ -463,9 +463,13 @@ struct Status {
 相较早期“单路径回放”形态，当前工程在事务与恢复面上已补齐若干关键能力：
 
 \begin{itemize}
-  \item \textbf{恢复闭环}：WAL 从单一回放扩展为 analysis/redo/undo 三阶段恢复；
+  \item \textbf{恢复闭环}：WAL 从单一回放扩展为 analysis/redo/undo 三阶段恢复；实现上辅以段扫描与恢复支持单元（\fpath{wal\_segment\_scanner.*}、\fpath{wal\_manager\_recover\_support.cpp}），并与 \texttt{WalRecoveryStats} 可观测字段对齐。
   \item \textbf{任意回退}：命令层支持 savepoint 粒度回退/重做与事务级回滚；
   \item \textbf{时间点恢复}：支持按 LSN/时间戳约束回放终点（PITR）；
-  \item \textbf{GUI 运维化}：Rust GUI 提供事务栈、回看、崩溃矩阵与趋势看板入口，形成“执行-验证-复盘”链路。
+  \item \textbf{读路径预算}：引擎侧可选页缓存与内存预算（环境变量开关），降低重复解码与 sidecar 加载成本。
+  \item \textbf{查询与存储可观测性}：\texttt{where} 路径集成表级统计（\texttt{*.tablestats}、\texttt{SHOW PLAN} JSON）；\texttt{table\_storage\_health} 与 \texttt{SHOW TUNING JSON} 中的存储健康字段形成运维闭环。
+  \item \textbf{CLI 分发结构}：\fpath{cli/shell/dispatch/} 拆分为 \texttt{router/}（入口与 phase-2 前缀快路径）、\texttt{registry/}（命令表与快照）、\texttt{handlers/}、\texttt{support/}、\texttt{services/}、\texttt{shared/}，降低单文件膨胀风险。
+  \item \textbf{GUI 运维化}：Rust GUI 提供事务栈、回看、崩溃矩阵与趋势看板入口，形成“执行-验证-复盘”链路；顶栏菜单按功能分组，并暴露 \texttt{SHOW TUNING JSON}、\texttt{SHOW STORAGE}、\texttt{SHOW PLAN}/\texttt{EXPLAIN WHERE} 等与会话调优相关的命令入口。
+  \item \textbf{文档索引}：\fpath{newdb/docs/} 按主题分子目录（\texttt{api/}、\texttt{architecture/}、\texttt{dev/}、\texttt{ci/}、\texttt{txn/} 等），便于与 intro 交叉阅读。
 \end{itemize}
 

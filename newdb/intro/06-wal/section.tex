@@ -1,6 +1,6 @@
 \section{WAL：记录格式、写入线程、分段与恢复}
 
-对应实现：\fpath{newdb/engine/src/wal/writer/wal_manager.cpp}、\fpath{newdb/engine/src/wal/codec/wal_codec.cpp}
+对应实现：\fpath{newdb/engine/src/wal/writer/wal_manager.cpp}、\fpath{newdb/engine/src/wal/codec/wal_codec.cpp}；恢复与段遍历辅助见 \fpath{newdb/engine/src/wal/recovery/wal_manager_recover_support.cpp}、\fpath{newdb/engine/src/wal/recovery/wal_segment_scanner.cpp}（公共声明 \fpath{newdb/engine/include/newdb/wal/wal_segment_scanner.h}）。
 
 \subsection{关键代码段：append\_record 如何分配 LSN 并计算校验}
 

@@ -1,10 +1,10 @@
 # Fdb version 4
-["xdvipdfmx"] 1777832623.57953 "out/newdb-intro.xdv" "out/newdb-intro.pdf" "out/newdb-intro" 1777832624.09047 0
-  "out/newdb-intro.xdv" 1777832623.22348 1013520 68fd6a35c88efebdb5bc172a0e024015 "xelatex"
+["xdvipdfmx"] 1777912563.29092 "out/newdb-intro.xdv" "out/newdb-intro.pdf" "out/newdb-intro" 1777912563.79504 0
+  "out/newdb-intro.xdv" 1777912562.72322 1052324 6e6b1efc3a8c9465a6f4db3b16dfc744 "xelatex"
   (generated)
   "out/newdb-intro.pdf"
   (rewritten before read)
-["xelatex"] 1777832614.08585 "main.tex" "out/newdb-intro.xdv" "newdb-intro" 1777832624.03452 0
+["xelatex"] 1777912556.62443 "main.tex" "out/newdb-intro.xdv" "newdb-intro" 1777912563.7441 0
   "/etc/texmf/web2c/texmf.cnf" 1776576192.66831 475 c0e671620eb5563b2130f56340a5fde8 ""
   "/usr/share/texlive/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
   "/usr/share/texlive/texmf-dist/fonts/tfm/adobe/zapfding/pzdr.tfm" 1136768653 1528 f853c4d1b4e0550255e02831fdc8496f ""
@@ -193,23 +193,23 @@
   "/usr/share/texmf/tex/latex/CJK/CJKfntef.sty" 1634405102 12851 25a9b5cc006609feb5c9a20ce24a5392 ""
   "/usr/share/texmf/web2c/texmf.cnf" 1707919699 40399 f2c302f7d2af602abb742093540a5834 ""
   "/var/lib/texmf/web2c/xetex/xelatex.fmt" 1776576217 9159802 37479568241a8463db8d630f82f12773 ""
-  "01-overview/section.tex" 1777832540.72155 23495 46ac1b19f4c76f5f4f81fd02a373721d ""
+  "01-overview/section.tex" 1777912322.51592 25248 4546a1d1927d26b9702e37475d4de9fe ""
   "02-heap-page/section.tex" 1777381658.54159 4757 64c306475a71ef432e141dc7f278219d ""
   "03-heap-io/section.tex" 1777381673.02924 6024 07fb18c4944ea9098ee964733603ea3f ""
   "04-heap-table/section.tex" 1777381686.14583 4921 d700e26e1c40f1f9a805e8f29e009192 ""
   "05-mvcc/section.tex" 1777381706.23078 4154 7fdbabd5341d7def5a438f295e337f6f ""
-  "06-wal/section.tex" 1777382866.07911 7821 de7c50a4db909995ee3de37e650a71b5 ""
+  "06-wal/section.tex" 1777912336.08138 8067 d98eb33171204059f8bee686c4ff219d ""
   "07-session-capi/section.tex" 1777828612.20473 4489 2f507759b3ea7902fc996d24cdb1d1ed ""
   "08-compare-leveldb-innodb/section.tex" 1777384537.20872 15063 840b3add4d85e08a02e037027b8ff81c ""
-  "09-demo-mid/section.tex" 1777831829.89107 7061 2396b33f313745b432cf38463f0eb921 ""
-  "10-include-mid/section.tex" 1777382164.18922 3167 9b00709a48a73998627978c5e45dc644 ""
-  "11-tests-mid/section.tex" 1777831831.30774 4132 e61910a720a8a883a44fce0b4c30942d ""
-  "12-tools-mid/section.tex" 1777381911.35078 2895 b091d27b89e2b88391a4fde9d3a9b613 ""
-  "13-rust-gui-mid/section.tex" 1777382968.28265 5747 cb0322d82270a2d83b72f4426dfc884f ""
+  "09-demo-mid/section.tex" 1777912404.90097 7840 5c9246313937c46c3473eb3010048508 ""
+  "10-include-mid/section.tex" 1777912359.35234 3377 10a72984c09680b87c82d38ec2db54b8 ""
+  "11-tests-mid/section.tex" 1777912363.33626 4703 2426f8108ec0691e96ed246fba079b5e ""
+  "12-tools-mid/section.tex" 1777912367.57013 3092 c125e03bde81a8c19500190c672e07a2 ""
+  "13-rust-gui-mid/section.tex" 1777912409.62709 6749 4194f2b341cbc7b71e6254bf1a6bd011 ""
   "main.tex" 1777832531.98141 1576 d6a3919138374e4a2c1e536242077680 ""
-  "out/newdb-intro.aux" 1777832623.15787 29792 79d06324be2d6be44def0cd3c3745f0e "xelatex"
-  "out/newdb-intro.out" 1777832623.189 30154 3a43818494a3347c1cc93dfeedf72981 "xelatex"
-  "out/newdb-intro.toc" 1777832623.21929 16943 71a5088d6c2aa83d3e02dbe3dff8c97c "xelatex"
+  "out/newdb-intro.aux" 1777912562.66536 29792 928997a03407fd1381b75e91d0d5fd76 "xelatex"
+  "out/newdb-intro.out" 1777912562.69067 30154 3a43818494a3347c1cc93dfeedf72981 "xelatex"
+  "out/newdb-intro.toc" 1777912562.72322 16943 1979fa4b457dcbfa514813532e096869 "xelatex"
   (generated)
   "out/newdb-intro.aux"
   "out/newdb-intro.log"

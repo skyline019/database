@@ -6,9 +6,9 @@
 
 \begin{itemize}
   \item \textbf{入口}：\fpath{cli/app/demo_main.cc} 解析 CLI 并决定执行模式；
-  \item \textbf{命令分发}：\fpath{cli/shell/dispatch/router/dispatch.cc}、\fpath{cli/shell/dispatch/router/dispatch_routing.cc}（phase-2 前缀快路径）与 \fpath{cli/shell/dispatch/handlers/*} 负责交互命令解析与路由；
-  \item \textbf{查询中间层}：\fpath{cli/modules/where/executor/*} 管理条件解析、候选集构建、策略限流与查询缓存；
-  \item \textbf{事务协调}：\fpath{cli/modules/txn/coordinator/*} 封装 Txn + WAL + 文件锁 + vacuum 触发；
+  \item \textbf{命令分发}：\fpath{cli/shell/dispatch/router/dispatch.cc}、\fpath{cli/shell/dispatch/router/dispatch_routing.cc}（phase-2 前缀快路径）、\fpath{cli/shell/dispatch/registry/*}（命令表与快照源）与 \fpath{cli/shell/dispatch/handlers/*} 负责交互命令解析与路由；解析/索引胶水在 \fpath{cli/shell/dispatch/support/}，跨 handler 内部声明在 \fpath{cli/shell/dispatch/shared/}。
+  \item \textbf{查询中间层}：\fpath{cli/modules/where/executor/*} 管理条件解析、候选集构建、策略限流、查询缓存与 \fpath{table_stats}（全表扫描构建统计；\texttt{*.tablestats} 文件持久化由环境变量控制）；\texttt{SHOW PLAN}/\texttt{EXPLAIN WHERE} 输出计划 JSON 或文本摘要。
+  \item \textbf{事务协调}：\fpath{cli/modules/txn/coordinator/*} 封装 Txn + WAL + 文件锁 + vacuum 触发；\fpath{stats_impl.cc} 聚合 \texttt{TxnRuntimeStats}（含 \texttt{table\_storage\_health\_*}），供 \texttt{SHOW TUNING}/\texttt{SHOW TUNING JSON} 与 GUI 观测面板消费。
   \item \textbf{运行编排}：\fpath{cli/shell/bootstrap/demo_runner.cc} 对接 batch/exec/import/mdb 等模式。
 \end{itemize}
 
@@ -120,9 +120,9 @@ bool process_command_line(ShellState& st, const char* input_line) {
 \subsection{本章复评结论（现状 / 风险 / 建议）}
 
 \begin{itemize}
-  \item \textbf{handler 链增长风险}：\texttt{process\_command\_line} 已较长，建议后续拆成“命令注册表 + 表驱动分发”。
+  \item \textbf{分发结构已分层}：\texttt{registry/}+\texttt{router/}+\texttt{handlers/} 已落地，phase-2 前缀快路径缓解长链顺序匹配成本；后续演进重点转为“各 handler 内部复杂度”与“注册表生成源（快照 cc）体积治理”。
   \item \textbf{会话锁持有时长}：\texttt{session\_heap\_guard} 设计正确，但需警惕重 I/O 命令在持锁期间阻塞。
-  \item \textbf{策略可观测性}：可把 \texttt{WhereQueryContext} 的原子计数接入统一诊断命令，形成运行期画像。
+  \item \textbf{策略可观测性}：\texttt{WhereQueryContext} 计数与 \texttt{SHOW TUNING JSON}、\texttt{SHOW PLAN} 已部分贯通；可继续把缓存命中/拒绝原因结构化进 JSON，减少纯文本解析。
 \end{itemize}
 
 \subsection{近期修复要点：PAGE id 排序语义一致性}

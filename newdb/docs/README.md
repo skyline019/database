@@ -5,7 +5,7 @@
 | 目录 | 内容 |
 |------|------|
 | [`api/`](api/) | C API：ABI 矩阵、错误处理、线程安全 |
-| [`architecture/`](architecture/) | 模块边界、设计点与源码映射 |
+| [`architecture/`](architecture/) | 模块边界、设计点与源码映射；[全仓库数据流总览](architecture/PROJECT_DATAFLOW_WHOLE.md) |
 | [`txn/`](txn/) | 事务隔离、锁与 catalog 运维语义 |
 | [`testing/`](testing/) | 故障注入与事务/WAL 测试矩阵 |
 | [`storage/`](storage/) | 存储治理、恢复与运行时预算 |

@@ -17,7 +17,8 @@
   \item \textbf{存储抽象层}：\fpath{heap_page.h}、\fpath{heap_storage.h}、\fpath{heap_file_read_view.h}
   \item \textbf{表与会话层}：\fpath{heap_table.h}、\fpath{session.h}、\fpath{catalog.h}
   \item \textbf{日志与并发层}：\fpath{wal_manager.h}、\fpath{mvcc.h}、\fpath{session_history.h}
-  \item \textbf{编解码与 sidecar 层}：\fpath{tuple_codec.h}、\fpath{wal_codec.h}、\fpath{schema_io.h}
+  \item \textbf{读路径预算（可选）}：\fpath{page_cache.h}、\fpath{memory_budget.h}（惰性堆解码路径上的页缓存与总字节预算）
+  \item \textbf{编解码与 sidecar 层}：\fpath{tuple_codec.h}、\fpath{wal_codec.h}、\fpath{schema_io.h}；WAL 段扫描声明 \fpath{wal/wal_segment_scanner.h}
   \item \textbf{外部 ABI 层}：\fpath{c_api.h}
 \end{enumerate}
 

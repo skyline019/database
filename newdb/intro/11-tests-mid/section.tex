@@ -9,6 +9,8 @@
   \item \textbf{存储链路测试}：如 \fpath{test_page_io.cpp}、\fpath{test_heap_table.cpp}、\fpath{test_mvcc_visibility.cpp}
   \item \textbf{日志/并发/恢复测试}：如 \fpath{test_wal_concurrency.cpp}、\fpath{test_wal_segment.cpp}、\fpath{test_wal_recovery_indexed.cpp}
   \item \textbf{cli/C API 集成测试}：如 \fpath{test_demo_where.cpp}、\fpath{test_c_api.cpp}、\fpath{test_demo_mdb_stop.cpp}、\fpath{test_dispatch_routing.cpp}
+  \item \textbf{索引与统计回归}：如 \fpath{test_index_catalog.cpp}、\fpath{test_query_table_stats.cpp}、\fpath{test_show_plan_table_stats_stale_shell.cpp}、\fpath{test_page_cache.cpp}、\fpath{test_table_storage_health.cpp}
+  \item \textbf{跨语言测试入口（可选）}：\fpath{tests/gtest_c_api.cpp} 与 CMake 目标 \texttt{gtest\_capi}（将 GoogleTest 以 C API DLL 暴露，便于 Python 等加载）；GoogleTest 可通过 \texttt{googletest\_SOURCE\_DIR} 或 \texttt{FETCHCONTENT\_SOURCE\_DIR\_GOOGLETEST} 走本地源码树（离线构建）。
 \end{itemize}
 
 \subsection{代表性测试样例}

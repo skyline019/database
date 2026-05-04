@@ -1,9 +1,10 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/write_conflict/lock_key.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
-#include "cli/modules/logging/logging.h"
-#include "cli/modules/util/constants.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 
 #include <newdb/heap_table.h>
@@ -24,6 +25,18 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <thread>
+#include <algorithm>
+
+void TxnCoordinator::recordWriteConflictSample(const std::string& table_name,
+                                               const int row_id,
+                                               const std::uint64_t holder_txn,
+                                               const char* tag) {
+    std::ostringstream oss;
+    oss << "table=" << table_name << ";row=" << row_id << ";holder=" << holder_txn << ";tag=" << (tag ? tag : "");
+    std::lock_guard<std::mutex> lk(m_write_conflict_sample_mu);
+    m_write_conflict_last_sample = oss.str();
+}
 
 bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int id, std::string* reason) {
     if (m_state.load() != TxnState::Active) {
@@ -33,11 +46,12 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
         return true;
     }
     const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
-    const std::string key = table_name + "#" + std::to_string(id);
+    const std::string key = LockKey::row_pk_write_intent(table_name, id).to_storage_key();
     const WriteConflictPolicy policy = m_write_conflict_policy.load(std::memory_order_relaxed);
     const std::uint64_t wait_timeout_ms = m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
     const auto wait_start = std::chrono::steady_clock::now();
     bool deadlock_reported = false;
+    unsigned wait_backoff_round = 0;
 
     for (;;) {
         {
@@ -77,6 +91,7 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
                     m_lock_deadlock_victim_count.fetch_add(1, std::memory_order_relaxed);
                     deadlock_reported = true;
                     m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+                    recordWriteConflictSample(table_name, id, cycle_owner, "deadlock_victim");
                     g_txn_wait_for_owner.erase(txn);
                     if (reason != nullptr) {
                         *reason = "deadlock detected on " + key + ", current txn chosen as victim";
@@ -87,10 +102,16 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
         }
         if (policy != WriteConflictPolicy::Wait || wait_timeout_ms == 0) {
             m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+            std::uint64_t holder = 0;
             {
                 std::lock_guard<std::mutex> lk(g_write_intent_mu);
+                const auto hi = g_write_intent_owner.find(key);
+                if (hi != g_write_intent_owner.end()) {
+                    holder = hi->second;
+                }
                 g_txn_wait_for_owner.erase(txn);
             }
+            recordWriteConflictSample(table_name, id, holder, "reject");
             if (reason != nullptr) {
                 *reason = "write conflict on " + key + " (held by another active transaction)";
             }
@@ -116,17 +137,26 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
                    !m_lock_wait_max_ms.compare_exchange_weak(
                        old_max, wait_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
             }
+            std::uint64_t holder = 0;
             {
                 std::lock_guard<std::mutex> lk(g_write_intent_mu);
+                const auto hi = g_write_intent_owner.find(key);
+                if (hi != g_write_intent_owner.end()) {
+                    holder = hi->second;
+                }
                 g_txn_wait_for_owner.erase(txn);
             }
+            recordWriteConflictSample(table_name, id, holder, "wait_timeout");
             if (reason != nullptr) {
                 *reason = "write conflict wait timeout on " + key;
             }
             return false;
         }
         m_write_conflict_wait_count.fetch_add(1, std::memory_order_relaxed);
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        const unsigned ms =
+            (std::min)(128u, 1u << (std::min)(wait_backoff_round, static_cast<unsigned>(7)));
+        wait_backoff_round = (std::min)(wait_backoff_round + 1u, 24u);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms == 0u ? 1u : ms));
     }
 }
 

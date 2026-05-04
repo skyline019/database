@@ -13,6 +13,7 @@ constexpr std::uint8_t kMetaUndoPrevLsn = 1u << 2;
 constexpr std::uint8_t kMetaPitrTargetLsn = 1u << 3;
 constexpr std::uint8_t kMetaPitrTargetTsMs = 1u << 4;
 constexpr std::uint8_t kMetaRecordTsMs = 1u << 5;
+constexpr std::uint8_t kMetaCheckpointSnapshotLsn = 1u << 6;
 
 void append_u16_le(uint16_t v, std::vector<uint8_t>& out) {
     out.push_back(static_cast<uint8_t>(v & 0xFF));
@@ -96,6 +97,7 @@ Status build_payload(const std::string& table,
         if (meta->pitr_target_lsn != nullptr) meta_mask |= kMetaPitrTargetLsn;
         if (meta->pitr_target_ts_ms != nullptr) meta_mask |= kMetaPitrTargetTsMs;
         if (meta->record_ts_ms != nullptr) meta_mask |= kMetaRecordTsMs;
+        if (meta->checkpoint_snapshot_lsn != nullptr) meta_mask |= kMetaCheckpointSnapshotLsn;
         if (meta_mask != 0) flags |= kFlagMeta;
     }
     out.push_back(flags);
@@ -118,6 +120,7 @@ Status build_payload(const std::string& table,
         if ((meta_mask & kMetaPitrTargetLsn) != 0) append_u64_le(*meta->pitr_target_lsn, out);
         if ((meta_mask & kMetaPitrTargetTsMs) != 0) append_u64_le(*meta->pitr_target_ts_ms, out);
         if ((meta_mask & kMetaRecordTsMs) != 0) append_u64_le(*meta->record_ts_ms, out);
+        if ((meta_mask & kMetaCheckpointSnapshotLsn) != 0) append_u64_le(*meta->checkpoint_snapshot_lsn, out);
     }
     return Status::Ok();
 }
@@ -244,6 +247,11 @@ Status decode_payload_v1(const uint8_t* data, const std::size_t len, DecodedPayl
         if ((meta_mask & kMetaRecordTsMs) != 0) {
             out.has_record_ts_ms = true;
             st = decode_u64(p, end, out.record_ts_ms);
+            if (!st.ok) return st;
+        }
+        if ((meta_mask & kMetaCheckpointSnapshotLsn) != 0) {
+            out.has_checkpoint_snapshot_lsn = true;
+            st = decode_u64(p, end, out.checkpoint_snapshot_lsn);
             if (!st.ok) return st;
         }
     }

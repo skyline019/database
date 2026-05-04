@@ -67,6 +67,16 @@ std::size_t where_policy_qps_limit(const std::size_t logical_rows, const std::si
 }
 
 
+std::size_t where_policy_heap_scan_budget_rows() {
+    if (const char* env = std::getenv("NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS")) {
+        std::size_t v = 0;
+        if (std::from_chars(env, env + std::strlen(env), v).ec == std::errc{} && v > 0) {
+            return v;
+        }
+    }
+    return 0;
+}
+
 std::size_t where_policy_scan_cap_rows(const std::size_t logical_rows,
                                        const std::size_t cond_count,
                                        const bool has_or) {
@@ -127,16 +137,25 @@ bool where_policy_gate(const char* plan,
         return false;
     }
     const std::size_t scan_cap = where_policy_scan_cap_rows(logical_rows, cond_count, has_or);
-    if (estimated_scan_rows >= scan_cap) {
+    const std::size_t heap_budget = where_policy_heap_scan_budget_rows();
+    const std::size_t effective_cap =
+        (heap_budget > 0) ? (std::min)(scan_cap, heap_budget) : scan_cap;
+    if (heap_budget > 0 && effective_cap < scan_cap) {
+        ctx.where_heap_scan_budget_binding_events.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (estimated_scan_rows >= effective_cap) {
         ctx.policy_rejects.fetch_add(1, std::memory_order_relaxed);
         std::fprintf(stderr,
-                     "[WHERE_POLICY] reject plan=%s logical_rows=%zu conds=%zu has_or=%d est_scan_rows=%zu scan_cap=%zu reason=estimated_scan_too_wide\n",
+                     "[WHERE_POLICY] reject plan=%s logical_rows=%zu conds=%zu has_or=%d est_scan_rows=%zu "
+                     "scan_cap=%zu heap_budget=%zu effective_cap=%zu reason=estimated_scan_too_wide\n",
                      plan,
                      logical_rows,
                      cond_count,
                      has_or ? 1 : 0,
                      estimated_scan_rows,
-                     scan_cap);
+                     scan_cap,
+                     heap_budget,
+                     effective_cap);
         where_policy_set(ctx, true, oss.str() + " (estimated scan too wide)");
         return false;
     }

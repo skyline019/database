@@ -1,5 +1,7 @@
 #include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
 
+#include "cli/modules/sidecar/common/index_catalog.h"
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -60,6 +62,7 @@ std::uint64_t file_sig(const std::string& p) {
 }
 
 bool try_read_checkpoint(const std::string& sidecar,
+                         const std::string& data_file,
                          const std::uint64_t data_sig,
                          const std::uint64_t attr_sig,
                          const std::uint64_t wal_lsn,
@@ -85,11 +88,25 @@ bool try_read_checkpoint(const std::string& sidecar,
     try {
         ds_v = static_cast<std::uint64_t>(std::stoull(hdr.substr(ds + 10, as - (ds + 10))));
         as_v = static_cast<std::uint64_t>(std::stoull(hdr.substr(as + 10, wl - (as + 10))));
-        wl_v = static_cast<std::uint64_t>(std::stoull(hdr.substr(wl + 9)));
     } catch (...) {
         return false;
     }
+    wl_v = 0;
+    for (std::size_t i = wl + 9; i < hdr.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(hdr[i]);
+        if (c < '0' || c > '9') {
+            break;
+        }
+        wl_v = wl_v * 10 + static_cast<std::uint64_t>(c - '0');
+    }
     if (ds_v != data_sig || as_v != attr_sig || wl_v != wal_lsn) {
+        return false;
+    }
+    IndexCatalogParsedTail tail{};
+    index_catalog_parse_header_tail(hdr, tail);
+    const std::string tplain = index_catalog_infer_table_plain_from_data_file(data_file);
+    if (!index_catalog_header_identity_ok(hdr, tail, data_file, "visibility_checkpoint", tplain, "visibility_checkpoint",
+                                          IndexKind::Visibility)) {
         return false;
     }
     slots.clear();
@@ -108,6 +125,7 @@ bool try_read_checkpoint(const std::string& sidecar,
 }
 
 void write_checkpoint(const std::string& sidecar,
+                      const std::string& data_file,
                       const std::uint64_t data_sig,
                       const std::uint64_t attr_sig,
                       const std::uint64_t wal_lsn,
@@ -116,7 +134,11 @@ void write_checkpoint(const std::string& sidecar,
     if (!out) {
         return;
     }
-    out << "v=1;data_sig=" << data_sig << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn << "\n";
+    const std::string tplain = index_catalog_infer_table_plain_from_data_file(data_file);
+    out << "v=1;data_sig=" << data_sig << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(IndexKind::Visibility, attr_sig, wal_lsn, data_file, "visibility_checkpoint",
+                                            nullptr, tplain, "visibility_checkpoint")
+        << "\n";
     for (const std::size_t slot : slots) {
         out << slot << "\n";
     }
@@ -155,10 +177,10 @@ std::vector<std::size_t> load_or_build_visibility_checkpoint_sidecar(const std::
     const std::uint64_t wal_lsn = read_wal_lsn_for_workspace(workspace_dir_for_data_file(data_file));
     const std::string sidecar = sidecar_path_for_data_file(data_file);
     std::vector<std::size_t> slots;
-    if (try_read_checkpoint(sidecar, data_sig, attr_sig, wal_lsn, slots)) {
+    if (try_read_checkpoint(sidecar, data_file, data_sig, attr_sig, wal_lsn, slots)) {
         return slots;
     }
-    write_checkpoint(sidecar, data_sig, attr_sig, wal_lsn, fallback);
+    write_checkpoint(sidecar, data_file, data_sig, attr_sig, wal_lsn, fallback);
     return fallback;
 }
 

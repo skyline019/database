@@ -47,3 +47,20 @@ TEST(TxnFileLock, SecondCoordinatorCannotAcquireSameTableLock) {
     std::error_code ec;
     fs::remove_all(ws, ec);
 }
+
+TEST(TxnFileLock, SameProcessSecondAcquireCountsReuse) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_lock_reuse");
+    const std::string table = "lock_reuse";
+    const fs::path data_file = ws / (table + ".bin");
+
+    TxnCoordinator a;
+    a.set_workspace_root(ws.string());
+    ASSERT_TRUE(a.acquireLock(data_file.string()).isOk());
+    ASSERT_TRUE(a.acquireLock(data_file.string()).isOk());
+    EXPECT_GE(a.runtimeStats().file_lock_same_process_reuse_count, 1u);
+
+    ASSERT_TRUE(a.releaseLock(data_file.string()).isOk());
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}

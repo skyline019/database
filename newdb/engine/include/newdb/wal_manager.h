@@ -88,6 +88,15 @@ struct WalDecodedRecord {
     bool has_record_ts_ms{false};
 };
 
+/// Last `checkpoint_and_truncate` prune decision (independent of `WalRecoveryStats` / recover()).
+struct WalCheckpointTruncateTrace {
+    bool truncate_executed{false};
+    bool skipped_prune_disabled{false};
+    bool failed_strict_incomplete_bracket{false};
+    /// CHECKPOINT_BEGIN/END nesting depth at EOF after control records appended (0 = balanced).
+    std::uint32_t tail_checkpoint_bracket_depth{0};
+};
+
 struct WalRecoveryStats {
     std::uint64_t records_read{0};
     std::uint64_t checksum_failures{0};
@@ -107,6 +116,30 @@ struct WalRecoveryStats {
     std::uint64_t checkpoint_midpoint_recovery_count{0};
     std::uint64_t begin_ms{0};
     std::uint64_t end_ms{0};
+    /// Populated incrementally as recovery gains checkpoint-aware optimizations (OPTIMIZATION_PLAN phase 8).
+    std::uint64_t last_complete_checkpoint_lsn{0};
+    std::uint64_t replay_start_lsn{0};
+    std::uint64_t records_after_checkpoint{0};
+    std::uint64_t checkpoint_scan_ms{0};
+    std::uint64_t redo_plan_ms{0};
+    std::uint64_t redo_apply_ms{0};
+    std::uint64_t index_rebuild_ms{0};
+    /// Count of `*.wal` regular files under the WAL directory inventory scan (observability).
+    std::uint64_t wal_dir_inventory_dot_wal_files{0};
+    /// Segment index pass stopped after at least one valid record with EOF / truncated payload (partial tail).
+    std::uint64_t segment_index_partial_tail_stops{0};
+    /// Segment index pass stopped on invalid magic or short read before any complete record.
+    std::uint64_t segment_index_bad_header_stops{0};
+    /// Transactions with pending row ops after replay (no COMMIT observed).
+    std::uint64_t uncommitted_txn_discarded_count{0};
+    /// Human-readable tags for env-driven replay (checkpoint LSN, min LSN, offset seek, etc.).
+    std::string recovery_policy;
+    /// Final CHECKPOINT_BEGIN/END nesting depth at WAL EOF after segment index scan (alias semantics vs `checkpoint_midpoint_recovery_count` bump).
+    std::uint64_t incomplete_checkpoint_count{0};
+    /// Doc §3.3: rows logically ignored from uncommitted txns after replay (mirrors `uncommitted_txn_discarded_count`).
+    std::uint64_t recovery_uncommitted_records_ignored{0};
+    /// Offset-seek path fell back to scanning from segment start (`fseek` failure or missing anchor).
+    std::uint64_t offset_seek_fseek_fallback_count{0};
     std::uint64_t elapsed_ms() const { return end_ms >= begin_ms ? (end_ms - begin_ms) : 0; }
 };
 
@@ -188,6 +221,7 @@ public:
     Status recover(HeapTable* out_table, const TableSchema& schema, WalRecoveryStats* stats);
     Status read_all_records(const TableSchema& schema, std::vector<WalDecodedRecord>& out);
     std::optional<WalRecoveryStats> last_recovery_stats() const;
+    std::optional<WalCheckpointTruncateTrace> last_checkpoint_truncate_trace() const;
 
     static std::uint64_t wall_clock_ms();
 
@@ -222,6 +256,7 @@ private:
     std::uint32_t segment_index_{0};
     mutable std::mutex mut_;
     mutable std::optional<WalRecoveryStats> last_recovery_stats_;
+    mutable std::optional<WalCheckpointTruncateTrace> last_checkpoint_truncate_trace_;
     std::mutex queue_mu_;
     std::condition_variable queue_cv_;
     std::deque<QueuedWalOp> queue_;
@@ -233,8 +268,9 @@ private:
     uint16_t compute_checksum(const WalRecordHeader* hdr, const uint8_t* payload, uint32_t paylen);
     bool verify_checksum(const WalRecordHeader* hdr, const uint8_t* payload);
     Status write_record(const WalRecordHeader* hdr, const uint8_t* payload, uint32_t paylen);
-    Status read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload);
-    Status append_control_record_nolock(uint64_t txn_id, WalOp op);
+    Status read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload) const;
+    Status append_control_record_nolock(uint64_t txn_id, WalOp op,
+                                       const std::uint64_t* checkpoint_snapshot_lsn = nullptr);
     Status enqueue_and_wait(QueuedWalOp&& op);
     void writer_loop();
     void resync_lsn_from_open_file_nolock();
@@ -244,6 +280,24 @@ private:
     Status maybe_rotate_segment_nolock();
     std::vector<std::string> wal_read_paths_nolock() const;
     void detect_segment_index_nolock();
+
+    /// Segment inventory built during recovery pass 1 (WalSegmentScanner-order paths; Reader maps to read_record).
+    struct RecoverSegmentEntry {
+        std::string path;
+        std::uint64_t min_lsn{0};
+        std::uint64_t max_lsn{0};
+        std::uint64_t records{0};
+        std::vector<std::pair<std::uint64_t, long>> lsn_offsets;
+    };
+    void recover_build_segment_index(std::vector<RecoverSegmentEntry>& seg_index, WalRecoveryStats* out_stats);
+    /// Scan on-disk WAL segments in path order; returns bracket depth at EOF (0 = balanced).
+    std::uint32_t recover_scan_checkpoint_bracket_depth_at_eof_nolock() const;
+    Status recover_replay_segments(HeapTable* out_table,
+                                   const TableSchema& schema,
+                                   const std::vector<RecoverSegmentEntry>& seg_index,
+                                   WalRecoveryStats* out_stats,
+                                   bool enable_offset_seek,
+                                   std::uint64_t replay_start_lsn);
 
     Status serialize_row(const Row& row, const TableSchema& schema, std::vector<uint8_t>& out) const;
     Status deserialize_row(const uint8_t* data, uint32_t len, Row& out, const TableSchema& schema) const;

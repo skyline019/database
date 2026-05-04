@@ -1,31 +1,40 @@
 #include "cli/modules/sidecar/eq/equality_index_sidecar.h"
-
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
 #include <sstream>
 #include <unordered_map>
+#include <system_error>
 
+#include <newdb/memory_budget.h>
 #include <newdb/schema_io.h>
+#include "cli/modules/sidecar/common/index_catalog.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 #include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
 #include "cli/modules/sidecar/eq/eq_bloom.h"
+#include "cli/modules/where/executor/where.h"
 
 namespace fs = std::filesystem;
 
 namespace {
 
+std::atomic<std::uint64_t> g_eq_sidecar_invalidate_remove_fails{0};
+std::atomic<std::uint64_t> g_eq_sidecar_memory_budget_skips{0};
+
 struct EqSidecarCacheEntry {
     std::uint64_t data_sig{0};
     std::uint64_t attr_sig{0};
     std::uint64_t wal_lsn{0};
+    std::string header_line;
+    IndexCatalogParsedTail catalog_tail{};
     std::map<std::string, std::vector<std::size_t>> buckets;
 };
 
@@ -68,7 +77,7 @@ std::uint64_t file_sig(const std::string& p) {
 }
 
 bool parse_header(const std::string& line, std::string& attr, std::uint64_t& data_sig, std::uint64_t& attr_sig, std::uint64_t& wal_lsn) {
-    // attr=<name>;data_sig=<n>;attr_sig=<n>[;wal_lsn=<n>]
+    // attr=<name>;data_sig=<n>;attr_sig=<n>[;wal_lsn=<digits>][;idx_kind=...;built_ms=...][;buckets=<n>]
     const auto a0 = line.find("attr=");
     const auto s0 = line.find(";data_sig=");
     const auto t0 = line.find(";attr_sig=");
@@ -77,9 +86,11 @@ bool parse_header(const std::string& line, std::string& attr, std::uint64_t& dat
     }
     attr = line.substr(5, s0 - 5);
     const std::string::size_type wpos = line.find(";wal_lsn=");
+    const std::string::size_type bpos = line.find(";buckets=");
     if (wpos == std::string::npos) {
         const std::string ds = line.substr(s0 + 10, t0 - (s0 + 10));
-        const std::string attr_sig_s = line.substr(t0 + 10);
+        const std::string attr_sig_s =
+            (bpos == std::string::npos) ? line.substr(t0 + 10) : line.substr(t0 + 10, bpos - (t0 + 10));
         try {
             data_sig = static_cast<std::uint64_t>(std::stoull(ds));
             attr_sig = static_cast<std::uint64_t>(std::stoull(attr_sig_s));
@@ -90,13 +101,20 @@ bool parse_header(const std::string& line, std::string& attr, std::uint64_t& dat
     } else {
         const std::string ds = line.substr(s0 + 10, t0 - (s0 + 10));
         const std::string as = line.substr(t0 + 10, wpos - (t0 + 10));
-        const std::string wl = line.substr(wpos + 9);
         try {
             data_sig = static_cast<std::uint64_t>(std::stoull(ds));
             attr_sig = static_cast<std::uint64_t>(std::stoull(as));
-            wal_lsn = static_cast<std::uint64_t>(std::stoull(wl));
         } catch (...) {
             return false;
+        }
+        wal_lsn = 0;
+        const std::size_t i0 = wpos + 9;
+        for (std::size_t i = i0; i < line.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(line[i]);
+            if (c < '0' || c > '9') {
+                break;
+            }
+            wal_lsn = wal_lsn * 10 + static_cast<std::uint64_t>(c - '0');
         }
     }
     return true;
@@ -157,6 +175,13 @@ bool parse_entry(const std::string& line, std::string& key, std::vector<std::siz
     return true;
 }
 
+std::string eq_expected_table_plain(const EqIndexRequest& req) {
+    if (!req.table_name.empty()) {
+        return req.table_name;
+    }
+    return index_catalog_infer_table_plain_from_data_file(req.data_file);
+}
+
 void write_sidecar(const std::string& path,
                    const EqIndexRequest& req,
                    const std::uint64_t data_sig,
@@ -164,14 +189,18 @@ void write_sidecar(const std::string& path,
                    const std::uint64_t wal_lsn,
                    const std::map<std::string, std::vector<std::size_t>>& buckets) {
     const std::size_t bucket_count = eq_bucket_count();
-    std::ofstream out(path, std::ios::out | std::ios::trunc);
+    const std::string tmp_path = path + ".tmp";
+    std::ofstream out(tmp_path, std::ios::out | std::ios::trunc);
     if (!out) {
         return;
     }
+    const std::string tbl_p = eq_expected_table_plain(req);
     out << "attr=" << req.attr_name
         << ";data_sig=" << data_sig
         << ";attr_sig=" << attr_sig
         << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(IndexKind::Eq, attr_sig, wal_lsn, req.data_file, req.attr_name, nullptr,
+                                             tbl_p, req.attr_name)
         << ";buckets=" << bucket_count << "\n";
     for (const auto& kv : buckets) {
         if (bucket_count > 1) {
@@ -186,6 +215,11 @@ void write_sidecar(const std::string& path,
         }
         out << "\n";
     }
+    out.flush();
+    out.close();
+    std::error_code ec;
+    fs::remove(path, ec);
+    fs::rename(tmp_path, path, ec);
 }
 
 bool try_lookup_sidecar(const std::string& path,
@@ -194,7 +228,8 @@ bool try_lookup_sidecar(const std::string& path,
                         const std::uint64_t attr_sig,
                         const std::uint64_t wal_lsn,
                         const std::string& value,
-                        std::vector<std::size_t>& out) {
+                        std::vector<std::size_t>& out,
+                        WhereQueryContext* where_obs) {
     {
         // Optional bloom prefilter. No false negatives; can skip parsing sidecar on definite miss.
         std::uint32_t bits = 1u << 20;
@@ -225,6 +260,59 @@ bool try_lookup_sidecar(const std::string& path,
         cache_it->second.wal_lsn == wal_lsn &&
         cache_it->second.data_sig == data_sig &&
         cache_it->second.attr_sig == attr_sig) {
+        const IndexCatalogParsedTail& ct = cache_it->second.catalog_tail;
+        {
+            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+            if (enforce && ct.catalog_build_state == 1) {
+                g_eq_sidecar_cache.erase(path);
+                std::error_code ec;
+                fs::remove(path, ec);
+                fs::remove(bloom_path_for(req), ec);
+                return false;
+            }
+        }
+        const std::string exp_tbl = eq_expected_table_plain(req);
+        const bool id_ok =
+            cache_it->second.header_line.empty()
+                ? index_catalog_tail_identity_matches(ct, req.data_file, req.attr_name)
+                : index_catalog_header_identity_ok(cache_it->second.header_line, ct, req.data_file, req.attr_name,
+                                                   exp_tbl, req.attr_name, IndexKind::Eq);
+        if (!id_ok) {
+            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+            if (enforce) {
+                g_eq_sidecar_cache.erase(path);
+                std::error_code ec;
+                fs::remove(path, ec);
+                fs::remove(bloom_path_for(req), ec);
+                return false;
+            }
+            std::fprintf(stderr,
+                         "[NEWDB_INDEX_CATALOG] eq cache hit identity mismatch (enforce off) attr=%s data=%s\n",
+                         req.attr_name.c_str(), req.data_file.c_str());
+        }
+        IndexDescriptor d{};
+        d.index_name = req.attr_name;
+        d.kind = IndexKind::Eq;
+        d.data_lsn = ct.idx_dl != 0 ? ct.idx_dl : cache_it->second.wal_lsn;
+        d.schema_version = ct.idx_sv != 0 ? ct.idx_sv : cache_it->second.attr_sig;
+        d.built_at_ms = ct.built_ms;
+        d.valid = true;
+        if (!index_descriptor_matches_runtime(d, attr_sig, wal_lsn)) {
+            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+            if (enforce) {
+                g_eq_sidecar_cache.erase(path);
+                std::error_code ec;
+                fs::remove(path, ec);
+                fs::remove(bloom_path_for(req), ec);
+                return false;
+            }
+            std::fprintf(stderr,
+                         "[NEWDB_INDEX_CATALOG] eq cache hit catalog mismatch (enforce off) attr=%s data=%s\n",
+                         req.attr_name.c_str(), req.data_file.c_str());
+        }
         const auto it = cache_it->second.buckets.find(value);
         if (it == cache_it->second.buckets.end()) {
             out.clear();
@@ -232,6 +320,30 @@ bool try_lookup_sidecar(const std::string& path,
             out = it->second;
         }
         return true;
+    }
+
+    std::uint64_t disk_bytes_for_budget = 0;
+    {
+        std::error_code fsec;
+        const auto fsz = fs::file_size(path, fsec);
+        if (!fsec) {
+            disk_bytes_for_budget = static_cast<std::uint64_t>(fsz);
+            if (where_obs != nullptr) {
+                where_obs->where_eq_sidecar_disk_bytes_read_total.fetch_add(disk_bytes_for_budget,
+                                                                            std::memory_order_relaxed);
+                where_obs->where_eq_sidecar_disk_loads.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    }
+    {
+        const std::uint64_t cap = newdb::memory_budget_max_bytes_env();
+        if (cap > 0 && disk_bytes_for_budget > 0) {
+            const auto snap = newdb::memory_budget_snapshot();
+            if (snap.used_bytes + disk_bytes_for_budget > cap) {
+                g_eq_sidecar_memory_budget_skips.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+        }
     }
 
     std::ifstream in(path, std::ios::in);
@@ -252,6 +364,57 @@ bool try_lookup_sidecar(const std::string& path,
     if (attr != req.attr_name || ds != data_sig || as != attr_sig || wln != wal_lsn) {
         return false;
     }
+    IndexCatalogParsedTail hdr_tail{};
+    index_catalog_parse_header_tail(hdr, hdr_tail);
+    const std::string exp_tbl_disk = eq_expected_table_plain(req);
+    {
+        const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+        const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+        if (enforce && hdr_tail.catalog_build_state == 1) {
+            std::error_code ec;
+            fs::remove(path, ec);
+            fs::remove(bloom_path_for(req), ec);
+            return false;
+        }
+    }
+    if (!index_catalog_header_identity_ok(hdr, hdr_tail, req.data_file, req.attr_name, exp_tbl_disk, req.attr_name,
+                                          IndexKind::Eq)) {
+        const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+        const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+        if (enforce) {
+            std::error_code ec;
+            fs::remove(path, ec);
+            fs::remove(bloom_path_for(req), ec);
+            return false;
+        }
+        std::fprintf(stderr,
+                     "[NEWDB_INDEX_CATALOG] eq disk hit identity mismatch (enforce off) attr=%s data=%s\n",
+                     req.attr_name.c_str(), req.data_file.c_str());
+    }
+    {
+        IndexDescriptor d{};
+        d.index_name = req.attr_name;
+        d.kind = IndexKind::Eq;
+        d.data_lsn = hdr_tail.idx_dl != 0 ? hdr_tail.idx_dl : wln;
+        d.schema_version = hdr_tail.idx_sv != 0 ? hdr_tail.idx_sv : as;
+        d.built_at_ms = hdr_tail.built_ms;
+        d.valid = true;
+        if (!index_descriptor_matches_runtime(d, attr_sig, wal_lsn)) {
+            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+            if (enforce) {
+                g_eq_sidecar_cache.erase(path);
+                std::error_code ec;
+                fs::remove(path, ec);
+                fs::remove(bloom_path_for(req), ec);
+                return false;
+            }
+            std::fprintf(stderr,
+                         "[NEWDB_INDEX_CATALOG] eq disk hit catalog mismatch (enforce off) attr=%s data=%s (%s)\n",
+                         req.attr_name.c_str(), req.data_file.c_str(),
+                         explain_index_descriptor_mismatch(d, attr_sig, wal_lsn).c_str());
+        }
+    }
     std::size_t bucket_count = 1;
     if (const std::string::size_type bpos = hdr.find(";buckets="); bpos != std::string::npos) {
         try {
@@ -269,6 +432,8 @@ bool try_lookup_sidecar(const std::string& path,
     parsed.data_sig = data_sig;
     parsed.attr_sig = attr_sig;
     parsed.wal_lsn = wal_lsn;
+    parsed.header_line = hdr;
+    parsed.catalog_tail = hdr_tail;
     std::string line;
     while (std::getline(in, line)) {
         if (line.empty()) {
@@ -314,7 +479,8 @@ bool try_lookup_sidecar(const std::string& path,
 EqLookupResult lookup_or_build_eq_index_sidecar(const EqIndexRequest& req,
                                                 const newdb::TableSchema& schema,
                                                 const newdb::HeapTable& table,
-                                                const std::string& value) {
+                                                const std::string& value,
+                                                WhereQueryContext* where_obs) {
     (void)schema;
     const std::string attr_file = newdb::schema_sidecar_path_for_data_file(req.data_file);
     const std::uint64_t data_sig = file_sig(req.data_file);
@@ -323,7 +489,7 @@ EqLookupResult lookup_or_build_eq_index_sidecar(const EqIndexRequest& req,
     const std::string sidecar = sidecar_path_for(req);
 
     std::vector<std::size_t> matched;
-    if (try_lookup_sidecar(sidecar, req, data_sig, attr_sig, wal_lsn, value, matched)) {
+    if (try_lookup_sidecar(sidecar, req, data_sig, attr_sig, wal_lsn, value, matched, where_obs)) {
         EqLookupResult out;
         out.used_index = true;
         out.slots = std::move(matched);
@@ -378,15 +544,31 @@ EqLookupResult lookup_or_build_eq_index_sidecar(const EqIndexRequest& req,
                        EqBloomHeader{.data_sig = data_sig, .attr_sig = attr_sig, .wal_lsn = wal_lsn, .bits = bits, .k = k},
                        keys);
     }
-    g_eq_sidecar_cache[sidecar] = EqSidecarCacheEntry{data_sig, attr_sig, wal_lsn, buckets};
-    const auto it = buckets.find(value);
+    IndexCatalogParsedTail wt{};
+    std::string lh_store;
+    {
+        std::ifstream hdr_in(sidecar, std::ios::in);
+        if (hdr_in && std::getline(hdr_in, lh_store)) {
+            index_catalog_parse_header_tail(lh_store, wt);
+        }
+    }
+    const auto built_it = buckets.find(value);
+    std::vector<std::size_t> built_slots =
+        (built_it != buckets.end()) ? built_it->second : std::vector<std::size_t>{};
+    g_eq_sidecar_cache[sidecar] =
+        EqSidecarCacheEntry{data_sig, attr_sig, wal_lsn, std::move(lh_store), wt, std::move(buckets)};
     EqLookupResult out;
     out.used_index = true;
-    if (it == buckets.end()) {
-        return out;
-    }
-    out.slots = it->second;
+    out.slots = std::move(built_slots);
     return out;
+}
+
+std::uint64_t eq_sidecar_invalidate_remove_fail_count() {
+    return g_eq_sidecar_invalidate_remove_fails.load(std::memory_order_relaxed);
+}
+
+std::uint64_t eq_sidecar_memory_budget_skip_count() {
+    return g_eq_sidecar_memory_budget_skips.load(std::memory_order_relaxed);
 }
 
 void invalidate_eq_index_sidecars_for_data_file(const std::string& data_file) {
@@ -406,9 +588,20 @@ void invalidate_eq_index_sidecars_for_data_file(const std::string& data_file) {
     (void)newdb::load_schema_text(newdb::schema_sidecar_path_for_data_file(data_file), schema);
     std::size_t removed = 0;
     for (const auto& attr : schema.attrs) {
-        removed += fs::remove(data_file + ".eqidx." + attr.name, ec) ? 1u : 0u;
         ec.clear();
-        removed += fs::remove(data_file + ".eqbloom." + attr.name, ec) ? 1u : 0u;
+        fs::remove(data_file + ".eqidx." + attr.name, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            g_eq_sidecar_invalidate_remove_fails.fetch_add(1, std::memory_order_relaxed);
+        } else if (!ec) {
+            ++removed;
+        }
+        ec.clear();
+        fs::remove(data_file + ".eqbloom." + attr.name, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            g_eq_sidecar_invalidate_remove_fails.fetch_add(1, std::memory_order_relaxed);
+        } else if (!ec) {
+            ++removed;
+        }
         ec.clear();
     }
     const char* v = std::getenv("NEWDB_SIDECAR_INVALIDATE_VERBOSE");
@@ -432,6 +625,13 @@ void invalidate_eq_index_sidecars_for_attrs(const std::string& data_file,
         g_eq_sidecar_cache.erase(sidecar);
         std::error_code ec;
         fs::remove(sidecar, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            g_eq_sidecar_invalidate_remove_fails.fetch_add(1, std::memory_order_relaxed);
+        }
+        ec.clear();
         fs::remove(bloom, ec);
+        if (ec && ec != std::errc::no_such_file_or_directory) {
+            g_eq_sidecar_invalidate_remove_fails.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 }

@@ -11,7 +11,7 @@
 
 #include "cli/modules/import_export/csv_export.h"
 #include "cli/modules/import_export/demo_export.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 
 namespace {
 

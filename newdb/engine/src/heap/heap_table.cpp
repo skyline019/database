@@ -1,4 +1,5 @@
 #include <newdb/heap_table.h>
+#include <newdb/page_cache.h>
 
 #include <newdb/error.h>
 #include <newdb/heap_file_read_view.h>
@@ -131,9 +132,12 @@ bool HeapTable::decode_heap_slot(const std::size_t slot, Row& out) const {
         if (heap_cached_page_no_ != static_cast<std::size_t>(f.page_no) ||
             heap_cached_page_buf_.size() != psz) {
             heap_cached_page_buf_.resize(psz);
-            if (!file->read_page_copy(f.page_no, heap_cached_page_buf_.data())) {
-                ++decode_heap_slot_misses;
-                return false;
+            if (!newdb::page_cache_try_get(file->path(), f.page_no, psz, heap_cached_page_buf_.data())) {
+                if (!file->read_page_copy(f.page_no, heap_cached_page_buf_.data())) {
+                    ++decode_heap_slot_misses;
+                    return false;
+                }
+                newdb::page_cache_put(file->path(), f.page_no, psz, heap_cached_page_buf_.data());
             }
             heap_cached_page_no_ = static_cast<std::size_t>(f.page_no);
         }

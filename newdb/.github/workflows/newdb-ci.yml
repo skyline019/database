@@ -3,6 +3,10 @@ name: newdb-ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly soak window (UTC Monday 12:00); optional heavy tests gated by env in repo.
+    - cron: "0 12 * * 1"
 
 jobs:
   c-api-abi-gate:
@@ -246,6 +250,8 @@ jobs:
       - name: Bench gate (smoke + microbench)
         run: >
           python3 newdb/scripts/ci/ci_bench_gate.py build
+          --profile pr
+          --gate-fail-json-out newdb/scripts/results/linux_gcc_gate_fail.json
           --max-vacuum-compact-failure-delta 0
           --max-vacuum-queue-depth-peak 8
           --max-wal-recovery-last-elapsed-ms 2000
@@ -256,6 +262,164 @@ jobs:
           --min-lsm-memtable-flush-delta 0
           --max-lsm-read-segments-scanned-p95 8
           --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+      - name: Validate runtime stats fixture (contract)
+        run: >
+          python3 newdb/scripts/validate/validate_runtime_stats.py
+          newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+
+  # Release-oriented gate: same contract as PR linux-gcc but Release build + `ctest -L newdb` subset.
+  linux-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (Release)
+        run: cmake -S newdb -B build-rel-gate -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-rel-gate --parallel
+
+      - name: Runtime report compact gate regression
+        run: >
+          python3 newdb/scripts/validate/test_runtime_report_compact_gates.py
+          build-rel-gate/newdb_runtime_report
+
+      - name: Test (newdb label)
+        run: ctest --test-dir build-rel-gate -L newdb --output-on-failure
+
+      - name: Bench gate (release smoke + microbench)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build-rel-gate
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+  # Second-line gate: JSONL contract + storage/WAL recovery ceilings (see docs/ci/PERF_AND_CI_BUDGETS.md §3 / §4).
+  linux-bench-gate-runtime-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S newdb -B newdb/build-rtc -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build newdb/build-rtc --parallel
+
+      - name: Write v2 baseline archive manifest
+        run: >
+          python3 newdb/scripts/ci/capture_baseline.py
+          --write-archive-manifest newdb/scripts/results/ci_baseline_manifest.json
+          --build-dir newdb/build-rtc
+
+      - name: Upload baseline manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-runtime-archive-manifest
+          path: newdb/scripts/results/ci_baseline_manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Bench gate contract JSONL (storage + WAL recovery ceilings)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py newdb/build-rtc
+          --profile pr
+          --runtime-jsonl newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          --runtime-last-n 2
+          --gate-fail-json-out newdb/scripts/results/runtime_gate_fail.json
+          --max-table-storage-health-fragmentation-ratio 0.95
+          --max-table-storage-health-dead-bytes 1000000000
+          --max-compact-debt-bytes-peak 100000000000
+          --max-vacuum-health-bonus-last 100000000000
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+      - name: Emit runtime report JSON (contract fixture)
+        run: >
+          newdb/build-rtc/newdb_runtime_report
+          --input newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          --last-n 2
+          --output newdb/scripts/results/ci_runtime_report_contract.json
+
+      - name: Upload runtime contract artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-runtime-contract-bundle
+          path: |
+            newdb/scripts/results/ci_baseline_manifest.json
+            newdb/scripts/results/ci_runtime_report_contract.json
+            newdb/scripts/results/runtime_gate_fail.json
+            newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+
+  linux-nightly-soak:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+      - name: Configure
+        run: cmake -S newdb -B build-nightly -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build-nightly --parallel
+      - name: CTest (optional heavy soak)
+        env:
+          NEWDB_STORAGE_SOAK_HEAVY: "1"
+        run: ctest --test-dir build-nightly -L newdb --output-on-failure --timeout 900
+
+  linux-index-catalog-enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S newdb -B build-ice -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build-ice --parallel
+
+      - name: Test subset with NEWDB_INDEX_CATALOG_ENFORCE=1
+        env:
+          NEWDB_INDEX_CATALOG_ENFORCE: "1"
+        run: >
+          ctest --test-dir build-ice --output-on-failure
+          -R "IndexCatalog|Where|CiMicrobench|DispatchRouting|TxnIsolationVisibility"
 
   linux-clang:
     runs-on: ubuntu-latest
@@ -280,6 +444,8 @@ jobs:
       - name: Bench gate (smoke + microbench)
         run: >
           python3 newdb/scripts/ci/ci_bench_gate.py build-clang
+          --profile pr
+          --gate-fail-json-out newdb/scripts/results/linux_clang_gate_fail.json
           --max-vacuum-compact-failure-delta 0
           --max-vacuum-queue-depth-peak 8
           --max-wal-recovery-last-elapsed-ms 2000

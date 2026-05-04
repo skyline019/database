@@ -10,14 +10,14 @@
 #include <newdb/session.h>
 
 #include "cli/shell/bootstrap/demo_cli.h"
-#include "cli/shell/dispatch/demo_commands.h"
+#include "cli/shell/dispatch/router/dispatch.h"
 #include "cli/shell/diag/demo_diag.h"
 #include "cli/shell/repl/demo_shell.h"
 #include "cli/modules/import_export/import.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/shell/state/shell_state.h"
-#include "cli/modules/view/table_view.h"
+#include "cli/modules/common/view/table_view.h"
 
 namespace {
 

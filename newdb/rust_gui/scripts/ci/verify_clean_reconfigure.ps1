@@ -6,6 +6,8 @@ param(
     [int]$ConfigureRetries = 3,
     [int]$RetrySleepSeconds = 5,
     [switch]$ReleaseGrade,
+    [switch]$BenchGateStorage,
+    [switch]$BenchGateWalRecovery,
     [switch]$SkipGuiGate,
     [switch]$SkipSemanticGate,
     [switch]$SkipBenchGate
@@ -16,6 +18,8 @@ param(
 #   powershell -ExecutionPolicy Bypass -File scripts/ci/verify_clean_reconfigure.ps1 -BuildDir build_ci_local -SkipBenchGate
 # - Release-grade verification (all gates required; skip flags forbidden):
 #   powershell -ExecutionPolicy Bypass -File scripts/ci/verify_clean_reconfigure.ps1 -ReleaseGrade -BuildDir build_ci_release
+# - Nightly-style runtime gates (uses scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl):
+#   ... -BenchGateStorage -BenchGateWalRecovery
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -147,6 +151,28 @@ if (-not $SkipBenchGate) {
     $benchArgs = @($BuildDir)
     if ($isMultiConfig) {
         $benchArgs += @("--build-config", $BuildConfig)
+    }
+    if ($ReleaseGrade) {
+        $benchArgs += "--release-grade"
+    }
+    if ($BenchGateStorage -or $BenchGateWalRecovery) {
+        $fixture = Join-Path $repoRoot "scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl"
+        if (-not (Test-Path -LiteralPath $fixture)) {
+            throw "bench gate fixture missing: $fixture"
+        }
+        $benchArgs += @("--runtime-jsonl", $fixture, "--runtime-last-n", "2")
+    }
+    if ($BenchGateStorage) {
+        # Conservative ceilings for Nightly-style soak; fixture uses small synthetic peaks.
+        $benchArgs += @(
+            "--max-table-storage-health-fragmentation-ratio", "0.95",
+            "--max-table-storage-health-dead-bytes", "1000000000",
+            "--max-compact-debt-bytes-peak", "100000000000",
+            "--max-vacuum-health-bonus-last", "100000000000"
+        )
+    }
+    if ($BenchGateWalRecovery) {
+        $benchArgs += @("--max-wal-recovery-last-elapsed-ms", "2000")
     }
     Invoke-PythonScript -ScriptPath (Join-Path $repoRoot "scripts/ci/ci_bench_gate.py") -ScriptArgs $benchArgs
 }

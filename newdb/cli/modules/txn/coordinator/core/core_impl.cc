@@ -2,9 +2,10 @@
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
-#include "cli/modules/logging/logging.h"
-#include "cli/modules/util/constants.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
+#include "cli/modules/where/executor/stats/table_stats.h"
 
 #include <newdb/heap_table.h>
 #include <newdb/page_io.h>
@@ -40,7 +41,11 @@ newdb::Status compact_table_file_default(const std::string& data_file, const std
     }
     newdb::TableSchema schema;
     (void)newdb::load_schema_text(newdb::schema_sidecar_path_for_data_file(data_file), schema);
-    return newdb::io::compact_heap_file(data_file.c_str(), table_name, schema);
+    const newdb::Status st = newdb::io::compact_heap_file(data_file.c_str(), table_name, schema);
+    if (st.ok) {
+        invalidate_table_stats_for_data_file(data_file);
+    }
+    return st;
 }
 
 std::uint64_t file_size_or_zero(const std::string& path) {
@@ -142,7 +147,19 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
     }
     writeWAL("TXN_BEGIN", table_name, "", "", "");
     flushWAL();
-    
+    {
+        std::lock_guard<std::mutex> wlk(m_wal_mutex);
+        if (wal_) {
+            if (txnIsolationLevel() == TxnIsolationLevel::Snapshot) {
+                m_txn_read_view_lsn.store(wal_->current_lsn(), std::memory_order_relaxed);
+            } else {
+                m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+            }
+        } else {
+            m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+        }
+    }
+
     return Result<bool>::Ok(true);
 }
 
@@ -179,6 +196,7 @@ Result<bool> TxnCoordinator::commit() {
         m_txn_records.clear();
         m_locked_files.clear();
         m_active_table.clear();
+        m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
 
         if (m_vacuum_running.load()) {
             const std::size_t threshold = m_vacuum_ops_threshold.load();
@@ -295,7 +313,8 @@ Result<bool> TxnCoordinator::rollback() {
     m_txn_records.clear();
     m_locked_files.clear();
     m_active_table.clear();
-    
+    m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+
     return Result<bool>::Ok(true);
 }
 

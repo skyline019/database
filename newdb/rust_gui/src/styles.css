@@ -1288,6 +1288,23 @@ mark {
   background: var(--hover-bg) !important;
 }
 
+/* Top menu: non-clickable section headings (grouped entries). */
+.el-dropdown-menu__item.menu-dropdown-section.is-disabled {
+  opacity: 1 !important;
+  color: var(--text-soft) !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.03em;
+  cursor: default !important;
+  background: transparent !important;
+  line-height: 1.25;
+  padding-top: 10px;
+  padding-bottom: 4px;
+}
+.el-dropdown-menu__item.menu-dropdown-section.is-disabled:first-child {
+  padding-top: 4px;
+}
+
 .dense .sidebar { padding: 8px; }
 .dense .toolbar, .dense .menu-bar, .dense .pager, .dense .console { padding-top: 6px; padding-bottom: 6px; }
 .dense button { padding: 4px 8px; border-radius: 5px; }

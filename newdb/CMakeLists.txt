@@ -9,6 +9,19 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# MSVC: optional fully static CRT (/MT). Requires CMP0091 for MSVC_RUNTIME_LIBRARY on targets.
+option(NEWDB_MSVC_STATIC_RUNTIME "MSVC only: link C runtime statically (/MT, MultiThreaded)" OFF)
+if(MSVC)
+    if(POLICY CMP0091)
+        cmake_policy(SET CMP0091 NEW)
+    endif()
+    if(NEWDB_MSVC_STATIC_RUNTIME)
+        set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    # Ensure UTF-8 sources/comments are parsed consistently on Windows.
+    add_compile_options(/utf-8)
+endif()
+
 option(NEWDB_ENABLE_COVERAGE "Compile/link with coverage (gcov/lcov; GCC or Clang)" OFF)
 
 # Parent of this directory is the repository root (contains waterfall/).
@@ -34,6 +47,8 @@ add_library(newdb_core STATIC
     engine/src/schema/schema_io.cpp
     engine/src/heap/heap_table.cpp
     engine/src/heap/heap_file_read_view.cpp
+    engine/src/cache/page_cache.cpp
+    engine/src/cache/memory_budget.cpp
     engine/src/codec/tuple_codec.cpp
     engine/src/heap/heap_page_waterfall.cpp
     engine/src/io/page/page_io.cpp
@@ -41,6 +56,8 @@ add_library(newdb_core STATIC
     engine/src/session/api/session.cpp
     engine/src/catalog/catalog.cpp
     engine/src/wal/writer/wal_manager.cpp
+    engine/src/wal/recovery/wal_manager_recover_support.cpp
+    engine/src/wal/recovery/wal_segment_scanner.cpp
     engine/src/wal/codec/wal_codec.cpp
     engine/src/mvcc/snapshot/mvcc.cpp
     engine/src/session/table_access/session_history.cpp
@@ -65,7 +82,7 @@ newdb_force_include_waterfall_config(newdb_core)
 option(NEWDB_BUILD_SHARED "Build shared library (C ABI) for cross-language usage" ON)
 if(NEWDB_BUILD_SHARED)
     add_library(newdb_shared SHARED
-        engine/src/c_api/c_api.cpp
+        engine/src/api/c/c_api.cpp
     )
     target_include_directories(newdb_shared PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -109,7 +126,8 @@ set(NEWDB_DEMO_LIB_SOURCES
     cli/shell/diag/demo_diag.cc
     cli/shell/repl/demo_shell.cc
     cli/modules/import_export/demo_export.cc
-    cli/shell/dispatch/dispatch.cc
+    cli/shell/dispatch/router/dispatch.cc
+    cli/shell/dispatch/router/dispatch_routing.cc
     cli/shell/dispatch/handlers/session/session_handler.cc
     cli/shell/dispatch/handlers/txn/txn_handler.cc
     cli/shell/dispatch/handlers/ddl/ddl_handler.cc
@@ -117,20 +135,23 @@ set(NEWDB_DEMO_LIB_SOURCES
     cli/shell/dispatch/handlers/query/query_handler.cc
     cli/shell/dispatch/handlers/io/io_handler.cc
     cli/shell/dispatch/handlers/workspace/workspace_handler.cc
-    cli/shell/dispatch/impl/args/args_impl.cc
-    cli/shell/dispatch/impl/index/fast_index_impl.cc
+    cli/shell/dispatch/support/args/args_impl.cc
+    cli/shell/dispatch/support/index/fast_index_impl.cc
     cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc
     cli/shell/dispatch/services/lsm/lsm_lite_service.cc
     cli/shell/bootstrap/demo_cli.cpp
-    cli/modules/view/table_view.cc
+    cli/modules/common/view/table_view.cc
     cli/modules/where/executor/match/match_impl.cc
     cli/modules/where/executor/cache/cache_impl.cc
     cli/modules/where/executor/policy/policy_service.cc
     cli/modules/where/executor/plan/plan_impl.cc
+    cli/modules/where/executor/stats/table_stats.cc
+    cli/modules/sidecar/common/index_catalog.cc
+    cli/modules/storage/table_storage_health.cc
     cli/modules/catalog/schema_catalog.cc
     cli/modules/where/parser/condition.cc
-    cli/modules/util/utils.cc
-    cli/modules/logging/logging.cc
+    cli/modules/common/util/utils.cc
+    cli/modules/common/logging/logging.cc
     cli/modules/import_export/import.cc
     cli/modules/txn/coordinator/core/core_impl.cc
     cli/modules/txn/coordinator/lock/lock_service.cc
@@ -166,34 +187,6 @@ target_link_libraries(newdb_demo PRIVATE newdb_demo_lib)
 target_compile_definitions(newdb_demo PRIVATE "NEWDB_DISPLAY_PROJECT=\"newdb\"")
 newdb_force_include_waterfall_config(newdb_demo)
 
-if(MINGW)
-    # Reduce runtime dependency issues on target machines
-    # (e.g. missing pthread_cond_timedwait64 in mismatched libwinpthread-1.dll).
-    set(NEWDB_STATIC_WINPTHREAD_FLAG "-Wl,-Bstatic,-l:libwinpthread.a,-Bdynamic")
-    target_link_options(newdb_demo PRIVATE
-        -static-libgcc
-        -static-libstdc++
-        ${NEWDB_STATIC_WINPTHREAD_FLAG}
-    )
-    target_link_options(newdb_perf PRIVATE
-        -static-libgcc
-        -static-libstdc++
-        ${NEWDB_STATIC_WINPTHREAD_FLAG}
-    )
-    target_link_options(newdb_runtime_report PRIVATE
-        -static-libgcc
-        -static-libstdc++
-        ${NEWDB_STATIC_WINPTHREAD_FLAG}
-    )
-    if(NEWDB_BUILD_SHARED)
-        target_link_options(newdb_shared PRIVATE
-            -static-libgcc
-            -static-libstdc++
-            ${NEWDB_STATIC_WINPTHREAD_FLAG}
-        )
-    endif()
-endif()
-
 # ---- Qt GUI (optional; independent executable from newdb_demo CLI) ----
 option(NEWDB_BUILD_GUI "Build newdb_gui (Qt Widgets; requires Qt5>=5.12 or Qt6)" OFF)
 if(NEWDB_BUILD_GUI)
@@ -223,17 +216,82 @@ if(NEWDB_BUILD_GUI)
 endif()
 
 option(NEWDB_BUILD_TESTS "Build GoogleTest suite (newdb_tests)" ON)
+option(NEWDB_GTEST_BUILD_SHARED_DLL "Build GoogleTest as shared DLLs for cross-language reuse" ON)
+
+# /MT + gtest DLL mixes CRTs; default gtest to static CRT when using static MSVC runtime.
+if(MSVC AND NEWDB_MSVC_STATIC_RUNTIME AND NEWDB_BUILD_TESTS AND NEWDB_GTEST_BUILD_SHARED_DLL)
+    message(STATUS "NEWDB_MSVC_STATIC_RUNTIME: forcing NEWDB_GTEST_BUILD_SHARED_DLL=OFF (avoid /MT + MD gtest mix).")
+    set(NEWDB_GTEST_BUILD_SHARED_DLL OFF CACHE BOOL "" FORCE)
+endif()
+# MinGW: -static-libgcc on exes/DLLs + libgtest.dll causes duplicate _Unwind_Resume (libgcc_eh vs gtest DLL).
+if(MINGW AND NEWDB_BUILD_TESTS AND NEWDB_GTEST_BUILD_SHARED_DLL)
+    message(STATUS "MinGW: forcing NEWDB_GTEST_BUILD_SHARED_DLL=OFF (avoid _Unwind_Resume clash with -static-libgcc).")
+    set(NEWDB_GTEST_BUILD_SHARED_DLL OFF CACHE BOOL "" FORCE)
+endif()
 
 if(NEWDB_BUILD_TESTS)
     include(CTest)
     include(FetchContent)
-    # Tarball avoids slow/blocked git clones in some environments.
-    FetchContent_Declare(
-        googletest
-        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
-    )
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    # Prefer a local tree when provided (-Dgoogletest_SOURCE_DIR=... or
+    # -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=...) so offline / blocked-GitHub builds work.
+    set(_newdb_googletest_src "")
+    if(DEFINED FETCHCONTENT_SOURCE_DIR_GOOGLETEST AND FETCHCONTENT_SOURCE_DIR_GOOGLETEST
+            AND EXISTS "${FETCHCONTENT_SOURCE_DIR_GOOGLETEST}/CMakeLists.txt")
+        set(_newdb_googletest_src "${FETCHCONTENT_SOURCE_DIR_GOOGLETEST}")
+    elseif(googletest_SOURCE_DIR AND EXISTS "${googletest_SOURCE_DIR}/CMakeLists.txt")
+        set(_newdb_googletest_src "${googletest_SOURCE_DIR}")
+    endif()
+    if(_newdb_googletest_src)
+        message(STATUS "googletest: using local SOURCE_DIR (${_newdb_googletest_src})")
+        set(FETCHCONTENT_UPDATES_DISCONNECTED_GOOGLETEST ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(googletest SOURCE_DIR "${_newdb_googletest_src}")
+    else()
+        # Tarball avoids slow/blocked git clones in some environments.
+        FetchContent_Declare(
+            googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.tar.gz
+        )
+    endif()
+    if(MSVC AND NEWDB_MSVC_STATIC_RUNTIME)
+        set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
+    else()
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    endif()
+    if(NEWDB_GTEST_BUILD_SHARED_DLL)
+        # Build gtest/gtest_main as DLLs so other language runtimes can reuse them.
+        set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
+    else()
+        # Stale ON from a prior configure would keep gtest as DLLs (e.g. after MinGW forces shared OFF).
+        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    endif()
     FetchContent_MakeAvailable(googletest)
+
+    # googletest lives in a subdirectory and may not inherit CMAKE_MSVC_RUNTIME_LIBRARY from the parent.
+    if(MSVC AND NEWDB_MSVC_STATIC_RUNTIME)
+        set(_newdb_msvc_mt_rt MultiThreaded$<$<CONFIG:Debug>:Debug>)
+        foreach(_gt IN ITEMS gtest gtest_main gmock gmock_main)
+            if(TARGET ${_gt})
+                set_property(TARGET ${_gt} PROPERTY MSVC_RUNTIME_LIBRARY "${_newdb_msvc_mt_rt}")
+            endif()
+        endforeach()
+    endif()
+
+    add_library(gtest_capi SHARED
+        tests/gtest_c_api.cpp
+    )
+    target_include_directories(gtest_capi PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    )
+    # Link both gtest and gtest_main so flag symbols are consistently resolved
+    # when gtest is built as shared libraries on MSVC.
+    target_link_libraries(gtest_capi PRIVATE GTest::gtest GTest::gtest_main)
+    if(NEWDB_GTEST_BUILD_SHARED_DLL)
+        target_compile_definitions(gtest_capi PRIVATE GTEST_LINKED_AS_SHARED_LIBRARY=1)
+    endif()
+    if(WIN32)
+        target_compile_definitions(gtest_capi PRIVATE GTEST_C_API_SHARED_BUILD)
+    endif()
+    set_target_properties(gtest_capi PROPERTIES OUTPUT_NAME "gtest_capi")
 
     add_executable(newdb_tests
         tests/test_status.cpp
@@ -254,6 +312,8 @@ if(NEWDB_BUILD_TESTS)
         tests/test_demo_cli.cpp
         tests/test_demo_mdb_stop.cpp
         tests/test_demo_utils.cpp
+        tests/test_demo_page_keyset.cpp
+        tests/test_dispatch_routing.cpp
         tests/test_demo_lsm_lite.cpp
         tests/test_c_api.cpp
         tests/test_error_format.cpp
@@ -263,6 +323,11 @@ if(NEWDB_BUILD_TESTS)
         tests/test_wal_concurrency.cpp
         tests/test_wal_recovery_indexed.cpp
         tests/test_txn_file_lock.cpp
+        tests/test_txn_isolation_config.cpp
+        tests/test_txn_isolation_visibility.cpp
+        tests/test_txn_shell_multi_entry_snapshot.cpp
+        tests/test_show_plan_table_stats_stale_shell.cpp
+        tests/test_where_heap_scan_budget_binding.cpp
         tests/test_txn_autovacuum.cpp
         tests/test_txn_write_conflict.cpp
         tests/test_sidecar_wal_lsn_stress.cpp
@@ -272,13 +337,20 @@ if(NEWDB_BUILD_TESTS)
         tests/test_eq_sidecar_bucket.cpp
         tests/test_eq_bloom.cpp
         tests/test_where_concurrency.cpp
+        tests/test_query_table_stats.cpp
+        tests/test_index_catalog.cpp
+        tests/test_wal_segment_scanner.cpp
+        tests/test_table_storage_health.cpp
+        tests/test_page_cache.cpp
+        tests/test_storage_soak.cpp
         tests/test_ci_microbench.cpp
         cli/modules/sidecar/common/sidecar_wal_lsn.cpp
         cli/shell/bootstrap/demo_runner.cc
         cli/shell/diag/demo_diag.cc
         cli/modules/import_export/demo_export.cc
         cli/shell/repl/demo_shell.cc
-        cli/shell/dispatch/dispatch.cc
+        cli/shell/dispatch/router/dispatch.cc
+        cli/shell/dispatch/router/dispatch_routing.cc
         cli/shell/dispatch/handlers/session/session_handler.cc
         cli/shell/dispatch/handlers/txn/txn_handler.cc
         cli/shell/dispatch/handlers/ddl/ddl_handler.cc
@@ -286,12 +358,12 @@ if(NEWDB_BUILD_TESTS)
         cli/shell/dispatch/handlers/query/query_handler.cc
         cli/shell/dispatch/handlers/io/io_handler.cc
         cli/shell/dispatch/handlers/workspace/workspace_handler.cc
-        cli/shell/dispatch/impl/args/args_impl.cc
-        cli/shell/dispatch/impl/index/fast_index_impl.cc
+        cli/shell/dispatch/support/args/args_impl.cc
+        cli/shell/dispatch/support/index/fast_index_impl.cc
         cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc
         cli/shell/dispatch/services/lsm/lsm_lite_service.cc
         cli/modules/import_export/import.cc
-        cli/modules/view/table_view.cc
+        cli/modules/common/view/table_view.cc
         cli/modules/sidecar/common/bptree_index.cc
         cli/modules/sidecar/page/page_index_sidecar.cc
         cli/shell/bootstrap/demo_cli.cpp
@@ -300,13 +372,16 @@ if(NEWDB_BUILD_TESTS)
         cli/modules/where/executor/cache/cache_impl.cc
         cli/modules/where/executor/policy/policy_service.cc
         cli/modules/where/executor/plan/plan_impl.cc
+        cli/modules/where/executor/stats/table_stats.cc
+        cli/modules/sidecar/common/index_catalog.cc
+        cli/modules/storage/table_storage_health.cc
         cli/modules/sidecar/eq/equality_index_sidecar.cc
         cli/modules/sidecar/eq/eq_bloom.cc
         cli/modules/sidecar/covering/covering_index_sidecar.cc
         cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.cc
         cli/modules/catalog/schema_catalog.cc
-        cli/modules/util/utils.cc
-        cli/modules/logging/logging.cc
+        cli/modules/common/util/utils.cc
+        cli/modules/common/logging/logging.cc
         cli/modules/txn/coordinator/core/core_impl.cc
         cli/modules/txn/coordinator/lock/lock_service.cc
         cli/modules/txn/coordinator/wal/wal_service.cc
@@ -314,7 +389,7 @@ if(NEWDB_BUILD_TESTS)
         cli/modules/txn/coordinator/write_conflict/write_conflict_service.cc
         cli/modules/txn/coordinator/vacuum/vacuum_service.cc
         cli/modules/txn/coordinator/stats/stats_impl.cc
-        engine/src/c_api/c_api.cpp
+        engine/src/api/c/c_api.cpp
     )
     target_include_directories(newdb_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -322,10 +397,184 @@ if(NEWDB_BUILD_TESTS)
         "${NEWDB_REPO_ROOT}"
     )
     target_link_libraries(newdb_tests PRIVATE newdb_core GTest::gtest_main)
+    # MSVC: multiple translation units in one target can contend on vc*.pdb without /FS.
+    if(MSVC)
+        target_compile_options(newdb_tests PRIVATE /FS)
+    endif()
     newdb_force_include_waterfall_config(newdb_tests)
+    # copy_if_different with $<TARGET_RUNTIME_DLLS:...> is invalid when the exe has no runtime DLLs
+    # (e.g. MSVC /MT + static gtest); only used when gtest is built as DLLs.
+    if(WIN32 AND NEWDB_GTEST_BUILD_SHARED_DLL)
+        add_custom_command(TARGET newdb_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:newdb_tests>
+                $<TARGET_FILE_DIR:newdb_tests>
+            COMMAND_EXPAND_LISTS
+        )
+    endif()
 
     include(GoogleTest)
-    gtest_discover_tests(newdb_tests)
+    # PRE_TEST avoids build-time execution (which can fail on Windows when
+    # dependent test DLLs are not yet on PATH during discovery step).
+    # Default label `newdb` for filtering; targeted subsets use `ctest -R` (see TESTS_FAULT_INJECTION_AND_TXN_MATRIX.md).
+    gtest_discover_tests(newdb_tests
+        DISCOVERY_MODE PRE_TEST
+        PROPERTIES LABELS "newdb"
+    )
 endif()
+
+# ---- Shared bundle (self-contained runtime) ----
+set(NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS
+    newdb_demo
+    newdb_smoke
+    newdb_perf
+    newdb_concurrent_perf
+    newdb_runtime_report
+)
+set(NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS)
+if(NEWDB_BUILD_SHARED)
+    list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS newdb_shared)
+endif()
+if(NEWDB_BUILD_GUI)
+    list(APPEND NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS newdb_gui)
+endif()
+if(NEWDB_BUILD_TESTS)
+    list(APPEND NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS newdb_tests)
+    list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS gtest_capi)
+    if(TARGET gtest)
+        list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS gtest)
+    endif()
+    if(TARGET gtest_main)
+        list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS gtest_main)
+    endif()
+endif()
+set(NEWDB_SHARED_BUNDLE_TARGETS
+    ${NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS}
+    ${NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS}
+)
+
+# MinGW: statically link libgcc/libstdc++ and pin winpthread for all shipped binaries (full tree).
+if(MINGW)
+    set(NEWDB_MINGW_STATIC_RT_FLAGS
+        -static-libgcc
+        -static-libstdc++
+        "-Wl,-Bstatic,-l:libwinpthread.a,-Bdynamic"
+    )
+    set(_newdb_mingw_link_targets
+        newdb_demo
+        newdb_smoke
+        newdb_perf
+        newdb_concurrent_perf
+        newdb_runtime_report
+    )
+    if(NEWDB_BUILD_SHARED)
+        list(APPEND _newdb_mingw_link_targets newdb_shared)
+    endif()
+    if(NEWDB_BUILD_TESTS)
+        list(APPEND _newdb_mingw_link_targets newdb_tests gtest_capi)
+        # When gtest is built as DLLs, link them with the same static libgcc/libstdc++/winpthread as our exes.
+        if(NEWDB_GTEST_BUILD_SHARED_DLL)
+            foreach(_gt IN ITEMS gtest gtest_main gmock gmock_main)
+                if(TARGET ${_gt})
+                    get_target_property(_gt_type ${_gt} TYPE)
+                    if(_gt_type STREQUAL "SHARED_LIBRARY")
+                        list(APPEND _newdb_mingw_link_targets ${_gt})
+                    endif()
+                endif()
+            endforeach()
+        endif()
+    endif()
+    if(NEWDB_BUILD_GUI)
+        list(APPEND _newdb_mingw_link_targets newdb_gui)
+    endif()
+    foreach(_mt IN LISTS _newdb_mingw_link_targets)
+        if(TARGET ${_mt})
+            target_link_options(${_mt} PRIVATE ${NEWDB_MINGW_STATIC_RT_FLAGS})
+        endif()
+    endforeach()
+endif()
+
+if(UNIX AND NOT APPLE)
+    foreach(_rpath_target IN LISTS NEWDB_SHARED_BUNDLE_TARGETS)
+        set_target_properties(${_rpath_target} PROPERTIES
+            BUILD_RPATH "\$ORIGIN"
+            INSTALL_RPATH "\$ORIGIN"
+        )
+    endforeach()
+endif()
+
+set(NEWDB_SHARED_BUNDLE_OUTPUT_DIR "${CMAKE_BINARY_DIR}/shared_bundle/$<CONFIG>")
+set(_newdb_bundle_script_content "set(_bundle_dir \"${NEWDB_SHARED_BUNDLE_OUTPUT_DIR}\")\n")
+string(APPEND _newdb_bundle_script_content "file(MAKE_DIRECTORY \"\${_bundle_dir}\")\n")
+foreach(_bundle_target IN LISTS NEWDB_SHARED_BUNDLE_TARGETS)
+    string(APPEND _newdb_bundle_script_content
+        "set(_bin \"$<TARGET_FILE:${_bundle_target}>\")\n"
+        "if(EXISTS \"\${_bin}\")\n"
+        "  file(COPY \"\${_bin}\" DESTINATION \"\${_bundle_dir}\")\n"
+        "endif()\n"
+    )
+    # TARGET_RUNTIME_DLLS is only valid for shared/module targets (not static gtest with /MT).
+    if(WIN32 AND TARGET ${_bundle_target})
+        get_target_property(_newdb_bundle_ttype ${_bundle_target} TYPE)
+        if(_newdb_bundle_ttype STREQUAL "SHARED_LIBRARY" OR _newdb_bundle_ttype STREQUAL "MODULE_LIBRARY")
+            string(APPEND _newdb_bundle_script_content
+                "set(_dlls \"$<TARGET_RUNTIME_DLLS:${_bundle_target}>\")\n"
+                "if(_dlls)\n"
+                "  foreach(_dll IN LISTS _dlls)\n"
+                "    if(EXISTS \"\${_dll}\")\n"
+                "      file(COPY \"\${_dll}\" DESTINATION \"\${_bundle_dir}\")\n"
+                "    endif()\n"
+                "  endforeach()\n"
+                "endif()\n"
+            )
+        endif()
+    endif()
+endforeach()
+
+foreach(_exe_target IN LISTS NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS)
+    if(WIN32)
+        string(APPEND _newdb_bundle_script_content
+            "set(_launcher \"\${_bundle_dir}/run_$<TARGET_FILE_BASE_NAME:${_exe_target}>.cmd\")\n"
+            "file(WRITE \"\${_launcher}\" \"@echo off\\nsetlocal\\nset \\\"PATH=%~dp0\\\"\\n\\\"%~dp0$<TARGET_FILE_NAME:${_exe_target}>\\\" %*\\n\")\n"
+        )
+    endif()
+endforeach()
+
+if(MINGW)
+    get_filename_component(_newdb_mingw_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    string(APPEND _newdb_bundle_script_content
+        "set(_mingw_bin \"${_newdb_mingw_bin_dir}\")\n"
+        "if(EXISTS \"\${_mingw_bin}\")\n"
+        "  set(_mingw_runtime_patterns\n"
+        "    \"libstdc++-6.dll\"\n"
+        "    \"libwinpthread-1.dll\"\n"
+        "    \"libssp-0.dll\"\n"
+        "    \"libgcc_s_*.dll\"\n"
+        "  )\n"
+        "  foreach(_pat IN LISTS _mingw_runtime_patterns)\n"
+        "    file(GLOB _matches \"\${_mingw_bin}/\${_pat}\")\n"
+        "    foreach(_dll IN LISTS _matches)\n"
+        "      if(EXISTS \"\${_dll}\")\n"
+        "        file(COPY \"\${_dll}\" DESTINATION \"\${_bundle_dir}\")\n"
+        "      endif()\n"
+        "    endforeach()\n"
+        "  endforeach()\n"
+        "endif()\n"
+    )
+endif()
+
+file(GENERATE
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/cmake/newdb_shared_bundle_$<CONFIG>.cmake"
+    CONTENT "${_newdb_bundle_script_content}"
+)
+
+add_custom_target(shared_bundle
+    COMMAND ${CMAKE_COMMAND} -P "${CMAKE_CURRENT_BINARY_DIR}/cmake/newdb_shared_bundle_$<CONFIG>.cmake"
+    COMMENT "Bundling self-contained shared bundle artifacts"
+)
+add_dependencies(shared_bundle ${NEWDB_SHARED_BUNDLE_TARGETS})
+
+# Backward compatibility alias.
+add_custom_target(newdb_bundle DEPENDS shared_bundle)
 
 

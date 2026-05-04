@@ -15,17 +15,17 @@
 #include <newdb/page_io.h>
 
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
-#include "cli/shell/dispatch/internal/dispatch_internal.h"
+#include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/import_export/demo_export.h"
 #include "cli/modules/import_export/import.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
 #include "cli/shell/state/shell_state.h"
 #include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
-#include "cli/modules/view/table_view.h"
+#include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
-#include "cli/modules/util/utils.h"
+#include "cli/modules/common/util/utils.h"
 #include "cli/modules/where/executor/where.h"
 
 bool handle_dml_insert_command(ShellState& st,
@@ -48,7 +48,7 @@ bool handle_dml_insert_command(ShellState& st,
             return true;
         }
         newdb::HeapTable& tbl = *tbl_ptr;
-        const newdb::Status ist = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status ist = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!ist.ok) {
             log_and_print(log_file, "[%s] %s\n", bulk_name, ist.message.c_str());
             return true;
@@ -228,7 +228,7 @@ bool handle_dml_insert_command(ShellState& st,
     }
     refresh_schema_if_missing(st, eff_data);
     newdb::HeapTable& tbl = *tbl_ptr;
-    const newdb::Status ist = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+    const newdb::Status ist = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
     if (!ist.ok) {
         log_and_print(log_file, "[INSERT] %s\n", ist.message.c_str());
         return true;
@@ -359,7 +359,7 @@ bool handle_dml_update_delete_commands(ShellState& st,
             return true;
         }
         refresh_schema_if_missing(st, eff_data);
-        const newdb::Status ust = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status ust = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!ust.ok) {
             log_and_print(log_file, "[UPDATE] %s\n", ust.message.c_str());
             return true;
@@ -481,7 +481,7 @@ bool handle_dml_update_delete_commands(ShellState& st,
             log_and_print(log_file, "[DELETE] argument must be integer id.\n");
             return true;
         }
-        const newdb::Status dst = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status dst = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!dst.ok) {
             log_and_print(log_file, "[DELETE] %s\n", dst.message.c_str());
             return true;
@@ -538,7 +538,7 @@ bool handle_dml_update_delete_commands(ShellState& st,
         }
         std::string pk = st.session.schema.primary_key.empty() ? "id" : st.session.schema.primary_key;
         const std::string& val = args[0];
-        const newdb::Status dpst = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status dpst = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!dpst.ok) {
             log_and_print(log_file, "[DELETEPK] %s\n", dpst.message.c_str());
             return true;
@@ -619,7 +619,7 @@ bool handle_dml_attr_commands(ShellState& st,
             log_and_print(log_file, "[SETATTR] first argument must be integer id.\n");
             return true;
         }
-        const newdb::Status sat = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status sat = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!sat.ok) {
             log_and_print(log_file, "[SETATTR] %s\n", sat.message.c_str());
             return true;
@@ -689,7 +689,7 @@ bool handle_dml_attr_commands(ShellState& st,
             log_and_print(log_file, "[DELATTR] cannot delete primary key 'id'\n");
             return true;
         }
-        const newdb::Status dat = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status dat = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!dat.ok) {
             log_and_print(log_file, "[DELATTR] %s\n", dat.message.c_str());
             return true;
@@ -737,7 +737,7 @@ bool handle_dml_attr_commands(ShellState& st,
             log_and_print(log_file, "[RENATTR] old and new names are the same, ignored.\n");
             return true;
         }
-        const newdb::Status rat = newdb_materialize_heap_if_lazy(tbl, st.session.schema);
+        const newdb::Status rat = newdb_materialize_heap_if_lazy(tbl, st.session.schema, &st);
         if (!rat.ok) {
             log_and_print(log_file, "[RENATTR] %s\n", rat.message.c_str());
             return true;

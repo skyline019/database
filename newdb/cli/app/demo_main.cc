@@ -8,7 +8,7 @@
 #include "cli/shell/bootstrap/demo_cli.h"
 #include "cli/shell/bootstrap/demo_runner.h"
 #include "cli/shell/repl/demo_shell.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/shell/state/shell_state.h"
 
 #ifndef NEWDB_DISPLAY_PROJECT

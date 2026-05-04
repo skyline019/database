@@ -1,4 +1,5 @@
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
+#include "cli/modules/sidecar/common/index_catalog.h"
 
 #include <filesystem>
 #include <fstream>
@@ -17,6 +18,21 @@
 namespace fs = std::filesystem;
 
 namespace {
+
+std::string cov_table_plain(const std::string& data_file, const std::string& catalog_table_plain_opt) {
+    if (!catalog_table_plain_opt.empty()) {
+        return catalog_table_plain_opt;
+    }
+    return index_catalog_infer_table_plain_from_data_file(data_file);
+}
+
+std::string cov_agg_index_plain(const std::string& key_attr, const std::string& include_attr) {
+    return key_attr + "|" + include_attr;
+}
+
+std::string cov_proj_index_plain(const std::string& key_attr, const std::string& proj_attr) {
+    return key_attr + "|proj|" + proj_attr;
+}
 
 struct AggBucket {
     std::size_t count{0};
@@ -92,19 +108,27 @@ bool row_at_slot_read_cov(const newdb::HeapTable& tbl, const std::size_t slot, n
 }
 
 void write_proj_sidecar(const std::string& path,
+                        const std::string& data_file,
                         const std::string& key_attr,
                         const std::string& proj_attr,
                         const std::uint64_t data_sig,
                         const std::uint64_t attr_sig,
                         const std::uint64_t wal_lsn,
                         const std::unordered_map<std::string, std::vector<ProjRow>>& rows,
-                        const std::size_t limit) {
+                        const std::size_t limit,
+                        const std::string& catalog_table_plain = {}) {
     std::ofstream out(path, std::ios::out | std::ios::trunc);
     if (!out) {
         return;
     }
+    const std::string inx_key = key_attr + std::string("\x1ep\x1e") + proj_attr;
+    const std::string tplain = cov_table_plain(data_file, catalog_table_plain);
+    const std::string iplain = cov_proj_index_plain(key_attr, proj_attr);
     out << "v=1;type=proj;key=" << key_attr << ";proj=" << proj_attr << ";limit=" << limit
-        << ";data_sig=" << data_sig << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn << "\n";
+        << ";data_sig=" << data_sig << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(IndexKind::Covering, attr_sig, wal_lsn, data_file, inx_key, nullptr, tplain,
+                                             iplain)
+        << "\n";
     for (const auto& kv : rows) {
         std::size_t wrote = 0;
         for (const auto& r : kv.second) {
@@ -115,6 +139,7 @@ void write_proj_sidecar(const std::string& path,
 }
 
 bool read_proj_sidecar(const std::string& path,
+                       const std::string& data_file,
                        const std::string& key_attr,
                        const std::string& proj_attr,
                        const std::uint64_t data_sig,
@@ -122,7 +147,8 @@ bool read_proj_sidecar(const std::string& path,
                        const std::uint64_t wal_lsn,
                        const std::string& key_value,
                        const std::size_t limit,
-                       std::vector<CoveringProjRow>& out) {
+                       std::vector<CoveringProjRow>& out,
+                       const std::string& catalog_table_plain = {}) {
     std::ifstream in(path, std::ios::in);
     if (!in) return false;
     std::string hdr;
@@ -133,6 +159,14 @@ bool read_proj_sidecar(const std::string& path,
         hdr.find("data_sig=" + std::to_string(data_sig)) == std::string::npos ||
         hdr.find("attr_sig=" + std::to_string(attr_sig)) == std::string::npos ||
         hdr.find("wal_lsn=" + std::to_string(wal_lsn)) == std::string::npos) {
+        return false;
+    }
+    IndexCatalogParsedTail tail{};
+    index_catalog_parse_header_tail(hdr, tail);
+    const std::string inx_key = key_attr + std::string("\x1ep\x1e") + proj_attr;
+    const std::string tplain = cov_table_plain(data_file, catalog_table_plain);
+    const std::string iplain = cov_proj_index_plain(key_attr, proj_attr);
+    if (!index_catalog_header_identity_ok(hdr, tail, data_file, inx_key, tplain, iplain, IndexKind::Covering)) {
         return false;
     }
     out.clear();
@@ -177,21 +211,29 @@ bool read_proj_sidecar(const std::string& path,
 }
 
 void write_sidecar(const std::string& path,
+                   const std::string& data_file,
                    const std::string& key_attr,
                    const std::string& include_attr,
                    const std::uint64_t data_sig,
                    const std::uint64_t attr_sig,
                    const std::uint64_t wal_lsn,
                    const std::size_t rows_hint,
-                   const std::unordered_map<std::string, AggBucket>& buckets) {
+                   const std::unordered_map<std::string, AggBucket>& buckets,
+                   const std::string& catalog_table_plain = {}) {
     std::ofstream out(path, std::ios::out | std::ios::trunc);
     if (!out) {
         return;
     }
+    const std::string inx_key = key_attr + std::string("\x1e") + include_attr;
+    const std::string tplain = cov_table_plain(data_file, catalog_table_plain);
+    const std::string iplain = cov_agg_index_plain(key_attr, include_attr);
     std::unordered_map<std::string, std::uint64_t> key_offsets;
     key_offsets.reserve(buckets.size());
     out << "v=1;key=" << key_attr << ";include=" << include_attr << ";data_sig=" << data_sig
-        << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn << ";rows=" << rows_hint << "\n";
+        << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(IndexKind::Covering, attr_sig, wal_lsn, data_file, inx_key, nullptr, tplain,
+                                             iplain)
+        << ";rows=" << rows_hint << "\n";
     for (const auto& kv : buckets) {
         const std::streampos pos = out.tellp();
         if (pos >= 0) {
@@ -204,7 +246,10 @@ void write_sidecar(const std::string& path,
         return;
     }
     idx << "v=1;type=agg_idx;key=" << key_attr << ";include=" << include_attr << ";data_sig=" << data_sig
-        << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn << "\n";
+        << ";attr_sig=" << attr_sig << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(IndexKind::Covering, attr_sig, wal_lsn, data_file, inx_key, nullptr, tplain,
+                                             iplain)
+        << "\n";
     for (const auto& kv : key_offsets) {
         idx << kv.first.size() << ":" << kv.first << "\t" << kv.second << "\n";
     }
@@ -223,7 +268,7 @@ std::optional<std::string> parse_header_value(const std::string& hdr, const std:
     return hdr.substr(pos + token.size(), end - (pos + token.size()));
 }
 
-bool read_sidecar_state(const std::string& path, CoveringAggSidecarState& state) {
+bool read_sidecar_state(const std::string& path, const std::string& data_file, CoveringAggSidecarState& state) {
     std::ifstream in(path, std::ios::in);
     if (!in) {
         return false;
@@ -231,6 +276,18 @@ bool read_sidecar_state(const std::string& path, CoveringAggSidecarState& state)
     std::string hdr;
     if (!std::getline(in, hdr)) {
         return false;
+    }
+    IndexCatalogParsedTail tail{};
+    index_catalog_parse_header_tail(hdr, tail);
+    const auto key_attr_v0 = parse_header_value(hdr, "key");
+    const auto include_attr_v0 = parse_header_value(hdr, "include");
+    if (key_attr_v0.has_value() && include_attr_v0.has_value()) {
+        const std::string inx_key = *key_attr_v0 + std::string("\x1e") + *include_attr_v0;
+        const std::string tplain = cov_table_plain(data_file, "");
+        const std::string iplain = cov_agg_index_plain(*key_attr_v0, *include_attr_v0);
+        if (!index_catalog_header_identity_ok(hdr, tail, data_file, inx_key, tplain, iplain, IndexKind::Covering)) {
+            return false;
+        }
     }
     const auto key_attr_v = parse_header_value(hdr, "key");
     const auto include_attr_v = parse_header_value(hdr, "include");
@@ -288,14 +345,18 @@ bool read_sidecar_state(const std::string& path, CoveringAggSidecarState& state)
 }
 
 bool read_sidecar_fast(const std::string& path,
+                       const std::string& data_file,
                        const std::string& key_attr,
                        const std::string& include_attr,
                        const std::uint64_t data_sig,
                        const std::uint64_t attr_sig,
                        const std::uint64_t wal_lsn,
                        const std::string& key_value,
-                       CoveringAggLookup& out) {
+                       CoveringAggLookup& out,
+                       const std::string& catalog_table_plain = {}) {
     static std::unordered_map<std::string, SidecarOffsetIndex> index_cache;
+    const std::string exp_tbl = cov_table_plain(data_file, catalog_table_plain);
+    const std::string exp_inx = cov_agg_index_plain(key_attr, include_attr);
     const auto cache_it = index_cache.find(path);
     if (cache_it != index_cache.end() &&
         cache_it->second.key_attr == key_attr &&
@@ -352,34 +413,40 @@ bool read_sidecar_fast(const std::string& path,
                 idx_hdr.find("data_sig=" + std::to_string(data_sig)) != std::string::npos &&
                 idx_hdr.find("attr_sig=" + std::to_string(attr_sig)) != std::string::npos &&
                 idx_hdr.find("wal_lsn=" + std::to_string(wal_lsn)) != std::string::npos) {
-                std::string line;
-                while (std::getline(idx_in, line)) {
-                    if (line.empty()) continue;
-                    const auto c = line.find(':');
-                    const auto t = line.find('\t');
-                    if (c == std::string::npos || t == std::string::npos) {
-                        idx_state.key_offsets.clear();
-                        break;
-                    }
-                    std::size_t klen = 0;
-                    try {
-                        klen = static_cast<std::size_t>(std::stoull(line.substr(0, c)));
-                    } catch (...) {
-                        idx_state.key_offsets.clear();
-                        break;
-                    }
-                    const std::size_t kb = c + 1;
-                    if (kb + klen != t) {
-                        idx_state.key_offsets.clear();
-                        break;
-                    }
-                    std::string key = line.substr(kb, klen);
-                    try {
-                        const std::uint64_t off = static_cast<std::uint64_t>(std::stoull(line.substr(t + 1)));
-                        idx_state.key_offsets[std::move(key)] = off;
-                    } catch (...) {
-                        idx_state.key_offsets.clear();
-                        break;
+                IndexCatalogParsedTail idx_tail{};
+                index_catalog_parse_header_tail(idx_hdr, idx_tail);
+                const std::string inx_key = key_attr + std::string("\x1e") + include_attr;
+                if (index_catalog_header_identity_ok(idx_hdr, idx_tail, data_file, inx_key, exp_tbl, exp_inx,
+                                                     IndexKind::Covering)) {
+                    std::string line;
+                    while (std::getline(idx_in, line)) {
+                        if (line.empty()) continue;
+                        const auto c = line.find(':');
+                        const auto t = line.find('\t');
+                        if (c == std::string::npos || t == std::string::npos) {
+                            idx_state.key_offsets.clear();
+                            break;
+                        }
+                        std::size_t klen = 0;
+                        try {
+                            klen = static_cast<std::size_t>(std::stoull(line.substr(0, c)));
+                        } catch (...) {
+                            idx_state.key_offsets.clear();
+                            break;
+                        }
+                        const std::size_t kb = c + 1;
+                        if (kb + klen != t) {
+                            idx_state.key_offsets.clear();
+                            break;
+                        }
+                        std::string key = line.substr(kb, klen);
+                        try {
+                            const std::uint64_t off = static_cast<std::uint64_t>(std::stoull(line.substr(t + 1)));
+                            idx_state.key_offsets[std::move(key)] = off;
+                        } catch (...) {
+                            idx_state.key_offsets.clear();
+                            break;
+                        }
                     }
                 }
             }
@@ -387,7 +454,8 @@ bool read_sidecar_fast(const std::string& path,
     }
     if (!idx_state.key_offsets.empty()) {
         index_cache[path] = std::move(idx_state);
-        return read_sidecar_fast(path, key_attr, include_attr, data_sig, attr_sig, wal_lsn, key_value, out);
+        return read_sidecar_fast(path, data_file, key_attr, include_attr, data_sig, attr_sig, wal_lsn, key_value, out,
+                                  catalog_table_plain);
     }
 
     std::ifstream in(path, std::ios::in);
@@ -403,6 +471,14 @@ bool read_sidecar_fast(const std::string& path,
         hdr.find("attr_sig=" + std::to_string(attr_sig)) == std::string::npos ||
         hdr.find("wal_lsn=" + std::to_string(wal_lsn)) == std::string::npos) {
         return false;
+    }
+    {
+        IndexCatalogParsedTail tail{};
+        index_catalog_parse_header_tail(hdr, tail);
+        const std::string inx_key = key_attr + std::string("\x1e") + include_attr;
+        if (!index_catalog_header_identity_ok(hdr, tail, data_file, inx_key, exp_tbl, exp_inx, IndexKind::Covering)) {
+            return false;
+        }
     }
     std::string line;
     while (std::getline(in, line)) {
@@ -460,13 +536,14 @@ CoveringAggLookup lookup_or_build_covering_agg_sidecar(const std::string& data_f
     const std::uint64_t data_sig = file_sig(data_file);
     const std::uint64_t attr_sig = file_sig(newdb::schema_sidecar_path_for_data_file(data_file));
     const std::uint64_t wal_lsn = read_wal_lsn_for_workspace(workspace_dir_for_data_file(data_file));
-    if (read_sidecar_fast(sidecar, key_attr, include_attr, data_sig, attr_sig, wal_lsn, key_value, out)) {
+    if (read_sidecar_fast(sidecar, data_file, key_attr, include_attr, data_sig, attr_sig, wal_lsn, key_value, out,
+                           table.name)) {
         return out;
     }
     const std::vector<std::size_t> visible_slots = load_or_build_visibility_checkpoint_sidecar(data_file, schema, table);
     std::unordered_map<std::string, AggBucket> buckets;
     CoveringAggSidecarState sidecar_state;
-    if (read_sidecar_state(sidecar, sidecar_state) &&
+    if (read_sidecar_state(sidecar, data_file, sidecar_state) &&
         sidecar_state.key_attr == key_attr &&
         sidecar_state.include_attr == include_attr &&
         sidecar_state.data_sig == data_sig &&
@@ -503,7 +580,8 @@ CoveringAggLookup lookup_or_build_covering_agg_sidecar(const std::string& data_f
                     }
                 }
             }
-            write_sidecar(sidecar, key_attr, include_attr, data_sig, attr_sig, wal_lsn, visible_slots.size(), buckets);
+            write_sidecar(sidecar, data_file, key_attr, include_attr, data_sig, attr_sig, wal_lsn, visible_slots.size(),
+                          buckets, table.name);
         } else if (sidecar_state.wal_lsn == wal_lsn) {
             const auto it = buckets.find(key_value);
             out.used = true;
@@ -562,7 +640,8 @@ CoveringAggLookup lookup_or_build_covering_agg_sidecar(const std::string& data_f
             }
         }
     }
-    write_sidecar(sidecar, key_attr, include_attr, data_sig, attr_sig, wal_lsn, visible_slots.size(), buckets);
+    write_sidecar(sidecar, data_file, key_attr, include_attr, data_sig, attr_sig, wal_lsn, visible_slots.size(), buckets,
+                  table.name);
     const auto it = buckets.find(key_value);
     out.used = true;
     if (it == buckets.end()) {
@@ -590,7 +669,8 @@ std::vector<CoveringProjRow> lookup_or_build_covering_proj_sidecar(const std::st
     const std::uint64_t data_sig = file_sig(data_file);
     const std::uint64_t attr_sig = file_sig(newdb::schema_sidecar_path_for_data_file(data_file));
     const std::uint64_t wal_lsn = read_wal_lsn_for_workspace(workspace_dir_for_data_file(data_file));
-    if (read_proj_sidecar(sidecar, key_attr, proj_attr, data_sig, attr_sig, wal_lsn, key_value, limit, out)) {
+    if (read_proj_sidecar(sidecar, data_file, key_attr, proj_attr, data_sig, attr_sig, wal_lsn, key_value, limit, out,
+                          table.name)) {
         return out;
     }
 
@@ -620,7 +700,7 @@ std::vector<CoveringProjRow> lookup_or_build_covering_proj_sidecar(const std::st
             vec.push_back(ProjRow{.id = row.id, .value = std::move(val)});
         }
     }
-    write_proj_sidecar(sidecar, key_attr, proj_attr, data_sig, attr_sig, wal_lsn, rows, limit);
+    write_proj_sidecar(sidecar, data_file, key_attr, proj_attr, data_sig, attr_sig, wal_lsn, rows, limit, table.name);
 
     // Reload from in-memory map for requested key.
     const auto it = rows.find(key_value);

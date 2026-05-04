@@ -1,0 +1,297 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{xurl}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  breakindent=0pt,
+  frame=single,
+  columns=fullflexible,
+  xleftmargin=0pt,
+  framexleftmargin=6pt,
+  framexrightmargin=6pt,
+  aboveskip=6pt,
+  belowskip=6pt
+}
+\setlength{\emergencystretch}{3em}
+\Urlmuskip=0mu plus 2mu
+
+\title{newdb Shared Bundle External Integration Manual (Pure LaTeX)}
+\author{newdb Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Purpose and Scope}
+This document is a pure LaTeX technical manual for integrating \texttt{newdb}
+shared libraries from external language runtimes. It covers:
+\begin{itemize}
+  \item Build and distribution model for \texttt{shared\_bundle}
+  \item Full C API and gtest C API references
+  \item Command-driven execution model and templates
+  \item Unified result parsing and error handling
+  \item Deployment and operational recommendations
+\end{itemize}
+
+\section{Shared Bundle Model}
+\subsection{Output directories}
+\begin{itemize}
+  \item VS/MSVC: \texttt{build/newdb-vs2026-mt-tests/shared\_bundle/Release}
+  \item MinGW: \texttt{build/newdb-mingw/shared\_bundle/Release}
+  \item WSL/Linux: \texttt{build/newdb-wsl-tests/shared\_bundle/Release}
+\end{itemize}
+
+\subsection{Build commands}
+\begin{lstlisting}
+# VS/MSVC
+cmake --build build/newdb-vs2026-mt-tests --config Release --target shared_bundle --parallel
+
+# MinGW
+cmake --build build/newdb-mingw --target shared_bundle --parallel
+
+# WSL/Linux
+cmake --build build/newdb-wsl-tests --target shared_bundle -j8
+\end{lstlisting}
+
+\subsection{Dependency precedence policy}
+\begin{itemize}
+  \item Windows bundles include \texttt{run\_*.cmd} launchers to prioritize local DLLs.
+  \item Linux bundles are linked with \texttt{RPATH=\$ORIGIN} to prefer colocated \texttt{.so}.
+  \item MinGW bundle includes runtime DLLs:
+  \begin{itemize}
+    \item \texttt{libstdc++-6.dll}
+    \item \texttt{libgcc\_s\_*.dll}
+    \item \texttt{libwinpthread-1.dll}
+  \end{itemize}
+\end{itemize}
+
+\section{newdb C API Reference}
+\subsection{Header and compatibility constants}
+Header path:
+\begin{itemize}
+  \item \texttt{newdb/engine/include/newdb/c\_api.h}
+\end{itemize}
+
+Version/ABI constants:
+\begin{itemize}
+  \item \texttt{NEWDB\_C\_API\_VERSION\_MAJOR/MINOR/PATCH}
+  \item \texttt{NEWDB\_C\_API\_ABI\_VERSION}
+\end{itemize}
+
+\subsection{Error codes}
+\begin{longtable}{>{\ttfamily}p{0.38\linewidth}p{0.54\linewidth}}
+\toprule
+Code & Description \\
+\midrule
+NEWDB\_OK & Success \\
+NEWDB\_ERR\_INVALID\_ARGUMENT & Invalid argument or buffer contract violation \\
+NEWDB\_ERR\_INVALID\_HANDLE & Invalid or destroyed session handle \\
+NEWDB\_ERR\_EXECUTION\_FAILED & Command/business execution failed \\
+NEWDB\_ERR\_INTERNAL & Internal engine failure \\
+NEWDB\_ERR\_LOG\_IO & Log or file I/O failure \\
+NEWDB\_ERR\_SESSION\_TERMINATED & Session terminated and cannot continue \\
+\bottomrule
+\end{longtable}
+
+\subsection{Thread safety contract}
+\begin{itemize}
+  \item Global metadata APIs are thread-safe.
+  \item Per-session APIs are safe only when one thread owns one handle.
+  \item Concurrent use of the same handle is not guaranteed safe.
+\end{itemize}
+
+\subsection{Exported functions}
+\subsubsection*{Global/metadata}
+\begin{itemize}
+  \item \texttt{newdb\_version\_string}
+  \item \texttt{newdb\_api\_version\_major}, \texttt{newdb\_api\_version\_minor},
+  \texttt{newdb\_api\_version\_patch}
+  \item \texttt{newdb\_abi\_version}
+  \item \texttt{newdb\_negotiate\_abi}
+  \item \texttt{newdb\_error\_code\_string}
+  \item \texttt{newdb\_sum}
+\end{itemize}
+
+\subsubsection*{Schema/session/execution}
+\begin{itemize}
+  \item \texttt{newdb\_check\_schema\_file}
+  \item \texttt{newdb\_session\_create}
+  \item \texttt{newdb\_session\_destroy}
+  \item \texttt{newdb\_session\_set\_table}
+  \item \texttt{newdb\_session\_last\_error}
+  \item \texttt{newdb\_session\_execute}
+  \item \texttt{newdb\_session\_runtime\_stats}
+  \item \texttt{newdb\_session\_append\_runtime\_snapshot}
+\end{itemize}
+
+\subsection{Recommended lifecycle}
+\begin{enumerate}
+  \item Load library by absolute path.
+  \item Verify ABI via \texttt{newdb\_negotiate\_abi}.
+  \item Create session.
+  \item Execute command stream.
+  \item Capture runtime stats/snapshots if needed.
+  \item Destroy session.
+\end{enumerate}
+
+\section{gtest\_capi Reference}
+Header path:
+\begin{itemize}
+  \item \texttt{newdb/include/gtest\_capi.h}
+\end{itemize}
+
+Main API groups:
+\begin{itemize}
+  \item Init/Run:
+  \texttt{gtest\_capi\_init\_from\_argv},
+  \texttt{gtest\_capi\_run\_all}
+  \item Discovery:
+  \texttt{gtest\_capi\_list\_tests},
+  \texttt{gtest\_capi\_enumerate\_tests}
+  \item Options:
+  filter/output/repeat/shuffle/random\_seed/color and failure/exception controls
+  \item Generic option bridge:
+  \texttt{gtest\_capi\_set\_option},
+  \texttt{gtest\_capi\_get\_option}
+  \item Counters:
+  suite/test totals, pass/fail/skip/disabled and elapsed time
+\end{itemize}
+
+\section{Feature-Oriented Integration Guidance}
+Through \texttt{newdb\_session\_execute}, external systems can drive:
+\begin{itemize}
+  \item DDL/schema management
+  \item DML and query operations
+  \item Transaction and conflict/isolation controls
+  \item WAL/recovery controls
+  \item Runtime maintenance controls (vacuum, group commit, hot index)
+\end{itemize}
+
+Recommended wrapper layers:
+\begin{itemize}
+  \item DDL wrapper
+  \item DML wrapper
+  \item Query wrapper
+  \item Txn wrapper
+  \item Runtime tuning wrapper
+\end{itemize}
+
+\section{Command Templates for \texttt{newdb\_session\_execute}}
+\subsection{DDL and schema}
+\begin{lstlisting}
+CREATE TABLE(users)
+USE(users)
+SET PRIMARY KEY(uid)
+CREATE SCHEMA(finance_v1)
+DROP SCHEMA(finance_v1)
+ALTER TABLE users SET SCHEMA(finance_v1)
+ALTER TABLE users REMOVE SCHEMA
+RENAME TABLE(users_v2)
+DROP TABLE(users_v2)
+\end{lstlisting}
+
+\subsection{DML and query}
+\begin{lstlisting}
+DEFATTR(name:string, balance:int, dept:string)
+INSERT(1, alice, 1000, rd)
+UPDATE(1, alice, 1200)
+DELETE(1)
+DELETEPK(alice)
+SETATTR(1, dept, infra)
+DELATTR(dept)
+RENATTR(balance, amount)
+FIND(1)
+WHERE(balance, >, 1000, AND, dept, =, rd)
+COUNT
+PAGE(1, 20, id, desc)
+SUM(balance)
+AVG(balance)
+MIN(balance)
+MAX(balance)
+\end{lstlisting}
+
+\subsection{Transaction and runtime tuning}
+\begin{lstlisting}
+BEGIN
+SAVEPOINT(sp1)
+ROLLBACK TO(sp1)
+RELEASE SAVEPOINT(sp1)
+COMMIT
+TXNISOLATION snapshot
+TXNISOLATION read_committed
+WRITECONFLICT reject
+WRITECONFLICT wait 2000
+AUTOVACUUM threshold 500
+AUTOVACUUM interval 60
+WALSYNC normal 200
+WALADAPTIVE on
+GROUPCOMMIT 10 128
+HOTINDEX on
+\end{lstlisting}
+
+\section{Unified Result Parsing Standard}
+Always evaluate:
+\begin{enumerate}
+  \item Return code (\texttt{rc}) from \texttt{newdb\_session\_execute}
+  \item \texttt{newdb\_session\_last\_error}
+  \item Human-readable \texttt{output\_buf}
+\end{enumerate}
+
+Recommended result DTO:
+\begin{lstlisting}
+ExecuteResult {
+  rc: int
+  last_error: int
+  error_name: string
+  output: string
+  ok: bool
+}
+\end{lstlisting}
+
+Buffer sizing guideline:
+\begin{itemize}
+  \item 4KB minimum for simple commands
+  \item 16KB+ for complex query output
+\end{itemize}
+
+\section{Deployment and Operations}
+\subsection{Deployment checklist}
+\begin{enumerate}
+  \item Distribute full \texttt{shared\_bundle/Release} directory.
+  \item Use absolute-path dynamic loading.
+  \item Verify ABI before first session creation.
+  \item One thread per session handle.
+  \item Record \texttt{rc + last\_error + output} for all commands.
+\end{enumerate}
+
+\subsection{Observability}
+Collect:
+\begin{itemize}
+  \item Commit latency and conflict metrics
+  \item WAL recovery elapsed/scanned records
+  \item Vacuum trigger count and reclaimed bytes
+\end{itemize}
+
+\section{Troubleshooting}
+\begin{itemize}
+  \item ``Module not found'': missing colocated dependencies in bundle.
+  \item Wrong DLL/SO loaded: enforce absolute path and launcher usage.
+  \item WSL googletest download issues: use local
+  \texttt{FETCHCONTENT\_SOURCE\_DIR\_GOOGLETEST}.
+\end{itemize}
+
+\end{document}
+

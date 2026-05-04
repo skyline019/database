@@ -8,6 +8,7 @@
 *.out
 build/
 build_*/
+build-*/
 *.build/
 CMakeCache.txt
 CMakeFiles/
@@ -44,3 +45,15 @@ coverage_html/
 # Temporary
 tmp/
 temp/
+toolchain/
+
+# Local demo / workspace scratch at repo root (do not commit)
+/.bin.eqbloom.dept
+/.bin.eqidx.dept
+/.bin.vischk
+/demo_log.bin
+/demodb.wal_lsn
+/demodb.walsync.conf
+
+# CTest generated under source tree
+newdb/Testing/

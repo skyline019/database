@@ -71,6 +71,11 @@
 `runtime_wal_recovery_undo_ops_delta`、`runtime_wal_recovery_last_elapsed_ms_max`
 等运行时门禁指标，便于长期回归追踪。
 
+**汇总与归档路径（相对 `newdb/` 仓库根）**：
+
+- `nightly_soak_runner.ps1`：`scripts/results/nightly_soak_trend.jsonl`、同目录下 `test_loop_trend.jsonl`；单次运行的 perf summary 由脚本解析 `test_loop` 输出路径后调用 `validate_perf_summary.py`（见 `nightly_soak_runner.ps1` 内 `Parse-SummaryPath`）。
+- 与 **JSONL 归档契约**、**`ci_bench_gate.py --runtime-jsonl`** 对齐的说明见 [`docs/ci/PERF_AND_CI_BUDGETS.md`](../docs/ci/PERF_AND_CI_BUDGETS.md) §3–§4 与 [`docs/storage/STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md`](../docs/storage/STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md) §4；Nightly 阈值推荐区间可由 `python scripts/ci/nightly_soak_hints.py --json` 的 `threshold_hints` 字段查阅。
+
 ## 4) C API / 遥测 / 汇总校验（scripts/validate）
 
 - `validate/check_c_api_abi.py`

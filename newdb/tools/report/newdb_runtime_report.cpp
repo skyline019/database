@@ -34,7 +34,25 @@ struct Args {
     double min_lsm_memtable_flush_delta{-1.0};
     double max_lsm_read_segments_scanned_p95{-1.0};
     double min_lsm_compaction_bytes_amp_efficiency{-1.0};
+    double max_lazy_materialize_count_delta{-1.0};
+    double max_lazy_materialize_rows_total_delta{-1.0};
+    /// When >= 0, fail if any snapshot row with a non-zero health sample exceeds this fragmentation ratio.
+    double max_table_storage_health_fragmentation_ratio{-1.0};
+    /// When >= 0, fail if any health sample row exceeds this dead-bytes estimate (compact-debt proxy; governance doc).
+    double max_table_storage_health_dead_bytes{-1.0};
+    /// When >= 0, fail if max observed vacuum_health_bonus_last across snapshots exceeds this (health-weighted debt bonus).
+    double max_vacuum_health_bonus_last{-1.0};
+    /// When >= 0, fail if any snapshot exceeds this `compact_debt_bytes` (vacuum enqueue debt).
+    double max_compact_debt_bytes_peak{-1.0};
+    /// When >= 0, fail if page-cache lookups exist and hit ratio (last snapshot) is below threshold.
+    double min_page_cache_hit_ratio{-1.0};
+    /// When >= 0, fail if scan amplification exceeds threshold (window delta).
+    double max_where_scan_amplification{-1.0};
+    /// When >= 0, fail if memory_budget_reject_count delta exceeds threshold.
+    double max_memory_budget_reject_delta{-1.0};
     int last_n{0};
+    /// When true, stdout emits only the single-line summary JSON (gates still write to stderr on failure).
+    bool json_only_stdout{false};
 };
 
 struct Row {
@@ -75,6 +93,22 @@ struct Row {
     std::uint64_t lsm_read_segments_scanned_p95{0};
     std::uint64_t lsm_compaction_bytes_in{0};
     std::uint64_t lsm_compaction_bytes_out{0};
+    std::uint64_t lazy_materialize_count{0};
+    std::uint64_t lazy_materialize_rows_total{0};
+    std::uint64_t lazy_materialize_max_rows{0};
+    std::uint64_t lazy_materialize_elapsed_ms{0};
+    std::uint64_t table_storage_health_logical_rows{0};
+    std::uint64_t table_storage_health_dead_bytes{0};
+    double table_storage_health_fragmentation_ratio{0.0};
+    std::uint64_t vacuum_health_bonus_last{0};
+    std::uint64_t compact_debt_bytes{0};
+    std::uint64_t page_cache_hits{0};
+    std::uint64_t page_cache_misses{0};
+    std::uint64_t where_query_rows_scanned_total{0};
+    std::uint64_t where_query_rows_returned_total{0};
+    std::uint64_t wal_recovery_redo_ms{0};
+    std::uint64_t memory_budget_reject_count{0};
+    bool table_storage_health_sample_present{false};
     bool ok{false};
 };
 
@@ -101,7 +135,15 @@ void print_usage() {
         << "  [--max-lock-wait-max-ms-delta <>=0] [--max-scheduler-throttle-delta <>=0]\n"
         << "  [--min-wal-group-commit-batch-commits-delta <>=0]\n"
         << "  [--max-lsm-segment-count <>=0] [--min-lsm-memtable-flush-delta <>=0]\n"
-        << "  [--max-lsm-read-segments-scanned-p95 <>=0] [--min-lsm-compaction-bytes-amp-efficiency <>=0]\n";
+        << "  [--max-lsm-read-segments-scanned-p95 <>=0] [--min-lsm-compaction-bytes-amp-efficiency <>=0]\n"
+        << "  [--max-lazy-materialize-count-delta <>=0] [--max-lazy-materialize-rows-total-delta <>=0]\n"
+        << "  [--max-table-storage-health-fragmentation-ratio <>=0]\n"
+        << "  [--max-table-storage-health-dead-bytes <>=0]\n"
+        << "  [--max-vacuum-health-bonus-last <>=0]\n"
+        << "  [--max-compact-debt-bytes-peak <>=0]\n"
+        << "  [--min-page-cache-hit-ratio <0..1>] [--max-where-scan-amplification <>=0]\n"
+        << "  [--max-memory-budget-reject-delta <>=0]\n"
+        << "  [--json] (emit only the summary JSON line on stdout)\n";
 }
 
 bool parse_double(const char* s, double& out) {
@@ -123,6 +165,10 @@ bool parse_args(int argc, char** argv, Args& out) {
         if (arg == "--help" || arg == "-h") {
             print_usage();
             return false;
+        }
+        if (arg == "--json") {
+            out.json_only_stdout = true;
+            continue;
         }
         if (arg == "--input") {
             const char* v = next();
@@ -231,6 +277,51 @@ bool parse_args(int argc, char** argv, Args& out) {
             if (!v || !parse_double(v, out.min_lsm_compaction_bytes_amp_efficiency)) return false;
             continue;
         }
+        if (arg == "--max-lazy-materialize-count-delta") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_lazy_materialize_count_delta)) return false;
+            continue;
+        }
+        if (arg == "--max-lazy-materialize-rows-total-delta") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_lazy_materialize_rows_total_delta)) return false;
+            continue;
+        }
+        if (arg == "--max-table-storage-health-fragmentation-ratio") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_table_storage_health_fragmentation_ratio)) return false;
+            continue;
+        }
+        if (arg == "--max-table-storage-health-dead-bytes") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_table_storage_health_dead_bytes)) return false;
+            continue;
+        }
+        if (arg == "--max-vacuum-health-bonus-last") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_vacuum_health_bonus_last)) return false;
+            continue;
+        }
+        if (arg == "--max-compact-debt-bytes-peak") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_compact_debt_bytes_peak)) return false;
+            continue;
+        }
+        if (arg == "--min-page-cache-hit-ratio") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.min_page_cache_hit_ratio)) return false;
+            continue;
+        }
+        if (arg == "--max-where-scan-amplification") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_where_scan_amplification)) return false;
+            continue;
+        }
+        if (arg == "--max-memory-budget-reject-delta") {
+            const char* v = next();
+            if (!v || !parse_double(v, out.max_memory_budget_reject_delta)) return false;
+            continue;
+        }
         if (arg == "--label-prefix") {
             const char* v = next();
             if (!v) return false;
@@ -287,6 +378,40 @@ bool extract_u64_field_optional(const std::string& line, const std::string& key,
     return true;
 }
 
+bool extract_double_field(const std::string& line, const std::string& key, double& out) {
+    const std::string needle = "\"" + key + "\":";
+    const std::size_t pos = line.find(needle);
+    if (pos == std::string::npos) {
+        return false;
+    }
+    std::size_t i = pos + needle.size();
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) {
+        ++i;
+    }
+    std::size_t j = i;
+    if (j < line.size() && line[j] == '-') {
+        ++j;
+    }
+    while (j < line.size() && line[j] >= '0' && line[j] <= '9') {
+        ++j;
+    }
+    if (j < line.size() && line[j] == '.') {
+        ++j;
+        while (j < line.size() && line[j] >= '0' && line[j] <= '9') {
+            ++j;
+        }
+    }
+    if (j == i) {
+        return false;
+    }
+    try {
+        out = std::stod(line.substr(i, j - i));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool extract_string_field(const std::string& line, const std::string& key, std::string& out) {
     const std::string needle = "\"" + key + "\":\"";
     const std::size_t pos = line.find(needle);
@@ -340,6 +465,24 @@ Row parse_row(const std::string& line) {
     ok = ok && extract_u64_field_optional(line, "lsm_read_segments_scanned_p95", r.lsm_read_segments_scanned_p95);
     ok = ok && extract_u64_field_optional(line, "lsm_compaction_bytes_in", r.lsm_compaction_bytes_in);
     ok = ok && extract_u64_field_optional(line, "lsm_compaction_bytes_out", r.lsm_compaction_bytes_out);
+    ok = ok && extract_u64_field_optional(line, "lazy_materialize_count", r.lazy_materialize_count);
+    ok = ok && extract_u64_field_optional(line, "lazy_materialize_rows_total", r.lazy_materialize_rows_total);
+    ok = ok && extract_u64_field_optional(line, "lazy_materialize_max_rows", r.lazy_materialize_max_rows);
+    ok = ok && extract_u64_field_optional(line, "lazy_materialize_elapsed_ms", r.lazy_materialize_elapsed_ms);
+    if (extract_u64_field(line, "table_storage_health_logical_rows", r.table_storage_health_logical_rows)) {
+        r.table_storage_health_sample_present = true;
+        (void)extract_double_field(line, "table_storage_health_fragmentation_ratio",
+                                   r.table_storage_health_fragmentation_ratio);
+        (void)extract_u64_field_optional(line, "table_storage_health_dead_bytes", r.table_storage_health_dead_bytes);
+    }
+    (void)extract_u64_field_optional(line, "vacuum_health_bonus_last", r.vacuum_health_bonus_last);
+    (void)extract_u64_field_optional(line, "compact_debt_bytes", r.compact_debt_bytes);
+    (void)extract_u64_field_optional(line, "page_cache_hits", r.page_cache_hits);
+    (void)extract_u64_field_optional(line, "page_cache_misses", r.page_cache_misses);
+    (void)extract_u64_field_optional(line, "where_query_rows_scanned_total", r.where_query_rows_scanned_total);
+    (void)extract_u64_field_optional(line, "where_query_rows_returned_total", r.where_query_rows_returned_total);
+    (void)extract_u64_field_optional(line, "wal_recovery_redo_ms", r.wal_recovery_redo_ms);
+    (void)extract_u64_field_optional(line, "memory_budget_reject_count", r.memory_budget_reject_count);
     r.ok = ok;
     return r;
 }
@@ -402,10 +545,27 @@ std::string build_summary_json(std::size_t samples,
                                std::uint64_t lsm_compaction_bytes_in_delta,
                                std::uint64_t lsm_compaction_bytes_out_delta,
                                double lsm_compaction_bytes_amp_efficiency,
+                               std::uint64_t lazy_materialize_count_delta,
+                               std::uint64_t lazy_materialize_rows_total_delta,
+                               std::uint64_t lazy_materialize_max_rows_max,
+                               std::uint64_t lazy_materialize_elapsed_ms_delta,
                                double vacuum_efficiency,
                                double conflict_rate,
                                const DistStats& vacuum_eff_stats,
-                               const DistStats& conflict_rate_stats) {
+                               const DistStats& conflict_rate_stats,
+                               double table_storage_health_fragmentation_peak,
+                               std::uint64_t table_storage_health_dead_bytes_peak,
+                               bool table_storage_health_dead_peak_valid,
+                               std::uint64_t vacuum_health_bonus_last_max,
+                               std::uint64_t compact_debt_bytes_peak,
+                               double page_cache_hit_ratio,
+                               double where_scan_amplification,
+                               double wal_recovery_redo_ratio,
+                               std::uint64_t page_cache_hits_last,
+                               std::uint64_t page_cache_misses_last,
+                               std::uint64_t where_query_rows_scanned_delta,
+                               std::uint64_t where_query_rows_returned_delta,
+                               std::uint64_t memory_budget_reject_delta) {
     return std::string("{") +
            "\"samples\":" + std::to_string(samples) + "," +
            "\"vacuum_trigger_delta\":" + std::to_string(trigger_delta) + "," +
@@ -443,6 +603,10 @@ std::string build_summary_json(std::size_t samples,
            "\"lsm_compaction_bytes_in_delta\":" + std::to_string(lsm_compaction_bytes_in_delta) + "," +
            "\"lsm_compaction_bytes_out_delta\":" + std::to_string(lsm_compaction_bytes_out_delta) + "," +
            "\"lsm_compaction_bytes_amp_efficiency\":" + std::to_string(lsm_compaction_bytes_amp_efficiency) + "," +
+           "\"lazy_materialize_count_delta\":" + std::to_string(lazy_materialize_count_delta) + "," +
+           "\"lazy_materialize_rows_total_delta\":" + std::to_string(lazy_materialize_rows_total_delta) + "," +
+           "\"lazy_materialize_max_rows_max\":" + std::to_string(lazy_materialize_max_rows_max) + "," +
+           "\"lazy_materialize_elapsed_ms_delta\":" + std::to_string(lazy_materialize_elapsed_ms_delta) + "," +
            "\"vacuum_efficiency\":" + std::to_string(vacuum_efficiency) + "," +
            "\"conflict_rate\":" + std::to_string(conflict_rate) + "," +
            "\"vacuum_efficiency_min\":" + std::to_string(vacuum_eff_stats.min) + "," +
@@ -454,7 +618,23 @@ std::string build_summary_json(std::size_t samples,
            "\"conflict_rate_max\":" + std::to_string(conflict_rate_stats.max) + "," +
            "\"conflict_rate_avg\":" + std::to_string(conflict_rate_stats.avg) + "," +
            "\"conflict_rate_p50\":" + std::to_string(conflict_rate_stats.p50) + "," +
-           "\"conflict_rate_p95\":" + std::to_string(conflict_rate_stats.p95) +
+           "\"conflict_rate_p95\":" + std::to_string(conflict_rate_stats.p95) + "," +
+           "\"table_storage_health_fragmentation_peak\":" +
+           std::to_string(table_storage_health_fragmentation_peak) + "," +
+           "\"table_storage_health_dead_bytes_peak\":" +
+           std::to_string(table_storage_health_dead_bytes_peak) + "," +
+           "\"table_storage_health_dead_peak_valid\":" +
+           std::string(table_storage_health_dead_peak_valid ? "true" : "false") + "," +
+           "\"vacuum_health_bonus_last_max\":" + std::to_string(vacuum_health_bonus_last_max) + "," +
+           "\"compact_debt_bytes_peak\":" + std::to_string(compact_debt_bytes_peak) + "," +
+           "\"page_cache_hit_ratio\":" + std::to_string(page_cache_hit_ratio) + "," +
+           "\"where_scan_amplification\":" + std::to_string(where_scan_amplification) + "," +
+           "\"wal_recovery_redo_ratio\":" + std::to_string(wal_recovery_redo_ratio) + "," +
+           "\"page_cache_hits_last\":" + std::to_string(page_cache_hits_last) + "," +
+           "\"page_cache_misses_last\":" + std::to_string(page_cache_misses_last) + "," +
+           "\"where_query_rows_scanned_delta\":" + std::to_string(where_query_rows_scanned_delta) + "," +
+           "\"where_query_rows_returned_delta\":" + std::to_string(where_query_rows_returned_delta) + "," +
+           "\"memory_budget_reject_delta\":" + std::to_string(memory_budget_reject_delta) +
            "}";
 }
 
@@ -588,6 +768,18 @@ int main(int argc, char** argv) {
         (last.lsm_compaction_bytes_out >= first.lsm_compaction_bytes_out)
             ? (last.lsm_compaction_bytes_out - first.lsm_compaction_bytes_out)
             : 0;
+    const std::uint64_t lazy_materialize_count_delta =
+        (last.lazy_materialize_count >= first.lazy_materialize_count)
+            ? (last.lazy_materialize_count - first.lazy_materialize_count)
+            : 0;
+    const std::uint64_t lazy_materialize_rows_total_delta =
+        (last.lazy_materialize_rows_total >= first.lazy_materialize_rows_total)
+            ? (last.lazy_materialize_rows_total - first.lazy_materialize_rows_total)
+            : 0;
+    const std::uint64_t lazy_materialize_elapsed_ms_delta =
+        (last.lazy_materialize_elapsed_ms >= first.lazy_materialize_elapsed_ms)
+            ? (last.lazy_materialize_elapsed_ms - first.lazy_materialize_elapsed_ms)
+            : 0;
     std::uint64_t vacuum_queue_depth_peak_max = 0;
     std::uint64_t wal_recovery_last_elapsed_ms_max = 0;
     std::uint64_t wal_recovery_analyze_ms_max = 0;
@@ -598,7 +790,23 @@ int main(int argc, char** argv) {
     std::uint64_t lsm_segment_count_max = 0;
     std::uint64_t lsm_memtable_bytes_max = 0;
     std::uint64_t lsm_read_segments_scanned_p95_max = 0;
+    std::uint64_t lazy_materialize_max_rows_max = 0;
+    double table_storage_health_fragmentation_peak = -1.0;
+    std::uint64_t table_storage_health_dead_bytes_peak = 0;
+    bool table_storage_health_dead_peak_valid = false;
+    std::uint64_t vacuum_health_bonus_last_max = 0;
+    std::uint64_t compact_debt_bytes_peak = 0;
     for (const Row& r : rows) {
+        compact_debt_bytes_peak = std::max(compact_debt_bytes_peak, r.compact_debt_bytes);
+        if (r.table_storage_health_sample_present && r.table_storage_health_logical_rows > 0) {
+            table_storage_health_fragmentation_peak =
+                std::max(table_storage_health_fragmentation_peak, r.table_storage_health_fragmentation_ratio);
+            table_storage_health_dead_peak_valid = true;
+            table_storage_health_dead_bytes_peak =
+                std::max(table_storage_health_dead_bytes_peak, r.table_storage_health_dead_bytes);
+        }
+        vacuum_health_bonus_last_max = std::max(vacuum_health_bonus_last_max, r.vacuum_health_bonus_last);
+        lazy_materialize_max_rows_max = std::max(lazy_materialize_max_rows_max, r.lazy_materialize_max_rows);
         vacuum_queue_depth_peak_max = std::max(vacuum_queue_depth_peak_max, r.vacuum_queue_depth_peak);
         wal_recovery_last_elapsed_ms_max =
             std::max(wal_recovery_last_elapsed_ms_max, r.wal_recovery_last_elapsed_ms);
@@ -643,6 +851,32 @@ int main(int argc, char** argv) {
     const DistStats vacuum_eff_stats = build_dist_stats(vacuum_eff_series);
     const DistStats conflict_rate_stats = build_dist_stats(conflict_rate_series);
 
+    const std::uint64_t where_scanned_delta =
+        (last.where_query_rows_scanned_total >= first.where_query_rows_scanned_total)
+            ? (last.where_query_rows_scanned_total - first.where_query_rows_scanned_total)
+            : 0;
+    const std::uint64_t where_returned_delta =
+        (last.where_query_rows_returned_total >= first.where_query_rows_returned_total)
+            ? (last.where_query_rows_returned_total - first.where_query_rows_returned_total)
+            : 0;
+    const double where_scan_amplification =
+        static_cast<double>(where_scanned_delta) /
+        static_cast<double>(std::max<std::uint64_t>(where_returned_delta, 1));
+    const std::uint64_t lookups_last = last.page_cache_hits + last.page_cache_misses;
+    const double page_cache_hit_ratio =
+        (lookups_last == 0)
+            ? -1.0
+            : (static_cast<double>(last.page_cache_hits) / static_cast<double>(lookups_last));
+    const double wal_recovery_redo_ratio =
+        (last.wal_recovery_last_elapsed_ms == 0)
+            ? 0.0
+            : (static_cast<double>(last.wal_recovery_redo_ms) /
+               static_cast<double>(std::max<std::uint64_t>(last.wal_recovery_last_elapsed_ms, 1ULL)));
+    const std::uint64_t memory_budget_reject_delta =
+        (last.memory_budget_reject_count >= first.memory_budget_reject_count)
+            ? (last.memory_budget_reject_count - first.memory_budget_reject_count)
+            : 0;
+
     const std::string summary = build_summary_json(
         rows.size(),
         trigger_delta,
@@ -680,10 +914,27 @@ int main(int argc, char** argv) {
         lsm_compaction_bytes_in_delta,
         lsm_compaction_bytes_out_delta,
         lsm_compaction_bytes_amp_efficiency,
+        lazy_materialize_count_delta,
+        lazy_materialize_rows_total_delta,
+        lazy_materialize_max_rows_max,
+        lazy_materialize_elapsed_ms_delta,
         vacuum_efficiency,
         conflict_rate,
         vacuum_eff_stats,
-        conflict_rate_stats);
+        conflict_rate_stats,
+        table_storage_health_fragmentation_peak,
+        table_storage_health_dead_bytes_peak,
+        table_storage_health_dead_peak_valid,
+        vacuum_health_bonus_last_max,
+        compact_debt_bytes_peak,
+        page_cache_hit_ratio,
+        where_scan_amplification,
+        wal_recovery_redo_ratio,
+        last.page_cache_hits,
+        last.page_cache_misses,
+        where_scanned_delta,
+        where_returned_delta,
+        memory_budget_reject_delta);
 
     std::cout << summary << "\n";
     if (!args.output_json.empty()) {
@@ -809,7 +1060,67 @@ int main(int argc, char** argv) {
                   << args.min_lsm_compaction_bytes_amp_efficiency << ")\n";
         return 28;
     }
-
+    if (args.max_lazy_materialize_count_delta >= 0.0 &&
+        static_cast<double>(lazy_materialize_count_delta) > args.max_lazy_materialize_count_delta) {
+        std::cerr << "gate failed: lazy_materialize_count_delta(" << lazy_materialize_count_delta
+                  << ") > max_lazy_materialize_count_delta(" << args.max_lazy_materialize_count_delta << ")\n";
+        return 29;
+    }
+    if (args.max_lazy_materialize_rows_total_delta >= 0.0 &&
+        static_cast<double>(lazy_materialize_rows_total_delta) > args.max_lazy_materialize_rows_total_delta) {
+        std::cerr << "gate failed: lazy_materialize_rows_total_delta(" << lazy_materialize_rows_total_delta
+                  << ") > max_lazy_materialize_rows_total_delta("
+                  << args.max_lazy_materialize_rows_total_delta << ")\n";
+        return 30;
+    }
+    if (args.max_table_storage_health_fragmentation_ratio >= 0.0 && table_storage_health_fragmentation_peak >= 0.0 &&
+        table_storage_health_fragmentation_peak > args.max_table_storage_health_fragmentation_ratio) {
+        std::cerr << "gate failed: table_storage_health_fragmentation_peak("
+                  << table_storage_health_fragmentation_peak
+                  << ") > max_table_storage_health_fragmentation_ratio("
+                  << args.max_table_storage_health_fragmentation_ratio << ")\n";
+        return 31;
+    }
+    if (args.max_table_storage_health_dead_bytes >= 0.0 && table_storage_health_dead_peak_valid &&
+        static_cast<double>(table_storage_health_dead_bytes_peak) > args.max_table_storage_health_dead_bytes) {
+        std::cerr << "gate failed: table_storage_health_dead_bytes_peak("
+                  << static_cast<unsigned long long>(table_storage_health_dead_bytes_peak)
+                  << ") > max_table_storage_health_dead_bytes(" << args.max_table_storage_health_dead_bytes << ")\n";
+        return 32;
+    }
+    if (args.max_vacuum_health_bonus_last >= 0.0 &&
+        static_cast<double>(vacuum_health_bonus_last_max) > args.max_vacuum_health_bonus_last) {
+        std::cerr << "gate failed: vacuum_health_bonus_last_max("
+                  << static_cast<unsigned long long>(vacuum_health_bonus_last_max)
+                  << ") > max_vacuum_health_bonus_last(" << args.max_vacuum_health_bonus_last << ")\n";
+        return 33;
+    }
+    if (args.max_compact_debt_bytes_peak >= 0.0 &&
+        static_cast<double>(compact_debt_bytes_peak) > args.max_compact_debt_bytes_peak) {
+        std::cerr << "gate failed: compact_debt_bytes_peak("
+                  << static_cast<unsigned long long>(compact_debt_bytes_peak)
+                  << ") > max_compact_debt_bytes_peak(" << args.max_compact_debt_bytes_peak << ")\n";
+        return 34;
+    }
+    if (args.min_page_cache_hit_ratio >= 0.0 && lookups_last > 0 &&
+        page_cache_hit_ratio < args.min_page_cache_hit_ratio) {
+        std::cerr << "gate failed: page_cache_hit_ratio(" << page_cache_hit_ratio
+                  << ") < min_page_cache_hit_ratio(" << args.min_page_cache_hit_ratio << ")\n";
+        return 35;
+    }
+    if (args.max_where_scan_amplification >= 0.0 &&
+        (where_scanned_delta > 0 || where_returned_delta > 0) &&
+        where_scan_amplification > args.max_where_scan_amplification) {
+        std::cerr << "gate failed: where_scan_amplification(" << where_scan_amplification
+                  << ") > max_where_scan_amplification(" << args.max_where_scan_amplification << ")\n";
+        return 36;
+    }
+    if (args.max_memory_budget_reject_delta >= 0.0 &&
+        static_cast<double>(memory_budget_reject_delta) > args.max_memory_budget_reject_delta) {
+        std::cerr << "gate failed: memory_budget_reject_delta(" << memory_budget_reject_delta
+                  << ") > max_memory_budget_reject_delta(" << args.max_memory_budget_reject_delta << ")\n";
+        return 37;
+    }
     return 0;
 }
 

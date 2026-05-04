@@ -2,8 +2,8 @@
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
-#include "cli/modules/logging/logging.h"
-#include "cli/modules/util/constants.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 
 #include <newdb/heap_table.h>
@@ -34,49 +34,119 @@
 #include <fcntl.h>
 #include <unistd.h>
 #endif
-#include <sys/stat.h>
 
 Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
     std::lock_guard<std::mutex> lk(m_lock_mutex);
     if (m_lock_handles.find(file_path) != m_lock_handles.end()) {
+        m_file_lock_same_process_reuse_count.fetch_add(1, std::memory_order_relaxed);
         return Result<bool>::Ok(true);
     }
 
     const std::string lock_file = file_path + ".lock";
+    const bool strict_stale = []() {
+        const char* raw = std::getenv("NEWDB_FILE_LOCK_STRICT");
+        return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
+    }();
+
     LockHandleState state{};
     state.lock_file_path = lock_file;
+    bool retried_stale = false;
 #if defined(_WIN32)
-    HANDLE h = ::CreateFileA(lock_file.c_str(),
-                             GENERIC_READ | GENERIC_WRITE,
-                             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                             nullptr,
-                             OPEN_ALWAYS,
-                             FILE_ATTRIBUTE_NORMAL,
-                             nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return Result<bool>::Err("无法打开锁文�? " + lock_file);
-    }
-
-    OVERLAPPED ov{};
-    if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
+    auto try_remove_stale_lock_marker = [&]() -> bool {
+        if (!strict_stale || retried_stale) {
+            return false;
+        }
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path p(lock_file);
+        if (!fs::is_regular_file(p, ec) || ec) {
+            return false;
+        }
+        if (fs::file_size(p, ec) != 0 || ec) {
+            return false;
+        }
+        fs::remove(p, ec);
+        if (!ec) {
+            m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
+            retried_stale = true;
+            return true;
+        }
+        return false;
+    };
+    HANDLE h = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        h = ::CreateFileA(lock_file.c_str(),
+                          GENERIC_READ | GENERIC_WRITE,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          nullptr,
+                          OPEN_ALWAYS,
+                          FILE_ATTRIBUTE_NORMAL,
+                          nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+            return Result<bool>::Err("failed to open lock file: " + lock_file);
+        }
+        OVERLAPPED ov{};
+        if (::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
+            break;
+        }
         const DWORD err = ::GetLastError();
         ::CloseHandle(h);
-        return Result<bool>::Err("锁被占用或获取失�?" + std::to_string(static_cast<unsigned long long>(err)) + "): " + lock_file);
+        h = INVALID_HANDLE_VALUE;
+        if (try_remove_stale_lock_marker()) {
+            continue;
+        }
+        m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+        return Result<bool>::Err(
+            "lock is already held or lock acquisition failed (" +
+            std::to_string(static_cast<unsigned long long>(err)) + "): " +
+            lock_file);
     }
     state.handle = h;
 #else
-    const int fd = ::open(lock_file.c_str(), O_CREAT | O_RDWR, 0644);
-    if (fd < 0) {
-        return Result<bool>::Err("无法打开锁文�? " + lock_file);
-    }
-    struct flock fl{};
-    fl.l_type = F_WRLCK;
-    fl.l_whence = SEEK_SET;
-    fl.l_start = 0;
-    fl.l_len = 0;
-    if (::fcntl(fd, F_SETLK, &fl) != 0) {
+    auto try_remove_stale_lock_marker = [&]() -> bool {
+        if (!strict_stale || retried_stale) {
+            return false;
+        }
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path p(lock_file);
+        if (!fs::is_regular_file(p, ec) || ec) {
+            return false;
+        }
+        if (fs::file_size(p, ec) != 0 || ec) {
+            return false;
+        }
+        fs::remove(p, ec);
+        if (!ec) {
+            m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
+            retried_stale = true;
+            return true;
+        }
+        return false;
+    };
+    int fd = -1;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        fd = ::open(lock_file.c_str(), O_CREAT | O_RDWR, 0644);
+        if (fd < 0) {
+            m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+            return Result<bool>::Err("failed to open lock file: " + lock_file);
+        }
+        struct flock fl{};
+        fl.l_type = F_WRLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start = 0;
+        fl.l_len = 0;
+        if (::fcntl(fd, F_SETLK, &fl) == 0) {
+            break;
+        }
         ::close(fd);
-        return Result<bool>::Err("锁被占用或获取失�? " + lock_file);
+        fd = -1;
+        if (try_remove_stale_lock_marker()) {
+            continue;
+        }
+        m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+        return Result<bool>::Err("lock is already held or lock acquisition failed: " + lock_file);
     }
     state.fd = fd;
 #endif
@@ -130,9 +200,8 @@ Result<bool> TxnCoordinator::releaseLock(const std::string& file_path) {
 
 
 bool TxnCoordinator::isLocked(const std::string& file_path) const {
-    const std::string lock_file = file_path + ".lock";
-    struct stat buffer;
-    return (stat(lock_file.c_str(), &buffer) == 0);
+    std::lock_guard<std::mutex> lk(m_lock_mutex);
+    return m_lock_handles.find(file_path) != m_lock_handles.end();
 }
 
 // ========== WAL ==========

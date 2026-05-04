@@ -44,6 +44,8 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `wal_recovery_finalize_ms` (int >= 0): 最近一次 WAL 恢复 finalize 阶段耗时（补写终态/刷盘）
 - `wal_recovery_records_scanned` (int >= 0): 最近一次恢复扫描的 WAL 记录数
 - `wal_recovery_dangling_txns` (int >= 0): 最近一次恢复识别到的 dangling 事务数
+- `wal_recovery_redo_ms` (int >= 0, optional / legacy default 0): CLI `recoverFromWAL` 路径上 redo（已提交重放）阶段墙钟毫秒
+- `wal_recovery_checkpoint_begin_count` / `wal_recovery_checkpoint_end_count` (int >= 0, optional): 扫描 WAL 时观测到的 checkpoint begin/end 记录计数
 - `wal_group_commit_count` (int >= 0): group commit flush 次数
 - `wal_group_commit_batch_commits` (int >= 0): group commit 累计批次提交事务数
 - `wal_group_commit_pending_commits` (int >= 0): 尚未 flush 的待批提交事务数
@@ -84,13 +86,76 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `where_query_cache_hits` (int >= 0): WHERE 查询缓存命中次数
 - `where_policy_checks` (int >= 0): WHERE policy 检查次数
 - `where_policy_rejects` (int >= 0): WHERE policy 拒绝次数
+- `where_heap_scan_budget_binding_events` (int >= 0): `NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS` 使有效扫描上限低于比例 `scan_cap` 的次数（观测）
 - `where_fallback_scans` (int >= 0): WHERE fallback 全/大范围扫描次数
 - `where_plan_eq_sidecar_count` (int >= 0): 使用 eq sidecar 的查询计划计数
 - `where_plan_id_pk_count` (int >= 0): 使用 id/pk 快路径的查询计划计数
 - `where_plan_fallback_count` (int >= 0): 使用 fallback 扫描计划计数
+- `where_query_count` (int >= 0): 完成的 `query_with_index` 调用次数
+- `where_query_rows_scanned_total` (int >= 0): 查询路径累计解码/扫描行次（与 `estimated_scan_rows_*` 不同，为实际执行量）
+- `where_query_rows_returned_total` (int >= 0): 查询路径累计返回匹配 slot 数
+- `where_eq_sidecar_disk_bytes_read_total` (int >= 0, optional): equality `.eqidx` 从磁盘加载的字节累计（不含内存缓存命中）
+- `where_eq_sidecar_disk_loads` (int >= 0, optional): equality sidecar 磁盘加载次数
+- `lazy_materialize_count` (int >= 0): 惰性堆物化触发次数
+- `lazy_materialize_rows_total` (int >= 0): 惰性物化累计展开行数
+- `lazy_materialize_max_rows` (int >= 0): 单次物化观测到的最大行数
+- `lazy_materialize_elapsed_ms` (int >= 0): 惰性物化累计耗时（毫秒）
+- `heap_decode_slot_calls` (int >= 0): 堆行解码调用次数（当前会话表）
+- `heap_decode_slot_hits` (int >= 0): 堆行解码命中次数
+- `heap_decode_slot_misses` (int >= 0): 堆行解码未命中次数
+- `vacuum_priority_score` (int >= 0): 维护队列压力启发值（触发 vacuum 入队时由深度与 pending 估算）
+- `vacuum_health_bonus_last` (int >= 0): 最近一次 vacuum 入队时由 `measure_table_storage_health` 推导的墓碑/比率 bonus（仅 `NEWDB_VACUUM_QUEUE_USE_HEALTH=1` 时非零；否则为 0）
+- `table_storage_health_logical_rows` (int >= 0): 最近一次成功采样的逻辑行数（健康 env 下 lazy 加载成功；否则为 0）
+- `table_storage_health_physical_rows` (int >= 0): 同上采样的物理/元数据 slot 数
+- `table_storage_health_tombstone_rows` (int >= 0): 墓碑行计数（与内部 `tombstone_slots` 对齐）
+- `table_storage_health_data_file_bytes` (int >= 0): `.bin` 字节数（mmap 视图或 `name.bin` 探测）
+- `table_storage_health_live_bytes` / `table_storage_health_dead_bytes` (int >= 0): 按墓碑比率估算的活/死字节
+- `table_storage_health_fragmentation_ratio` (number >= 0): `dead_bytes / data_file_bytes` 或仅墓碑比率（无文件大小时）
+- `table_storage_health_last_vacuum_lsn` / `table_storage_health_last_vacuum_elapsed_ms` (int >= 0)
+- `table_storage_health_tier` (`good` | `watch` | `degraded` | `critical`)：由最近一次存储健康快照的碎片率与 `dead_bytes` 阈值推导
+- `transaction_snapshot_lsn` / `statement_snapshot_lsn` (int >= 0)：读路径 MVCC 锚点 LSN（分别对应 Snapshot `BEGIN` 钉扎与语句级刷新）
+- `table_storage_health_tier` (`good` | `watch` | `degraded` | `critical`)：由最近一次存储健康快照的碎片率与 `dead_bytes` 阈值推导
+- `transaction_snapshot_lsn` / `statement_snapshot_lsn` (int >= 0)：读路径 MVCC 锚点 LSN（分别对应 Snapshot `BEGIN` 钉扎与语句级刷新）: 预留；当前为 0
 - `wal_adaptive_enabled` (bool): adaptive WAL 开关状态
 - `group_commit_window_ms` (int >= 0): group commit 窗口毫秒
 - `group_commit_max_batch_commits` (int >= 0): group commit 最大批提交数
+- `compact_debt_bytes` / `compact_debt_rows` / `compact_debt_priority` (int >= 0); `compact_debt_ratio` (number >= 0): vacuum 入队与 runtime 观测同源 debt 代理
+- `page_cache_hits` / `page_cache_misses` / `page_cache_evictions` (int >= 0): 进程级惰性堆页缓存
+- `page_cache_bytes_in_cache` (int >= 0): 当前缓存占用字节
+- `memory_budget_max_bytes` (int >= 0): `NEWDB_PAGE_CACHE_MAX_BYTES` 配置上限（0 表示未启用 cap）
+- `memory_budget_used_bytes` (int >= 0): 当前计入预算的字节（与 `page_cache_bytes_in_cache` 一致）
+- `memory_budget_reject_count` (int >= 0): 单页大于 cap 时拒绝 `page_cache_put` 的累计次数
+- `memory_budget_bytes_evicted_total` (int >= 0): PageCache LRU 淘汰累计释放字节（`PageCacheGlobalStats::bytes_evicted_total`）
+- `memory_budget_sidecar_load_skipped_total` (int >= 0): 当 `memory_budget_used_bytes + .eqidx` 文件大小超过 cap 时跳过磁盘加载的次数（`equality_index_sidecar`）
+- `NEWDB_MEMORY_BUDGET_MAX_BYTES`（可选）：若设置且 >0，则 `memory_budget_max_bytes` 优先取该值，否则回退 `NEWDB_PAGE_CACHE_MAX_BYTES`（见 `memory_budget.h`）
+
+**Note**：eq sidecar 与 PageCache 共用 cap 的软拒绝已落地；更细的「sidecar 常驻内存记账」仍可按路线图扩展。
+
+## Optional v2 fields (`newdb.runtime_stats.v2` draft, backward compatible)
+
+The validator `validate_runtime_stats.py` continues to accept `schema_version: newdb.runtime_stats.v1`.
+The following keys are **optional** on `stats` and may appear in newer binaries / soak exports without
+breaking v1 validation:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `txn_snapshot_refresh_count` | int | ReadCommitted / statement snapshot refresh count |
+| `txn_snapshot_pinned_count` | int | Snapshot pinned across statements (diagnostic) |
+| `txn_readpath_disabled_count` | int | `NEWDB_TXN_ISOLATION_READPATH=0` skip count |
+| `last_snapshot_source` | string | `none\|txn\|statement\|disabled` |
+| `wal_recovery_policy` | string | Recovery entry policy label (CLI reconcile + optional heap recover tags) |
+| `write_conflict_last_sample` | string | Last write-conflict diagnostic line (`table=...;row=...;holder=...;tag=...`) |
+| `sidecar_invalidate_count` | int | `sidecar_invalidate_all_indexes_for_data_file` requests (non-empty path) |
+| `sidecar_invalidate_fail_count` | int | Equality sidecar on-disk remove attempts that returned a non-`no_such_file` error |
+| `file_lock_acquire_fail_count` | int | OS file lock acquire failures |
+| `file_lock_same_process_reuse_count` | int | `acquireLock` early-return when already held in-process |
+| `file_lock_stale_marker_count` | int | Empty `.lock` marker removed under `NEWDB_FILE_LOCK_STRICT=1` before retry |
+| `vacuum_score_file_bytes_term` | int | Last vacuum enqueue score: raw `.bin` size term |
+| `vacuum_score_health_bonus_term` | int | Last vacuum enqueue score: health-derived bonus term |
+| `vacuum_score_wal_since_term` | int | Last vacuum enqueue score: optional WAL-since term (`NEWDB_VACUUM_SCORE_WAL_SINCE=1`) |
+
+`newdb_runtime_report` may emit derived summaries (not in JSONL rows): `page_cache_hit_ratio`,
+`where_scan_amplification`, `wal_recovery_redo_ratio` in its `--output` / `--json` report.
 
 ## Notes
 

@@ -164,6 +164,32 @@ def main() -> int:
             if key not in summary:
                 raise SystemExit(f"missing key in summary json: {key}\nsummary={summary}")
 
+        ok_json = _run(
+            binary,
+            success_jsonl,
+            "--json",
+            "--max-vacuum-compact-failure-delta",
+            "0",
+            "--min-vacuum-compact-reclaimed-bytes-delta",
+            "1",
+        )
+        if ok_json.returncode != 0:
+            raise SystemExit(
+                "expected --json success case to pass, got rc="
+                + str(ok_json.returncode)
+                + "\nstdout:\n"
+                + ok_json.stdout
+            )
+        json_lines = [ln for ln in ok_json.stdout.splitlines() if ln.strip()]
+        if len(json_lines) != 1:
+            raise SystemExit(
+                "expected --json stdout to be a single line, got "
+                + str(len(json_lines))
+                + " lines:\n"
+                + ok_json.stdout
+            )
+        json.loads(json_lines[0])
+
         # Failure case: compact failure delta > threshold => exit code 16.
         fail_delta_jsonl = td_path / "fail_delta.jsonl"
         _write_jsonl(

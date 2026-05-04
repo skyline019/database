@@ -21,6 +21,8 @@ struct PayloadMetaView {
     const std::uint64_t* pitr_target_lsn{nullptr};
     const std::uint64_t* pitr_target_ts_ms{nullptr};
     const std::uint64_t* record_ts_ms{nullptr};
+    /// Optional: persisted on CHECKPOINT_BEGIN/CHECKPOINT_END v1 payloads for recovery replay hints.
+    const std::uint64_t* checkpoint_snapshot_lsn{nullptr};
 };
 
 // Legacy v0 payload:
@@ -79,6 +81,8 @@ struct DecodedPayloadV1 {
     std::uint64_t pitr_target_ts_ms{0};
     bool has_record_ts_ms{false};
     std::uint64_t record_ts_ms{0};
+    bool has_checkpoint_snapshot_lsn{false};
+    std::uint64_t checkpoint_snapshot_lsn{0};
 };
 
 bool is_v1_payload(const uint8_t* data, std::size_t len);

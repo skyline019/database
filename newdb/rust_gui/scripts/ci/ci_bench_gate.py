@@ -13,7 +13,46 @@ import os
 import subprocess
 import sys
 import tempfile
-from typing import Optional
+from typing import Any, Optional
+
+
+def _apply_profile_defaults(args: argparse.Namespace) -> None:
+    """Set default gate thresholds by profile; explicit CLI values win if already set.
+
+    Convention: argparse defaults for numeric gates are -1 (disabled). Profiles only
+    tighten/enable when still at the sentinel default by comparing attribute identity
+    is not possible; we use a post-parse pass storing original argv presence.
+
+    Here we only apply when --profile was passed (detected via attribute set below).
+    """
+    prof = getattr(args, "_profile_effective", "local")
+    if prof == "local":
+        return
+    if prof == "pr":
+        if args.max_wal_recovery_last_elapsed_ms < 0.0:
+            args.max_wal_recovery_last_elapsed_ms = 2000.0
+        if args.max_vacuum_compact_failure_delta < 0.0:
+            args.max_vacuum_compact_failure_delta = 0.0
+        if args.max_compact_debt_bytes_peak < 0.0:
+            args.max_compact_debt_bytes_peak = 1.0e11
+    elif prof == "nightly":
+        if args.max_wal_recovery_last_elapsed_ms < 0.0:
+            args.max_wal_recovery_last_elapsed_ms = 5000.0
+        if args.min_page_cache_hit_ratio < 0.0:
+            args.min_page_cache_hit_ratio = 0.0
+        if args.max_where_scan_amplification < 0.0:
+            args.max_where_scan_amplification = 1.0e9
+        if args.max_memory_budget_reject_delta < 0.0:
+            args.max_memory_budget_reject_delta = 1.0e9
+    elif prof == "release":
+        if args.max_wal_recovery_last_elapsed_ms < 0.0:
+            args.max_wal_recovery_last_elapsed_ms = 2000.0
+        if args.max_vacuum_compact_failure_delta < 0.0:
+            args.max_vacuum_compact_failure_delta = 0.0
+        if args.max_lazy_materialize_count_delta < 0.0:
+            args.max_lazy_materialize_count_delta = 0.0
+        if args.max_lazy_materialize_rows_total_delta < 0.0:
+            args.max_lazy_materialize_rows_total_delta = 0.0
 
 
 def _last_json_line(text: str) -> Optional[dict]:
@@ -96,8 +135,75 @@ def _resolve_demo_binary(build_dir: str, build_config: Optional[str]) -> str:
     return candidates[0]
 
 
+def _emit_gate_fail_json(
+    args: argparse.Namespace,
+    repo_root: str,
+    resolved_build_dir: str,
+    build_config: Optional[str],
+    stage: str,
+    exit_code: int,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Best-effort machine-readable failure JSON for CI artifacts (any stage)."""
+    outp = getattr(args, "gate_fail_json_out", "") or ""
+    if not outp:
+        return
+    fail: dict[str, Any] = {
+        "status": "fail",
+        "tool": "ci_bench_gate",
+        "stage": stage,
+        "exit_code": exit_code,
+        "profile": getattr(args, "_profile_effective", getattr(args, "profile", "local")),
+        "build_dir_arg": args.build_dir,
+        "resolved_build_dir": resolved_build_dir,
+        "build_config": build_config or "",
+    }
+    if extra:
+        fail.update(extra)
+    if not os.path.isabs(outp):
+        outp = os.path.join(repo_root, outp)
+    try:
+        parent = os.path.dirname(outp)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(outp, "w", encoding="utf-8") as f:
+            json.dump(fail, f, indent=2)
+    except Exception as exc:
+        print(f"NOTE: failed to write gate-fail json: {exc}", file=sys.stderr)
+    print(json.dumps(fail, indent=2), file=sys.stderr)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
+    p.add_argument(
+        "--profile",
+        choices=("local", "pr", "nightly", "release"),
+        default="local",
+        help="Preset gate defaults for storage/WAL/query groups (explicit flags still override).",
+    )
+    p.add_argument(
+        "--gate-fail-json-out",
+        default="",
+        help="When set, write machine-readable failure payload on non-zero exit (best-effort).",
+    )
+    p.add_argument(
+        "--min-page-cache-hit-ratio",
+        type=float,
+        default=-1.0,
+        help="Forwarded to newdb_runtime_report when --runtime-jsonl is set.",
+    )
+    p.add_argument(
+        "--max-where-scan-amplification",
+        type=float,
+        default=-1.0,
+        help="Forwarded to newdb_runtime_report when --runtime-jsonl is set.",
+    )
+    p.add_argument(
+        "--max-memory-budget-reject-delta",
+        type=float,
+        default=-1.0,
+        help="Forwarded to newdb_runtime_report when --runtime-jsonl is set.",
+    )
     p.add_argument(
         "build_dir",
         nargs="?",
@@ -112,7 +218,9 @@ def main() -> int:
     p.add_argument(
         "--runtime-jsonl",
         default="",
-        help="Path to runtime snapshot jsonl for extra gate checks (optional).",
+        help="Path to runtime snapshot jsonl for extra gate checks (optional). Lines must satisfy "
+        "scripts/validate/validate_runtime_stats.py; soak markers from NEWDB_SOAK_HINT_JSONL are not valid "
+        "unless merged with compatible runtime rows or validated separately.",
     )
     p.add_argument(
         "--runtime-last-n",
@@ -324,13 +432,74 @@ def main() -> int:
         default=-1.0,
         help="Fail gate when where_plan_eq_sidecar_count_delta in pressure summary is below this threshold (disabled when <0).",
     )
+    p.add_argument(
+        "--max-lazy-materialize-count-delta",
+        type=float,
+        default=-1.0,
+        help="Fail gate when lazy_materialize_count_delta exceeds this (disabled when <0; optional soak gate).",
+    )
+    p.add_argument(
+        "--max-lazy-materialize-rows-total-delta",
+        type=float,
+        default=-1.0,
+        help="Fail gate when lazy_materialize_rows_total_delta exceeds this (disabled when <0).",
+    )
+    p.add_argument(
+        "--max-table-storage-health-fragmentation-ratio",
+        type=float,
+        default=-1.0,
+        help="Fail gate when any runtime row with a storage-health sample exceeds this fragmentation "
+        "ratio (disabled when <0; for soak with NEWDB_VACUUM_QUEUE_USE_HEALTH=1).",
+    )
+    p.add_argument(
+        "--max-table-storage-health-dead-bytes",
+        type=float,
+        default=-1.0,
+        help="Fail gate when dead_bytes peak from storage-health samples exceeds this (disabled when <0; "
+        "proxy for compact_debt / §5.3 style debt ceilings in nightly).",
+    )
+    p.add_argument(
+        "--max-vacuum-health-bonus-last",
+        type=float,
+        default=-1.0,
+        help="Fail gate when max vacuum_health_bonus_last across snapshots exceeds this (disabled when <0).",
+    )
+    p.add_argument(
+        "--max-compact-debt-bytes-peak",
+        type=float,
+        default=-1.0,
+        help="Fail gate when compact_debt_bytes_peak from runtime report exceeds this (disabled when <0).",
+    )
+    p.add_argument(
+        "--release-grade",
+        action="store_true",
+        help="When set, tighten unset lazy-materialize runtime gates to 0 (Release-style hardening).",
+    )
     args = p.parse_args()
+    setattr(args, "_profile_effective", args.profile)
+    _apply_profile_defaults(args)
+    if args.release_grade:
+        if args.max_lazy_materialize_count_delta < 0.0:
+            args.max_lazy_materialize_count_delta = 0.0
+        if args.max_lazy_materialize_rows_total_delta < 0.0:
+            args.max_lazy_materialize_rows_total_delta = 0.0
+        if args.max_lock_deadlock_victim_delta < 0.0:
+            args.max_lock_deadlock_victim_delta = 0.0
     here = os.path.dirname(os.path.abspath(__file__))
     # scripts/ci/ci_bench_gate.py -> repo root is two levels up.
     repo_root = os.path.dirname(os.path.dirname(here))
     b = args.build_dir if os.path.isabs(args.build_dir) else os.path.join(repo_root, args.build_dir)
     if not os.path.isdir(b):
         print(f"ERROR: build dir not found: {b}", file=sys.stderr)
+        _emit_gate_fail_json(
+            args,
+            repo_root,
+            b,
+            None,
+            "build_dir_missing",
+            2,
+            {"reason": "build directory does not exist or is not a directory"},
+        )
         return 2
 
     build_config = _resolve_build_config(b, args.build_config)
@@ -343,7 +512,20 @@ def main() -> int:
                 [smoke, "--json", "append", bin_path, "1"],
                 [smoke, "--json", "load", bin_path],
             ):
-                out = subprocess.check_output(cmd, cwd=b, text=True)
+                try:
+                    out = subprocess.check_output(cmd, cwd=b, text=True)
+                except subprocess.CalledProcessError as exc:
+                    err_txt = (exc.stderr or "").strip() if exc.stderr else ""
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_smoke_exe",
+                        exc.returncode,
+                        {"cmd": " ".join(cmd), "stderr": err_txt},
+                    )
+                    return 26
                 parsed = None
                 for line in out.splitlines():
                     line = line.strip()
@@ -355,10 +537,28 @@ def main() -> int:
                         continue
                 if not parsed:
                     print(f"ERROR: smoke JSON output missing for cmd: {' '.join(cmd)}", file=sys.stderr)
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_smoke_parse",
+                        9,
+                        {"cmd": " ".join(cmd)},
+                    )
                     return 9
                 if parsed.get("tool") != "newdb_smoke" or parsed.get("status") != "ok":
                     print("ERROR: smoke JSON reported failure: " + json.dumps(parsed, sort_keys=True),
                           file=sys.stderr)
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_smoke",
+                        10,
+                        {"cmd": " ".join(cmd), "smoke": parsed},
+                    )
                     return 10
     else:
         print(f"NOTE: skip newdb_smoke (not built): {smoke}")
@@ -367,6 +567,9 @@ def main() -> int:
         perf = _resolve_perf_binary(b, build_config)
         if not os.path.isfile(perf):
             print(f"ERROR: newdb_perf not found: {perf}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args, repo_root, b, build_config, "newdb_perf_missing", 11, {"perf": perf}
+            )
             return 11
         demo_exe = args.newdb_perf_demo_exe
         if not demo_exe:
@@ -375,6 +578,9 @@ def main() -> int:
             demo_exe = os.path.join(repo_root, demo_exe)
         if not os.path.isfile(demo_exe):
             print(f"ERROR: demo binary for newdb_perf not found: {demo_exe}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args, repo_root, b, build_config, "newdb_perf_demo_missing", 15, {"demo_exe": demo_exe}
+            )
             return 15
         with tempfile.TemporaryDirectory(prefix="newdb_perf_") as td:
             cmd = [
@@ -397,10 +603,14 @@ def main() -> int:
             parsed = _last_json_line(out)
             if not parsed:
                 print("ERROR: newdb_perf JSON output missing", file=sys.stderr)
+                _emit_gate_fail_json(args, repo_root, b, build_config, "newdb_perf_parse", 12, {})
                 return 12
             if parsed.get("tool") != "newdb_perf" or parsed.get("status") != "ok":
                 print("ERROR: newdb_perf reported failure: " + json.dumps(parsed, sort_keys=True),
                       file=sys.stderr)
+                _emit_gate_fail_json(
+                    args, repo_root, b, build_config, "newdb_perf", 13, {"parsed": parsed}
+                )
                 return 13
             elapsed_ms = float(parsed.get("elapsed_ms", 0.0))
             if args.max_newdb_perf_elapsed_ms >= 0.0 and elapsed_ms > args.max_newdb_perf_elapsed_ms:
@@ -408,6 +618,15 @@ def main() -> int:
                     f"ERROR: newdb_perf elapsed_ms={elapsed_ms} exceeds max "
                     f"{args.max_newdb_perf_elapsed_ms}",
                     file=sys.stderr,
+                )
+                _emit_gate_fail_json(
+                    args,
+                    repo_root,
+                    b,
+                    build_config,
+                    "newdb_perf_elapsed",
+                    14,
+                    {"elapsed_ms": elapsed_ms, "max_ms": args.max_newdb_perf_elapsed_ms},
                 )
                 return 14
             print("NEWDB_PERF_GATE_SUMMARY " + json.dumps(parsed, sort_keys=True))
@@ -418,6 +637,15 @@ def main() -> int:
                         "ERROR: NEWDB_PERF_SUMMARY reported failure: "
                         + json.dumps(script_summary, sort_keys=True),
                         file=sys.stderr,
+                    )
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_perf_script_summary",
+                        16,
+                        {"script_summary": script_summary},
                     )
                     return 16
                 txn_avg_tps = float(script_summary.get("txn_avg_tps", 0.0))
@@ -431,6 +659,15 @@ def main() -> int:
                         f"{args.min_newdb_perf_txn_avg_tps}",
                         file=sys.stderr,
                     )
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_perf_txn_tps",
+                        17,
+                        {"txn_avg_tps": txn_avg_tps, "min": args.min_newdb_perf_txn_avg_tps},
+                    )
                     return 17
                 if (
                     args.min_newdb_perf_build_avg_tps >= 0.0
@@ -441,15 +678,37 @@ def main() -> int:
                         f"{args.min_newdb_perf_build_avg_tps}",
                         file=sys.stderr,
                     )
+                    _emit_gate_fail_json(
+                        args,
+                        repo_root,
+                        b,
+                        build_config,
+                        "newdb_perf_build_tps",
+                        18,
+                        {"build_avg_tps": build_avg_tps, "min": args.min_newdb_perf_build_avg_tps},
+                    )
                     return 18
                 print("NEWDB_PERF_SCRIPT_SUMMARY " + json.dumps(script_summary, sort_keys=True))
             else:
                 print("NOTE: NEWDB_PERF_SUMMARY not found in newdb_perf output")
 
-    ctest_cmd = ["ctest", "-R", "CiMicrobench", "--output-on-failure"]
+    # Microbench budget + dispatch routing regression (phase-2 verb fast path).
+    ctest_cmd = ["ctest", "-R", "CiMicrobench|DispatchRouting", "--output-on-failure"]
     if build_config:
         ctest_cmd.extend(["-C", build_config])
-    subprocess.check_call(ctest_cmd, cwd=b)
+    try:
+        subprocess.check_call(ctest_cmd, cwd=b)
+    except subprocess.CalledProcessError as exc:
+        _emit_gate_fail_json(
+            args,
+            repo_root,
+            b,
+            build_config,
+            "ctest",
+            exc.returncode,
+            {"cmd": " ".join(ctest_cmd)},
+        )
+        return 25
 
     if args.pressure_summary_json:
         summary_path = args.pressure_summary_json
@@ -457,12 +716,30 @@ def main() -> int:
             summary_path = os.path.join(repo_root, summary_path)
         if not os.path.isfile(summary_path):
             print(f"ERROR: pressure summary not found: {summary_path}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_summary_missing",
+                19,
+                {"summary_path": summary_path},
+            )
             return 19
         try:
             with open(summary_path, "r", encoding="utf-8") as f:
                 summary = json.load(f)
         except Exception as exc:
             print(f"ERROR: failed to parse pressure summary: {exc}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_summary_parse",
+                20,
+                {"error": str(exc)},
+            )
             return 20
         tps = float(summary.get("runtime_pressure_tps_est", 0.0))
         p95 = float(summary.get("runtime_pressure_batch_ms_p95", 0.0))
@@ -472,6 +749,15 @@ def main() -> int:
             print(
                 f"ERROR: runtime_pressure_tps_est={tps} below min {args.min_runtime_pressure_tps}",
                 file=sys.stderr,
+            )
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_tps",
+                21,
+                {"tps": tps, "min": args.min_runtime_pressure_tps},
             )
             return 21
         if (
@@ -483,6 +769,15 @@ def main() -> int:
                 f"{args.max_runtime_pressure_batch_p95_ms}",
                 file=sys.stderr,
             )
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_p95",
+                22,
+                {"p95": p95, "max": args.max_runtime_pressure_batch_p95_ms},
+            )
             return 22
         if (
             args.max_where_fallback_scans_max >= 0.0
@@ -493,6 +788,15 @@ def main() -> int:
                 f"{args.max_where_fallback_scans_max}",
                 file=sys.stderr,
             )
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_where_fallback",
+                23,
+                {"where_fallback_scans_max": where_fallback_scans_max, "max": args.max_where_fallback_scans_max},
+            )
             return 23
         if (
             args.min_where_plan_eq_sidecar_count_delta >= 0.0
@@ -502,6 +806,18 @@ def main() -> int:
                 f"ERROR: where_plan_eq_sidecar_count_delta={where_plan_eq_sidecar_delta} below min "
                 f"{args.min_where_plan_eq_sidecar_count_delta}",
                 file=sys.stderr,
+            )
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "pressure_eq_sidecar_delta",
+                24,
+                {
+                    "where_plan_eq_sidecar_count_delta": where_plan_eq_sidecar_delta,
+                    "min": args.min_where_plan_eq_sidecar_count_delta,
+                },
             )
             return 24
         print(
@@ -524,16 +840,43 @@ def main() -> int:
     if runtime_jsonl:
         if args.runtime_last_n != 0 and args.runtime_last_n < 2:
             print("ERROR: --runtime-last-n must be >= 2", file=sys.stderr)
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "runtime_args",
+                8,
+                {"reason": "--runtime-last-n must be >= 2 when non-zero"},
+            )
             return 8
         if not os.path.isabs(runtime_jsonl):
             runtime_jsonl = os.path.join(repo_root, runtime_jsonl)
         if not os.path.isfile(runtime_jsonl):
             print(f"ERROR: runtime jsonl not found: {runtime_jsonl}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "runtime_jsonl_missing",
+                6,
+                {"runtime_jsonl": runtime_jsonl},
+            )
             return 6
 
         reporter = _resolve_runtime_report_binary(b, build_config)
         if not os.path.isfile(reporter):
             print(f"ERROR: runtime report tool not found: {reporter}", file=sys.stderr)
+            _emit_gate_fail_json(
+                args,
+                repo_root,
+                b,
+                build_config,
+                "newdb_runtime_report_missing",
+                7,
+                {"reporter": reporter},
+            )
             return 7
 
         cmd = [reporter, "--input", runtime_jsonl]
@@ -605,7 +948,80 @@ def main() -> int:
             cmd.extend(
                 ["--min-lsm-compaction-bytes-amp-efficiency", str(args.min_lsm_compaction_bytes_amp_efficiency)]
             )
-        out = subprocess.check_output(cmd, cwd=b, text=True).strip()
+        if args.max_lazy_materialize_count_delta >= 0.0:
+            cmd.extend(
+                ["--max-lazy-materialize-count-delta", str(args.max_lazy_materialize_count_delta)]
+            )
+        if args.max_lazy_materialize_rows_total_delta >= 0.0:
+            cmd.extend(
+                [
+                    "--max-lazy-materialize-rows-total-delta",
+                    str(args.max_lazy_materialize_rows_total_delta),
+                ]
+            )
+        if args.max_table_storage_health_fragmentation_ratio >= 0.0:
+            cmd.extend(
+                [
+                    "--max-table-storage-health-fragmentation-ratio",
+                    str(args.max_table_storage_health_fragmentation_ratio),
+                ]
+            )
+        if args.max_table_storage_health_dead_bytes >= 0.0:
+            cmd.extend(
+                [
+                    "--max-table-storage-health-dead-bytes",
+                    str(args.max_table_storage_health_dead_bytes),
+                ]
+            )
+        if args.max_vacuum_health_bonus_last >= 0.0:
+            cmd.extend(
+                [
+                    "--max-vacuum-health-bonus-last",
+                    str(args.max_vacuum_health_bonus_last),
+                ]
+            )
+        if args.max_compact_debt_bytes_peak >= 0.0:
+            cmd.extend(
+                [
+                    "--max-compact-debt-bytes-peak",
+                    str(args.max_compact_debt_bytes_peak),
+                ]
+            )
+        if args.min_page_cache_hit_ratio >= 0.0:
+            cmd.extend(["--min-page-cache-hit-ratio", str(args.min_page_cache_hit_ratio)])
+        if args.max_where_scan_amplification >= 0.0:
+            cmd.extend(["--max-where-scan-amplification", str(args.max_where_scan_amplification)])
+        if args.max_memory_budget_reject_delta >= 0.0:
+            cmd.extend(["--max-memory-budget-reject-delta", str(args.max_memory_budget_reject_delta)])
+        proc = subprocess.run(cmd, cwd=b, text=True, capture_output=True)
+        out = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            fail: dict[str, Any] = {
+                "status": "fail",
+                "tool": "ci_bench_gate",
+                "stage": "newdb_runtime_report",
+                "exit_code": proc.returncode,
+                "profile": getattr(args, "_profile_effective", args.profile),
+                "build_dir_arg": args.build_dir,
+                "resolved_build_dir": b,
+                "build_config": build_config or "",
+                "stderr": proc.stderr or "",
+                "stdout": out,
+            }
+            if args.gate_fail_json_out:
+                outp = args.gate_fail_json_out
+                if not os.path.isabs(outp):
+                    outp = os.path.join(repo_root, outp)
+                try:
+                    parent = os.path.dirname(outp)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    with open(outp, "w", encoding="utf-8") as f:
+                        json.dump(fail, f, indent=2)
+                except Exception as exc:
+                    print(f"NOTE: failed to write gate-fail json: {exc}", file=sys.stderr)
+            print(json.dumps(fail, indent=2), file=sys.stderr)
+            return proc.returncode
         # Keep one machine-readable summary line in CI logs.
         try:
             parsed = json.loads(out)

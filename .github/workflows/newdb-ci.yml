@@ -38,8 +38,14 @@ jobs:
       - name: Test
         run: cd build && ctest --output-on-failure
 
-      - name: Bench gate (smoke + microbench)
-        run: python3 scripts/ci/ci_bench_gate.py build
+      - name: Bench gate (smoke + microbench, PR profile + gate-fail JSON)
+        run: >
+          python3 scripts/ci/ci_bench_gate.py build
+          --profile pr
+          --gate-fail-json-out scripts/results/pr_gate_fail.json
+
+      - name: Validate runtime stats fixture (contract)
+        run: python3 scripts/validate/validate_runtime_stats.py scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
 
       - name: Coverage (geninfo + line gate)
         run: |
@@ -78,5 +84,11 @@ jobs:
           cmake --build build --parallel
           cd build && ctest --output-on-failure
 
-      - name: Bench gate (smoke + microbench)
-        run: python3 scripts/ci/ci_bench_gate.py build
+      - name: Bench gate (smoke + microbench, PR profile + gate-fail JSON)
+        run: >
+          python3 scripts/ci/ci_bench_gate.py build
+          --profile pr
+          --gate-fail-json-out scripts/results/pr_gate_fail.json
+
+      - name: Validate runtime stats fixture (contract)
+        run: python3 scripts/validate/validate_runtime_stats.py scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl

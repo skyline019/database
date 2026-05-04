@@ -88,3 +88,19 @@ TEST(WalCodec, DecodeFailsOnDeclaredPayloadOverflow) {
     uint32_t row_len = 0;
     EXPECT_FALSE(newdb::walcodec::decode_row_fields(p, end, row_id, row_payload, row_len).ok);
 }
+
+TEST(WalCodec, V1MetaRoundtripsCheckpointSnapshotLsn) {
+    std::vector<uint8_t> payload;
+    const std::uint64_t cp_lsn = 424242424242ULL;
+    const std::uint64_t ts = 99;
+    newdb::walcodec::PayloadMetaView meta{};
+    meta.record_ts_ms = &ts;
+    meta.checkpoint_snapshot_lsn = &cp_lsn;
+    ASSERT_TRUE(newdb::walcodec::build_payload("", nullptr, nullptr, &meta, 0, payload).ok);
+    newdb::walcodec::DecodedPayloadV1 dec{};
+    ASSERT_TRUE(newdb::walcodec::decode_payload_v1(payload.data(), payload.size(), dec).ok);
+    ASSERT_TRUE(dec.has_checkpoint_snapshot_lsn);
+    EXPECT_EQ(dec.checkpoint_snapshot_lsn, cp_lsn);
+    ASSERT_TRUE(dec.has_record_ts_ms);
+    EXPECT_EQ(dec.record_ts_ms, ts);
+}

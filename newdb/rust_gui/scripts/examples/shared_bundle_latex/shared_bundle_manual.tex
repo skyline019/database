@@ -1,0 +1,305 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage[T1]{fontenc}
+\setlist[itemize]{leftmargin=1.5em}
+\setlist[enumerate]{leftmargin=1.8em}
+\titleformat{\section}{\large\bfseries}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.6em}{}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  columns=fullflexible
+}
+
+\title{newdb Shared Bundle\\External Integration Manual (Expanded)}
+\author{newdb Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Document Scope}
+This manual is an expanded LaTeX edition aligned with
+\texttt{newdb/scripts/examples/README\_shared\_bundle.md}. It covers:
+\begin{itemize}
+  \item Build and distribution of self-contained shared bundles.
+  \item Full exported interface references (\texttt{newdb} and \texttt{gtest\_capi}).
+  \item Command-driven external integration model.
+  \item Unified result parsing and error handling strategy.
+  \item Practical cross-language integration notes.
+\end{itemize}
+
+\section{Shared Bundle Delivery Model}
+\subsection{Output directories}
+\begin{itemize}
+  \item VS/MSVC: \texttt{build/newdb-vs2026-mt-tests/shared\_bundle/Release}
+  \item MinGW: \texttt{build/newdb-mingw/shared\_bundle/Release}
+  \item WSL/Linux: \texttt{build/newdb-wsl-tests/shared\_bundle/Release}
+\end{itemize}
+
+\subsection{Build commands}
+\begin{itemize}
+  \item VS:
+\begin{lstlisting}
+cmake --build build/newdb-vs2026-mt-tests --config Release --target shared_bundle --parallel
+\end{lstlisting}
+  \item MinGW:
+\begin{lstlisting}
+cmake --build build/newdb-mingw --target shared_bundle --parallel
+\end{lstlisting}
+  \item WSL:
+\begin{lstlisting}
+cmake --build build/newdb-wsl-tests --target shared_bundle -j8
+\end{lstlisting}
+\end{itemize}
+
+\subsection{Dependency precedence strategy}
+\begin{itemize}
+  \item Windows: \texttt{run\_*.cmd} launchers prioritize bundle-local DLL lookup.
+  \item Linux/WSL: binaries are linked with \texttt{RPATH=\$ORIGIN}, prioritizing colocated \texttt{.so}.
+  \item MinGW: runtime DLLs (\texttt{libstdc++-6.dll}, \texttt{libgcc\_s\_*.dll}, \texttt{libwinpthread-1.dll}) are bundled.
+\end{itemize}
+
+\section{newdb C API Full Reference}
+\subsection{Header and constants}
+Header: \texttt{newdb/engine/include/newdb/c\_api.h}
+\begin{itemize}
+  \item API version: \texttt{NEWDB\_C\_API\_VERSION\_MAJOR/MINOR/PATCH}
+  \item ABI version: \texttt{NEWDB\_C\_API\_ABI\_VERSION}
+\end{itemize}
+
+\subsection{Error codes}
+\begin{longtable}{>{\ttfamily}p{0.34\linewidth}p{0.58\linewidth}}
+\toprule
+Code & Meaning \\
+\midrule
+NEWDB\_OK & Success \\
+NEWDB\_ERR\_INVALID\_ARGUMENT & Invalid argument or buffer contract violation \\
+NEWDB\_ERR\_INVALID\_HANDLE & Invalid or already-destroyed session handle \\
+NEWDB\_ERR\_EXECUTION\_FAILED & Command/business execution failed \\
+NEWDB\_ERR\_INTERNAL & Internal engine failure \\
+NEWDB\_ERR\_LOG\_IO & File/log I/O failure \\
+NEWDB\_ERR\_SESSION\_TERMINATED & Session is terminated and cannot continue \\
+\bottomrule
+\end{longtable}
+
+\subsection{Thread-safety contract}
+\begin{itemize}
+  \item Global metadata APIs are thread-safe.
+  \item Per-session APIs are safe only under ``one handle per thread''.
+  \item Sharing one handle across concurrent threads is not guaranteed safe.
+\end{itemize}
+
+\subsection{Function catalog}
+\subsubsection*{Version and ABI}
+\begin{itemize}
+  \item \texttt{newdb\_version\_string}
+  \item \texttt{newdb\_api\_version\_major/minor/patch}
+  \item \texttt{newdb\_abi\_version}
+  \item \texttt{newdb\_negotiate\_abi}
+  \item \texttt{newdb\_error\_code\_string}
+\end{itemize}
+
+\subsubsection*{Utility}
+\begin{itemize}
+  \item \texttt{newdb\_sum}
+  \item \texttt{newdb\_check\_schema\_file}
+\end{itemize}
+
+\subsubsection*{Session lifecycle}
+\begin{itemize}
+  \item \texttt{newdb\_session\_create}
+  \item \texttt{newdb\_session\_destroy}
+  \item \texttt{newdb\_session\_set\_table}
+  \item \texttt{newdb\_session\_last\_error}
+\end{itemize}
+
+\subsubsection*{Execution and telemetry}
+\begin{itemize}
+  \item \texttt{newdb\_session\_execute}
+  \item \texttt{newdb\_session\_runtime\_stats}
+  \item \texttt{newdb\_session\_append\_runtime\_snapshot}
+\end{itemize}
+
+\subsection{Recommended lifecycle}
+\begin{enumerate}
+  \item Check ABI compatibility with \texttt{newdb\_negotiate\_abi}.
+  \item Create session handle.
+  \item Execute command stream via \texttt{newdb\_session\_execute}.
+  \item Collect stats/snapshots as needed.
+  \item Destroy session.
+\end{enumerate}
+
+\section{gtest\_capi Full Reference}
+Header: \texttt{newdb/include/gtest\_capi.h}
+
+\subsection{Capabilities}
+\begin{itemize}
+  \item Initialize and run GoogleTest from external language runtimes.
+  \item Enumerate tests and fetch test metadata.
+  \item Configure runtime options (filter/output/repeat/shuffle/seed/etc.).
+  \item Read post-run counters and elapsed time.
+\end{itemize}
+
+\subsection{Main APIs}
+\begin{itemize}
+  \item Init and run:
+  \texttt{gtest\_capi\_init\_from\_argv},
+  \texttt{gtest\_capi\_run\_all}
+  \item Listing and metadata:
+  \texttt{gtest\_capi\_list\_tests},
+  \texttt{gtest\_capi\_enumerate\_tests}
+  \item Options:
+  \texttt{set/get\_filter},
+  \texttt{set/get\_output},
+  \texttt{set/get\_repeat},
+  \texttt{set/get\_shuffle},
+  \texttt{set/get\_random\_seed},
+  \texttt{set/get\_color},
+  \texttt{set/get\_break\_on\_failure},
+  \texttt{set/get\_throw\_on\_failure},
+  \texttt{set/get\_catch\_exceptions},
+  \texttt{set/get\_also\_run\_disabled\_tests},
+  \texttt{set/get\_brief},
+  \texttt{set/get\_print\_time}
+  \item Generic option bridge:
+  \texttt{gtest\_capi\_set\_option},
+  \texttt{gtest\_capi\_get\_option}
+  \item Counters:
+  total suite/test, to-run count, passed/failed/skipped/disabled,
+  reportable disabled, elapsed ms.
+\end{itemize}
+
+\section{Feature-Oriented External Integration}
+From external systems, \texttt{newdb} exposes full engine capability through command execution:
+\begin{itemize}
+  \item DDL/schema management.
+  \item DML and query paths.
+  \item Transaction, conflict, and isolation controls.
+  \item WAL/recovery controls.
+  \item Runtime and maintenance controls (vacuum/group commit/hot index).
+\end{itemize}
+
+\subsection{Recommended wrapper layering}
+\begin{itemize}
+  \item DDL wrapper
+  \item DML wrapper
+  \item Query wrapper
+  \item Txn wrapper
+  \item Runtime tuning wrapper
+\end{itemize}
+
+\section{Command Templates}
+\subsection{DDL}
+\begin{lstlisting}
+CREATE TABLE(users)
+USE(users)
+SET PRIMARY KEY(uid)
+CREATE SCHEMA(finance_v1)
+ALTER TABLE users SET SCHEMA(finance_v1)
+RENAME TABLE(users_v2)
+DROP TABLE(users_v2)
+\end{lstlisting}
+
+\subsection{DML and query}
+\begin{lstlisting}
+INSERT(1, alice, 1000, rd)
+UPDATE(1, alice, 1200)
+DELETE(1)
+COUNT
+WHERE(balance, >, 1000, AND, dept, =, rd)
+PAGE(1, 20, id, desc)
+SUM(balance)
+AVG(balance)
+\end{lstlisting}
+
+\subsection{Transaction and tuning}
+\begin{lstlisting}
+BEGIN
+SAVEPOINT(sp1)
+ROLLBACK TO(sp1)
+COMMIT
+TXNISOLATION snapshot
+WRITECONFLICT wait 2000
+AUTOVACUUM threshold 500
+WALSYNC normal 200
+GROUPCOMMIT 10 128
+\end{lstlisting}
+
+\section{Result Parsing and Error Handling}
+Always evaluate all three:
+\begin{enumerate}
+  \item \texttt{rc} from \texttt{newdb\_session\_execute}
+  \item \texttt{newdb\_session\_last\_error}
+  \item \texttt{output\_buf}
+\end{enumerate}
+
+\subsection{Recommended result model}
+\begin{lstlisting}
+ExecuteResult {
+  rc: int
+  last_error: int
+  error_name: string
+  output: string
+  ok: bool
+}
+\end{lstlisting}
+
+\subsection{Buffer sizing}
+Use at least 4KB for simple commands and 16KB+ for complex query outputs.
+Do not rely on text completeness when truncation is possible.
+
+\section{Cross-language Practical Notes}
+\subsection{Python/C\#/Node strategy}
+\begin{itemize}
+  \item Load main library via absolute path.
+  \item Keep one session handle per worker/thread.
+  \item Wrap command execution in one adapter method returning unified result object.
+  \item Convert non-\texttt{NEWDB\_OK} into domain-specific exceptions.
+\end{itemize}
+
+\section{Operational Guidance}
+\subsection{Telemetry}
+Use:
+\begin{itemize}
+  \item \texttt{newdb\_session\_runtime\_stats} for real-time metric snapshots.
+  \item \texttt{newdb\_session\_append\_runtime\_snapshot} for JSONL historical traces.
+\end{itemize}
+
+\subsection{Suggested key metrics}
+\begin{itemize}
+  \item Commit latency (p95/max)
+  \item Write conflict and timeout counts
+  \item WAL recovery elapsed and scanned records
+  \item Vacuum trigger count and bytes reclaimed
+\end{itemize}
+
+\section{Distribution Checklist}
+\begin{enumerate}
+  \item Ship entire \texttt{shared\_bundle/Release} directory.
+  \item Do not split individual DLL/SO from their runtime dependencies.
+  \item Enforce absolute-path dynamic loading in host app.
+  \item Validate ABI before first command execution.
+  \item Persist command-level execution records.
+\end{enumerate}
+
+\section{Troubleshooting}
+\begin{itemize}
+  \item ``Module not found'': missing colocated dependencies.
+  \item Unexpected library resolution: enforce absolute load and bundle launchers.
+  \item WSL googletest download failures: use local \texttt{FETCHCONTENT\_SOURCE\_DIR\_GOOGLETEST}.
+\end{itemize}
+
+\end{document}
+

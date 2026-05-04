@@ -193,6 +193,37 @@ TEST(Where, PolicyRejectBlocksHeavyFallback) {
 #endif
 }
 
+TEST(Where, HeapScanBudgetTightensEffectiveScanCap) {
+#ifdef _WIN32
+    _putenv_s("NEWDB_WHERE_POLICY_MIN_ROWS", "1");
+    _putenv_s("NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS", "10");
+#else
+    setenv("NEWDB_WHERE_POLICY_MIN_ROWS", "1", 1);
+    setenv("NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS", "10", 1);
+#endif
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    schema.attrs = {AttrMeta{"balance", AttrType::Int}};
+    newdb::HeapTable tbl;
+    for (int i = 0; i < 100; ++i) {
+        tbl.rows.push_back(Row{i + 1, {{"balance", std::to_string(i + 1)}}, {}});
+    }
+    tbl.rebuild_indexes(schema);
+    std::vector<WhereCond> conds;
+    conds.push_back({"balance", CondOp::Ge, "1", ""});
+    conds.push_back({"balance", CondOp::Le, "9999", "AND"});
+    const auto idx = query_with_index(tbl, schema, conds);
+    EXPECT_TRUE(idx.empty());
+    EXPECT_TRUE(where_policy_last_blocked());
+#ifdef _WIN32
+    _putenv_s("NEWDB_WHERE_POLICY_MIN_ROWS", "");
+    _putenv_s("NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS", "");
+#else
+    unsetenv("NEWDB_WHERE_POLICY_MIN_ROWS");
+    unsetenv("NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS");
+#endif
+}
+
 TEST(Where, PolicyRejectKeepsIdLookup) {
 #ifdef _WIN32
     _putenv_s("NEWDB_WHERE_POLICY_MODE", "reject");

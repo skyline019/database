@@ -1,0 +1,245 @@
+\documentclass[11pt,a4paper]{ctexart}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks]{hyperref}
+\usepackage{longtable}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{listings}
+\usepackage{xurl}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=false,
+  breakindent=0pt,
+  frame=single,
+  columns=fullflexible,
+  xleftmargin=0pt,
+  framexleftmargin=6pt,
+  framexrightmargin=6pt,
+  aboveskip=6pt,
+  belowskip=6pt
+}
+\setlength{\emergencystretch}{3em}
+\Urlmuskip=0mu plus 2mu
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip = 0pt plus 1pt
+
+\title{newdb Shared Bundle 外部集成手册（纯 LaTeX 中文版）}
+\author{newdb Project}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{文档范围}
+本文档为纯 LaTeX 中文手册，不依赖 Markdown 快照嵌入。
+面向外部项目（Python/C\#/Node/其他 FFI）说明：
+\begin{itemize}
+  \item 如何构建与分发 \texttt{shared\_bundle}
+  \item 如何调用 \texttt{newdb.dll}/\texttt{libnewdb.so}
+  \item 如何处理返回码、错误码与输出文本
+  \item 如何接入事务/WAL/MVCC/Sidecar/运行时统计能力
+\end{itemize}
+
+\section{shared\_bundle 交付模型}
+\subsection{目录位置}
+\begin{itemize}
+  \item VS/MSVC：\texttt{build/newdb-vs2026-mt-tests/shared\_bundle/Release}
+  \item MinGW：\texttt{build/newdb-mingw/shared\_bundle/Release}
+  \item WSL/Linux：\texttt{build/newdb-wsl-tests/shared\_bundle/Release}
+\end{itemize}
+
+\subsection{构建命令}
+\begin{lstlisting}
+# VS/MSVC
+cmake --build build/newdb-vs2026-mt-tests --config Release --target shared_bundle --parallel
+
+# MinGW
+cmake --build build/newdb-mingw --target shared_bundle --parallel
+
+# WSL/Linux
+cmake --build build/newdb-wsl-tests --target shared_bundle -j8
+\end{lstlisting}
+
+\subsection{依赖优先策略}
+\begin{itemize}
+  \item Windows：使用 \texttt{run\_*.cmd}，优先加载 bundle 目录内 DLL。
+  \item Linux/WSL：通过 \texttt{RPATH=\$ORIGIN}，优先加载同目录 \texttt{.so}。
+  \item MinGW：自动附带 \texttt{libstdc++-6.dll}、\texttt{libgcc\_s\_*.dll}、
+  \texttt{libwinpthread-1.dll}。
+\end{itemize}
+
+\section{newdb C API 完整说明}
+\subsection{头文件与常量}
+头文件路径：\texttt{newdb/engine/include/newdb/c\_api.h}
+\begin{itemize}
+  \item 版本常量：\texttt{NEWDB\_C\_API\_VERSION\_MAJOR/MINOR/PATCH}
+  \item ABI 常量：\texttt{NEWDB\_C\_API\_ABI\_VERSION}
+\end{itemize}
+
+\subsection{错误码}
+\begin{longtable}{>{\ttfamily}p{0.36\linewidth}p{0.56\linewidth}}
+\toprule
+错误码 & 含义 \\
+\midrule
+NEWDB\_OK & 成功 \\
+NEWDB\_ERR\_INVALID\_ARGUMENT & 参数错误/缓冲区契约错误 \\
+NEWDB\_ERR\_INVALID\_HANDLE & 会话句柄无效或已销毁 \\
+NEWDB\_ERR\_EXECUTION\_FAILED & 命令或业务执行失败 \\
+NEWDB\_ERR\_INTERNAL & 内部错误 \\
+NEWDB\_ERR\_LOG\_IO & 日志/文件 I/O 失败 \\
+NEWDB\_ERR\_SESSION\_TERMINATED & 会话已终止不可继续 \\
+\bottomrule
+\end{longtable}
+
+\subsection{线程安全约定}
+\begin{itemize}
+  \item 全局元信息接口线程安全。
+  \item 会话接口按“一线程一 handle”安全。
+  \item 同一 handle 并发调用不保证安全。
+\end{itemize}
+
+\subsection{导出函数清单}
+\begin{itemize}
+  \item 全局与版本：
+  \begin{itemize}
+    \item \texttt{newdb\_version\_string}
+    \item \texttt{newdb\_api\_version\_major/minor/patch}
+    \item \texttt{newdb\_abi\_version}
+    \item \texttt{newdb\_negotiate\_abi}
+    \item \texttt{newdb\_error\_code\_string}
+    \item \texttt{newdb\_sum}
+  \end{itemize}
+  \item Schema：
+  \begin{itemize}
+    \item \texttt{newdb\_check\_schema\_file}
+  \end{itemize}
+  \item 会话：
+  \begin{itemize}
+    \item \texttt{newdb\_session\_create}
+    \item \texttt{newdb\_session\_destroy}
+    \item \texttt{newdb\_session\_set\_table}
+    \item \texttt{newdb\_session\_last\_error}
+  \end{itemize}
+  \item 执行与观测：
+  \begin{itemize}
+    \item \texttt{newdb\_session\_execute}
+    \item \texttt{newdb\_session\_runtime\_stats}
+    \item \texttt{newdb\_session\_append\_runtime\_snapshot}
+  \end{itemize}
+\end{itemize}
+
+\section{gtest\_capi 接口说明}
+头文件：\texttt{newdb/include/gtest\_capi.h}
+
+\begin{itemize}
+  \item 初始化与执行：
+  \texttt{gtest\_capi\_init\_from\_argv},
+  \texttt{gtest\_capi\_run\_all}
+  \item 测试枚举：
+  \texttt{gtest\_capi\_list\_tests},
+  \texttt{gtest\_capi\_enumerate\_tests}
+  \item 参数控制：
+  filter/output/repeat/shuffle/random\_seed/color 及失败策略
+  \item 通用键值桥：
+  \texttt{gtest\_capi\_set\_option},
+  \texttt{gtest\_capi\_get\_option}
+  \item 统计：
+  suite/test 总数、通过/失败/跳过/禁用数量、耗时
+\end{itemize}
+
+\section{功能映射：外部调用 DLL 可以做什么}
+\begin{itemize}
+  \item DDL 与模式管理
+  \item DML（增删改）
+  \item 条件查询、分页、聚合
+  \item 事务控制与冲突策略
+  \item WAL/恢复能力
+  \item 运行时统计与快照落盘
+\end{itemize}
+
+\section{命令模板速查（传给 \texttt{newdb\_session\_execute}）}
+\subsection{DDL}
+\begin{lstlisting}
+CREATE TABLE(users)
+USE(users)
+SET PRIMARY KEY(uid)
+CREATE SCHEMA(finance_v1)
+ALTER TABLE users SET SCHEMA(finance_v1)
+RENAME TABLE(users_v2)
+DROP TABLE(users_v2)
+\end{lstlisting}
+
+\subsection{DML 与查询}
+\begin{lstlisting}
+DEFATTR(name:string, balance:int, dept:string)
+INSERT(1, alice, 1000, rd)
+UPDATE(1, alice, 1200)
+DELETE(1)
+COUNT
+WHERE(balance, >, 1000, AND, dept, =, rd)
+PAGE(1, 20, id, desc)
+SUM(balance)
+AVG(balance)
+\end{lstlisting}
+
+\subsection{事务与调优}
+\begin{lstlisting}
+BEGIN
+SAVEPOINT(sp1)
+ROLLBACK TO(sp1)
+COMMIT
+TXNISOLATION snapshot
+WRITECONFLICT wait 2000
+AUTOVACUUM threshold 500
+WALSYNC normal 200
+GROUPCOMMIT 10 128
+\end{lstlisting}
+
+\section{结果解析规范}
+必须同时判断三项：
+\begin{enumerate}
+  \item \texttt{rc}（\texttt{newdb\_session\_execute} 返回值）
+  \item \texttt{newdb\_session\_last\_error}
+  \item \texttt{output\_buf}（可读诊断）
+\end{enumerate}
+
+建议统一结果结构：
+\begin{lstlisting}
+ExecuteResult {
+  rc: int
+  last_error: int
+  error_name: string
+  output: string
+  ok: bool
+}
+\end{lstlisting}
+
+缓冲区建议：
+\begin{itemize}
+  \item 常规命令至少 4KB
+  \item 复杂查询建议 16KB 或以上
+\end{itemize}
+
+\section{部署检查清单}
+\begin{enumerate}
+  \item 必须整目录分发 \texttt{shared\_bundle/Release}
+  \item 必须绝对路径加载主库
+  \item 首次调用前必须做 ABI 协商
+  \item 必须采用一线程一会话句柄
+  \item 每次调用记录 \texttt{rc + last\_error + output}
+\end{enumerate}
+
+\section{常见问题}
+\begin{itemize}
+  \item 找不到模块：通常缺少同目录依赖。
+  \item 加载到系统同名库：请使用绝对路径和 launcher。
+  \item WSL 拉 gtest 失败：使用本地
+  \texttt{FETCHCONTENT\_SOURCE\_DIR\_GOOGLETEST}。
+\end{itemize}
+
+\end{document}
+

@@ -15,16 +15,16 @@
 #include <newdb/page_io.h>
 
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
-#include "cli/shell/dispatch/internal/dispatch_internal.h"
+#include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/import_export/demo_export.h"
 #include "cli/modules/import_export/import.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
 #include "cli/shell/state/shell_state.h"
-#include "cli/modules/view/table_view.h"
+#include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
-#include "cli/modules/util/utils.h"
+#include "cli/modules/common/util/utils.h"
 #include "cli/modules/where/executor/where.h"
 #include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
 

@@ -2,7 +2,7 @@
 
 #include <newdb/schema_io.h>
 
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>

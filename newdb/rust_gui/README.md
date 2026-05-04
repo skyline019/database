@@ -39,7 +39,7 @@ npm run tauri:dev
 
 ```bash
 cd newdb/rust_gui
-pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build_mingw
+pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build-mingw
 npm run tauri:build
 ```
 
@@ -71,7 +71,7 @@ And `newdb_perf` is available under one of:
 For bundle resources, sync runtime binaries into `src-tauri/bin` first:
 
 ```bash
-pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build_mingw
+pwsh ./scripts/sync_runtime_binaries.ps1 -BuildDir ../build-mingw
 ```
 
 This syncs:
@@ -79,7 +79,9 @@ This syncs:
 - `newdb_demo.exe`
 - `newdb_perf.exe`
 - `newdb_runtime_report.exe`
-- `libnewdb.dll`
+- `libnewdb.dll`（若构建产出为 `newdb.dll` 则复制并改名为 `libnewdb.dll`）
+- `libgtest_capi.dll`（MSVC 下可能为 `gtest_capi.dll`，脚本会统一为 `libgtest_capi.dll`）；若 GoogleTest 为共享库，会顺带复制同目录下的 `gtest`/`gmock` 等同伴 DLL
+- 产物查找顺序：构建根目录、`bin/`、`Release/`、`RelWithDebInfo/`、`Debug/`、`MinSizeRel/`（兼容 MinGW 单配置与 VS 多配置）
 - GUI nightly/bench 所需脚本到 `src-tauri/resources/scripts/`（`soak/bench/validate/ci` 子集）
 - 结果目录与种子文件到 `src-tauri/resources/scripts/results/`：
   - `runtime_trend_dashboard.json`

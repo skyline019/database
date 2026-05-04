@@ -7,6 +7,7 @@
 #include "cli/modules/where/executor/where.h"
 
 #include <filesystem>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -61,23 +62,27 @@ struct ShellState {
     bool verbose{false};
     WhereQueryContext where_ctx;
 
-    // LSM-lite stage 1: process-local hot index for recently written rows.
-    // Best-effort cache (correctness still relies on heap file); invalidated on RESET/USE.
-    std::unordered_map<int, newdb::Row> hot_index_recent;
-    // LSM-lite stage 2: mutable/immutable memtable and segment catalog.
-    std::unordered_map<int, LsmEntry> lsm_memtable;
-    std::unordered_map<int, LsmEntry> lsm_immutable;
-    std::vector<LsmSegmentMeta> lsm_segments;
-    std::uint64_t lsm_memtable_bytes{0};
-    std::uint64_t lsm_seq{0};
-    std::string lsm_table_name;
+    // Shell-local LSM-lite caches and sidecar invalidation tuning (see txn + lsm_lite_service).
+    struct LsmShellCache {
+        // Stage 1: process-local hot index for recently written rows (best-effort).
+        std::unordered_map<int, newdb::Row> hot_index_recent;
+        // Stage 2: mutable/immutable memtable and segment catalog.
+        std::unordered_map<int, LsmEntry> lsm_memtable;
+        std::unordered_map<int, LsmEntry> lsm_immutable;
+        std::vector<LsmSegmentMeta> lsm_segments;
+        std::uint64_t lsm_memtable_bytes{0};
+        std::uint64_t lsm_seq{0};
+        std::string lsm_table_name;
+    } lsm;
 
-    // Sidecar invalidation coalescing for write-heavy benchmarks.
-    // every_n=1 keeps original behavior (invalidate on each write).
-    std::uint64_t sidecar_pending_writes{0};
-    std::uint64_t sidecar_invalidate_every_n{0};
-    // 0=uninitialized, 1=sync(default), 2=async background.
-    std::uint8_t sidecar_invalidate_mode{0};
+    struct SidecarShellTuning {
+        // Sidecar invalidation coalescing for write-heavy benchmarks (every_n=1 = per write).
+        std::uint64_t sidecar_pending_writes{0};
+        std::uint64_t sidecar_invalidate_every_n{0};
+        // 0=uninitialized, 1=sync(default), 2=async background.
+        std::uint8_t sidecar_invalidate_mode{0};
+    } sidecar;
+
     RuntimePolicy runtime_policy{};
 };
 
@@ -129,8 +134,12 @@ inline void shell_invalidate_session_table(ShellState& st) {
 
 // Expands mmap-backed heap into `HeapTable::rows` (required before mutating `rows` in memory).
 // Avoid on large tables except where mutation or APIs explicitly require a full vector: it forces
-// a full read and can dominate memory. Prefer lazy heap paths (PAGE, indexed WHERE) when possible.
-inline newdb::Status newdb_materialize_heap_if_lazy(newdb::HeapTable& t, const newdb::TableSchema& sch) {
+// a full read and can dominate memory. Prefer lazy heap paths (PAGE, indexed WHERE) when possible;
+// tune `NEWDB_LAZY_MATERIALIZE_WARN_ROWS` (env) to surface accidental full materialization earlier.
+// When `stats_sink` is non-null, successful materialization updates `TxnRuntimeStats` lazy counters.
+inline newdb::Status newdb_materialize_heap_if_lazy(newdb::HeapTable& t,
+                                                    const newdb::TableSchema& sch,
+                                                    ShellState* stats_sink = nullptr) {
     if (!t.is_heap_storage_backed()) {
         return newdb::Status::Ok();
     }
@@ -152,7 +161,17 @@ inline newdb::Status newdb_materialize_heap_if_lazy(newdb::HeapTable& t, const n
                      logical_rows,
                      warn_rows);
     }
-    return t.materialize_all_rows(sch);
+    const auto t0 = std::chrono::steady_clock::now();
+    const newdb::Status st = t.materialize_all_rows(sch);
+    if (st.ok && stats_sink != nullptr) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+        stats_sink->txn.noteLazyMaterialize(
+            static_cast<std::uint64_t>(logical_rows),
+            static_cast<std::uint64_t>(ms < 0 ? 0 : ms));
+    }
+    return st;
 }
 
 inline void reload_schema_from_data_path(ShellState& st, const std::string& data_path) {
@@ -166,3 +185,10 @@ inline void reload_schema_from_data_path(ShellState& st, const std::string& data
 inline const newdb::AttrMeta* find_attr_meta(const newdb::TableSchema& sch, const std::string& name) {
     return sch.find_attr(name);
 }
+
+struct HeapReadViewGuard {
+    ShellState& st;
+    newdb::HeapTable& tbl;
+    HeapReadViewGuard(ShellState& s, newdb::HeapTable& t) : st(s), tbl(t) { st.txn.syncHeapReadSnapshotForQuery(tbl); }
+    ~HeapReadViewGuard() { tbl.clear_snapshot(); }
+};

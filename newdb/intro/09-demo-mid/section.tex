@@ -6,7 +6,7 @@
 
 \begin{itemize}
   \item \textbf{入口}：\fpath{cli/app/demo_main.cc} 解析 CLI 并决定执行模式；
-  \item \textbf{命令分发}：\fpath{cli/shell/dispatch/dispatch.cc} + \fpath{cli/shell/dispatch/handlers/*} 负责交互命令解析与路由；
+  \item \textbf{命令分发}：\fpath{cli/shell/dispatch/router/dispatch.cc}、\fpath{cli/shell/dispatch/router/dispatch_routing.cc}（phase-2 前缀快路径）与 \fpath{cli/shell/dispatch/handlers/*} 负责交互命令解析与路由；
   \item \textbf{查询中间层}：\fpath{cli/modules/where/executor/*} 管理条件解析、候选集构建、策略限流与查询缓存；
   \item \textbf{事务协调}：\fpath{cli/modules/txn/coordinator/*} 封装 Txn + WAL + 文件锁 + vacuum 触发；
   \item \textbf{运行编排}：\fpath{cli/shell/bootstrap/demo_runner.cc} 对接 batch/exec/import/mdb 等模式。

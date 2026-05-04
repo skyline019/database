@@ -1011,6 +1011,21 @@ fn parse_capi_error_code(output: &str) -> Option<String> {
     None
 }
 
+fn parse_capi_error_numeric(output: &str) -> Option<i32> {
+    for line in output.lines() {
+        let t = line.trim();
+        if !t.starts_with("[CAPI_ERROR]") {
+            continue;
+        }
+        if let Some(idx) = t.find("numeric=") {
+            let rest = &t[idx + "numeric=".len()..];
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            return rest[..end].trim().parse().ok();
+        }
+    }
+    None
+}
+
 fn strip_capi_error_line(output: &str) -> String {
     let mut out = String::new();
     for line in output.lines() {
@@ -1031,6 +1046,8 @@ struct CommandExecResult {
     ok: bool,
     output: String,
     error_code: Option<String>,
+    /// Stable `newdb_session_last_error` style code when the C API emits `numeric=` (optional).
+    error_code_numeric: Option<i32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1055,6 +1072,7 @@ struct TimedExecResult {
     ok: bool,
     output: String,
     error_code: Option<String>,
+    error_code_numeric: Option<i32>,
     elapsed_ms: u64,
 }
 
@@ -1098,10 +1116,12 @@ struct StackExecResult {
 
 fn make_command_exec_result(out: String) -> CommandExecResult {
     let error_code = parse_capi_error_code(&out);
+    let error_code_numeric = parse_capi_error_numeric(&out);
     CommandExecResult {
         ok: error_code.is_none(),
         output: strip_capi_error_line(&out),
         error_code,
+        error_code_numeric,
     }
 }
 
@@ -1111,6 +1131,7 @@ fn make_timed_exec_result(out: String, elapsed_ms: u64) -> TimedExecResult {
         ok: r.ok,
         output: r.output,
         error_code: r.error_code,
+        error_code_numeric: r.error_code_numeric,
         elapsed_ms,
     }
 }
@@ -1620,6 +1641,7 @@ mod tests {
         let r = make_command_exec_result(out);
         assert!(!r.ok);
         assert_eq!(r.error_code.as_deref(), Some("execution_failed"));
+        assert_eq!(r.error_code_numeric, Some(3));
         assert!(!r.output.contains("[CAPI_ERROR]"));
         assert!(r.output.contains("[UPDATE] attribute 'age' expects int, got 'a'"));
     }
@@ -1630,6 +1652,7 @@ mod tests {
         let r = make_command_exec_result(out);
         assert!(r.ok);
         assert!(r.error_code.is_none());
+        assert!(r.error_code_numeric.is_none());
         assert!(r.output.contains("[INSERT] ok: table='users' now has 1 rows."));
     }
 
@@ -2882,6 +2905,14 @@ struct RuntimeArtifactInfo {
     runtime_report_modified: String,
     dll_path: String,
     dll_modified: String,
+    /// Contract label for `SHOW TUNING JSON` / JSONL stats (engine and GUI stay aligned).
+    runtime_stats_schema_version: String,
+    /// Best-effort: set `NEWDB_GIT_COMMIT` in CI pack scripts to populate.
+    backend_git_commit: String,
+    /// `Release` / `RelWithDebInfo` / etc. when `NEWDB_BUILD_PROFILE` is set at pack time.
+    build_profile: String,
+    /// Tauri / GUI build: `debug` vs `release` (from `cfg!(debug_assertions)`).
+    gui_package_kind: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2949,6 +2980,13 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
     let perf = resolve_perf_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let runtime_report = resolve_runtime_report_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let dll = resolve_newdb_dll();
+    let backend_git_commit = std::env::var("NEWDB_GIT_COMMIT").unwrap_or_default();
+    let build_profile = std::env::var("NEWDB_BUILD_PROFILE").unwrap_or_default();
+    let gui_package_kind = if cfg!(debug_assertions) {
+        "debug".to_string()
+    } else {
+        "release".to_string()
+    };
     RuntimeArtifactInfo {
         gui_exe_path: gui_exe.display().to_string(),
         gui_exe_modified: format_modified_time(&gui_exe),
@@ -2960,6 +2998,10 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
         runtime_report_modified: format_modified_time(&runtime_report),
         dll_path: dll.display().to_string(),
         dll_modified: format_modified_time(&dll),
+        runtime_stats_schema_version: "newdb.runtime_stats.v1".to_string(),
+        backend_git_commit,
+        build_profile,
+        gui_package_kind,
     }
 }
 

@@ -2,14 +2,17 @@
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
-#include "cli/modules/logging/logging.h"
-#include "cli/modules/util/constants.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 
 #include <newdb/heap_table.h>
+#include <newdb/mvcc.h>
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>
 
+#include <cctype>
+#include <cstdio>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -175,6 +178,9 @@ void TxnCoordinator::writeWAL(const std::string& operation, const std::string& t
 
     if (operation == "TXN_BEGIN") {
         (void)wm->begin_transaction(txn);
+        // Advance `current_lsn()` so Snapshot `BEGIN` can pin a non-zero read view on an otherwise
+        // empty WAL (engine `begin_transaction` is a no-op for LSN).
+        (void)wm->append_record(txn, newdb::WalOp::SESSION_SNAPSHOT, table, nullptr);
         const auto ms = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wal_begin_t)
                 .count());
@@ -544,6 +550,78 @@ void TxnCoordinator::setLsmSegmentCount(const std::uint64_t n) {
 
 void TxnCoordinator::setLsmMemtableBytes(const std::uint64_t n) {
     m_lsm_memtable_bytes.store(n, std::memory_order_relaxed);
+}
+
+
+void TxnCoordinator::syncHeapReadSnapshotForQuery(newdb::HeapTable& table) {
+    auto set_source = [this](const std::uint8_t code) {
+        m_last_snapshot_source_code.store(code, std::memory_order_relaxed);
+    };
+    auto publish_snapshot_lsns = [this](std::uint64_t txn_lsn, std::uint64_t stmt_lsn) {
+        m_last_transaction_snapshot_lsn.store(txn_lsn, std::memory_order_relaxed);
+        m_last_statement_snapshot_lsn.store(stmt_lsn, std::memory_order_relaxed);
+    };
+    if (const char* opt = std::getenv("NEWDB_TXN_ISOLATION_READPATH")) {
+        std::string v = opt;
+        for (auto& ch : v) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (v == "0" || v == "off" || v == "false" || v == "no") {
+            table.clear_snapshot();
+            m_txn_readpath_disabled_count.fetch_add(1, std::memory_order_relaxed);
+            set_source(3);
+            publish_snapshot_lsns(0, 0);
+            return;
+        }
+    }
+    std::lock_guard<std::mutex> lk(m_wal_mutex);
+    newdb::WalManager* wm = wal_.get();
+    if (wm == nullptr) {
+        table.clear_snapshot();
+        set_source(0);
+        publish_snapshot_lsns(0, 0);
+        return;
+    }
+    std::uint64_t lsn = wm->current_lsn();
+    std::uint64_t txn_lsn = 0;
+    std::uint64_t stmt_lsn = 0;
+    if (txnIsolationLevel() == TxnIsolationLevel::Snapshot) {
+        const std::uint64_t fixed = m_txn_read_view_lsn.load(std::memory_order_relaxed);
+        if (getState() == TxnState::Active && fixed != 0) {
+            lsn = fixed;
+            m_txn_snapshot_pinned_count.fetch_add(1, std::memory_order_relaxed);
+            set_source(1);
+            txn_lsn = lsn;
+        } else {
+            m_txn_snapshot_refresh_count.fetch_add(1, std::memory_order_relaxed);
+            set_source(2);
+            stmt_lsn = lsn;
+        }
+    } else {
+        m_txn_snapshot_refresh_count.fetch_add(1, std::memory_order_relaxed);
+        set_source(2);
+        stmt_lsn = lsn;
+    }
+    publish_snapshot_lsns(txn_lsn, stmt_lsn);
+    newdb::MVCCSnapshot snap;
+    snap.snapshot_lsn = lsn;
+    snap.min_visible_lsn = 0;
+    table.set_snapshot(snap);
+    if (const char* tr = std::getenv("NEWDB_TXN_TRACE")) {
+        std::string tv = tr;
+        for (auto& ch : tv) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (tv == "1" || tv == "on" || tv == "true" || tv == "yes") {
+            const char* iso =
+                txnIsolationLevel() == TxnIsolationLevel::ReadCommitted ? "read_committed" : "snapshot";
+            std::fprintf(stderr,
+                         "[TXN_TRACE] sync_read_view iso=%s snapshot_lsn=%llu in_txn=%d\n",
+                         iso,
+                         static_cast<unsigned long long>(lsn),
+                         getState() == TxnState::Active ? 1 : 0);
+        }
+    }
 }
 
 

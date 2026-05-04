@@ -1,5 +1,6 @@
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/sidecar/common/bptree_index.h"
+#include "cli/modules/sidecar/common/index_catalog.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -34,6 +35,17 @@ bool row_at_slot_read_sidecar(const newdb::HeapTable& tbl, const std::size_t i, 
 
 std::string sidecar_path_for(const PageSidecarRequest& req) {
     return req.data_file + ".idx." + req.order_key + (req.descending ? ".desc" : ".asc");
+}
+
+std::string page_table_plain(const PageSidecarRequest& req) {
+    if (!req.table_name.empty()) {
+        return req.table_name;
+    }
+    return index_catalog_infer_table_plain_from_data_file(req.data_file);
+}
+
+std::string page_index_plain(const PageSidecarRequest& req) {
+    return req.order_key + "|" + (req.descending ? "desc" : "asc");
 }
 
 std::uint64_t file_sig(const std::string& p) {
@@ -86,13 +98,21 @@ bool parse_header(const std::string& line,
     } else {
         const std::string ds = line.substr(s0 + 10, a0 - (s0 + 10));
         const std::string as = line.substr(a0 + 10, wpos - (a0 + 10));
-        const std::string wl = (vpos == std::string::npos)
-                                   ? line.substr(wpos + 9)
-                                   : line.substr(wpos + 9, vpos - (wpos + 9));
         try {
             data_sig = static_cast<std::uint64_t>(std::stoull(ds));
             attr_sig = static_cast<std::uint64_t>(std::stoull(as));
-            wal_lsn = static_cast<std::uint64_t>(std::stoull(wl));
+        } catch (...) {
+            return false;
+        }
+        wal_lsn = 0;
+        for (std::size_t i = wpos + 9; i < line.size(); ++i) {
+            const unsigned char c = static_cast<unsigned char>(line[i]);
+            if (c < '0' || c > '9') {
+                break;
+            }
+            wal_lsn = wal_lsn * 10 + static_cast<std::uint64_t>(c - '0');
+        }
+        try {
             if (vpos != std::string::npos) {
                 ver = std::stoi(line.substr(vpos + 5));
             }
@@ -128,6 +148,13 @@ bool try_read_sidecar(const std::string& path,
         wln != wal_lsn) {
         return false;
     }
+    IndexCatalogParsedTail tail{};
+    index_catalog_parse_header_tail(hdr, tail);
+    const std::string inx_key = req.order_key + std::string("\x1e") + (req.descending ? "1" : "0");
+    if (!index_catalog_header_identity_ok(hdr, tail, req.data_file, inx_key, page_table_plain(req), page_index_plain(req),
+                                          IndexKind::PageOrder)) {
+        return false;
+    }
     out.clear();
     std::string line;
     while (std::getline(in, line)) {
@@ -149,11 +176,16 @@ void write_sidecar(const std::string& path,
                    const std::vector<std::size_t>& idx) {
     std::ofstream out(path, std::ios::out | std::ios::trunc);
     if (!out) return;
+    const std::string tplain = page_table_plain(req);
+    const std::string iplain = page_index_plain(req);
     out << "key=" << req.order_key
         << ";desc=" << (req.descending ? "1" : "0")
         << ";data_sig=" << data_sig
         << ";attr_sig=" << attr_sig
         << ";wal_lsn=" << wal_lsn
+        << index_catalog_sidecar_meta_suffix(
+               IndexKind::PageOrder, attr_sig, wal_lsn, req.data_file,
+               req.order_key + std::string("\x1e") + (req.descending ? "1" : "0"), nullptr, tplain, iplain)
         << ";ver=" << kPageIndexSidecarVersion << "\n";
     for (const auto v : idx) {
         out << v << "\n";

@@ -1,4 +1,4 @@
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 
 #include "test_util.h"
 

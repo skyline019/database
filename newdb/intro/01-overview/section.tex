@@ -2,6 +2,36 @@
 
 本章节给出一个从“字节落盘”到“可查询表”的全链路视图，帮助后续章节把局部实现放回整体语境。
 
+\subsection{端到端处理流程图}
+
+图~\ref{fig:newdb-end-to-end-dataflow} 概括\textbf{整个项目}从交互入口到引擎存储的主数据流（细部分支可在后续章节展开）。依赖方向与仓库约定一致：\fpath{cli/app} $\rightarrow$ \fpath{cli/shell} $\rightarrow$ \fpath{cli/modules} $\rightarrow$ \fpath{engine/include/newdb}（见 \fpath{docs/architecture/MODULE_BOUNDARIES.md}、\fpath{docs/architecture/NEWDB_DESIGN_POINT_TO_FILE_MAP.md}）。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  nd/.style={rectangle, draw=black!55, rounded corners=3pt,
+    inner xsep=8pt, inner ysep=6pt, align=left, text width=0.92\linewidth},
+  arr/.style={-{Stealth[length=2mm]}, semithick, black!45},
+]
+\node[nd] (n1) {\textbf{入口}\quad \texttt{demo\_main}（CLI 参数与模式）、交互式 REPL（\fpath{cli/shell/repl/demo_shell.cc}）、以及引擎 \texttt{C API}（\fpath{engine/src/api/c/c_api.cpp}），最终进入同一条命令分发管线。};
+\node[nd, below=7mm of n1] (n2) {\textbf{ShellState（会话上下文）}\quad 聚合 \texttt{Session}、\texttt{TxnCoordinator}、\texttt{WhereQueryContext}，以及 LSM-lite / sidecar 等会话级状态（\fpath{cli/shell/state/shell_state.h}）。};
+\node[nd, below=7mm of n2] (n3) {\textbf{路由：\texttt{process\_command\_line}}\quad Phase\,1：无需已装载 \texttt{HeapTable} 的命令先尝试（\fpath{cli/shell/dispatch/router/dispatch.cc}）；Phase\,2：需表时经 \texttt{get\_cached\_table}/\texttt{Session::lock\_heap}。可与 \fpath{dispatch_routing.cc} 的 phase-2 前缀判定组合，跳过整条 Phase\,1 handler 链。};
+\node[nd, below=7mm of n3] (n4) {\textbf{handlers（业务编排）}\quad DDL、事务与 workspace、DML、WHERE/PAGE/FIND 等查询、导入导出（\fpath{cli/shell/dispatch/handlers/}）。};
+\node[nd, below=7mm of n4] (n5) {\textbf{cli modules}\quad 事务侧 WAL、文件锁、vacuum、recovery（\fpath{cli/modules/txn/coordinator/}）；\texttt{where} 解析与执行；sidecar（覆盖索引、可见性检查点等）；\texttt{lsm\_lite\_service} 等。};
+\node[nd, below=7mm of n5] (n6) {\textbf{引擎}\quad \texttt{Session::ensure\_loaded}/\texttt{reload}；\texttt{HeapTable} 与页级 I/O（\fpath{engine/src/heap/}、\fpath{engine/src/io/page/}）；\texttt{WalManager} 编解码；MVCC 快照与读路径可见性过滤。};
+\draw[arr] (n1.south) -- (n2.north);
+\draw[arr] (n2.south) -- (n3.north);
+\draw[arr] (n3.south) -- (n4.north);
+\draw[arr] (n4.south) -- (n5.north);
+\draw[arr] (n5.south) -- (n6.north);
+\end{tikzpicture}
+\caption{newdb 端到端处理流程（主路径概览）}
+\label{fig:newdb-end-to-end-dataflow}
+\end{figure}
+
+\textbf{读路径}多在 Phase\,2 $\rightarrow$ \texttt{where} + sidecar $\rightarrow$ 惰性解码或索引访问 \texttt{HeapTable}。\textbf{写路径}经 \texttt{TxnCoordinator} $\rightarrow$ WAL 追加 $\rightarrow$ 堆文件持久化，并触发 sidecar/缓存失效策略。
+
 \subsection{核心对象关系}
 
 \begin{itemize}

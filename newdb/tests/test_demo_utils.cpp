@@ -1,4 +1,4 @@
-#include "cli/modules/util/utils.h"
+#include "cli/modules/common/util/utils.h"
 
 #include <gtest/gtest.h>
 

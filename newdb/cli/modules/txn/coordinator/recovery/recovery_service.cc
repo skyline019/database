@@ -2,8 +2,8 @@
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
-#include "cli/modules/logging/logging.h"
-#include "cli/modules/util/constants.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 
 #include <newdb/heap_table.h>
@@ -52,6 +52,10 @@ bool TxnCoordinator::recoverFromWAL() {
     std::vector<newdb::WalDecodedRecord> recs;
     const newdb::Status rd = wm->read_all_records(schema, recs);
     if (!rd.ok) {
+        {
+            std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
+            m_wal_recovery_policy = std::string("cli_txn_reconcile|read_all_records_failed:") + rd.message;
+        }
         return false;
     }
     if (recover_target_lsn == 0 && recover_target_ts_ms != 0) {
@@ -247,6 +251,9 @@ bool TxnCoordinator::recoverFromWAL() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - redo_started_at)
             .count());
+    m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
+    m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
+    m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
 
     std::map<std::string, std::vector<TxnWalOp>> ops_by_table;
     for (const auto& kv : dangling_by_txn) {
@@ -351,11 +358,26 @@ bool TxnCoordinator::recoverFromWAL() {
             std::chrono::steady_clock::now() - recovery_started_at)
             .count());
     m_wal_recovery_last_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
-    (void)redo_elapsed_ms;
-    (void)cp_begin;
-    (void)cp_end;
+    {
+        std::ostringstream pol;
+        pol << "cli_txn_reconcile";
+        if (recover_target_lsn != 0) {
+            pol << ";recover_target_lsn=" << recover_target_lsn;
+        }
+        if (recover_target_ts_ms != 0) {
+            pol << ";recover_target_ts_ms=" << recover_target_ts_ms;
+        }
+        if (const auto ls = wm->last_recovery_stats()) {
+            pol << "|heap_policy=" << ls->recovery_policy;
+            pol << ";heap_uncommitted_discarded=" << ls->uncommitted_txn_discarded_count;
+            pol << ";heap_partial_tail_stops=" << ls->segment_index_partial_tail_stops;
+            pol << ";heap_bad_header_stops=" << ls->segment_index_bad_header_stops;
+        }
+        std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
+        m_wal_recovery_policy = pol.str();
+    }
     logging_console_printf("[WAL] Recovery complete\n");
-    
+
     return true;
 }
 

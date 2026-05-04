@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/write_conflict/lock_key.h"
 
 #include <filesystem>
 #include <chrono>
@@ -20,6 +21,28 @@ std::filesystem::path unique_temp_subdir(const char* tag) {
 }
 } // namespace
 
+// Bounded single-thread stress: fresh `TxnCoordinator` per step on one workspace, alternating disjoint
+// key bands (simulates interleaved writers without relying on OS file-lock thread semantics). See
+// `TXN_ISOLATION_AND_LOCKING.md` / assessment §6 for boundedTxn stress scope.
+TEST(TxnWriteConflict, AlternatingCoordinatorsSameWorkspaceBoundedStress) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_stress_alt_ws");
+
+    constexpr int kSteps = 80;
+    for (int i = 0; i < kSteps; ++i) {
+        TxnCoordinator c;
+        c.set_workspace_root(ws.string());
+        ASSERT_TRUE(c.begin("users").isOk()) << "step " << i;
+        std::string reason;
+        const int key = (i % 2 == 0) ? i : (100000 + i);
+        ASSERT_TRUE(c.tryReserveWriteKey("users", key, &reason)) << reason << " step " << i;
+        ASSERT_TRUE(c.commit().isOk()) << "step " << i;
+    }
+
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+
 TEST(TxnWriteConflict, SameTableSameIdRejectedAcrossActiveTransactions) {
     namespace fs = std::filesystem;
     const fs::path ws = unique_temp_subdir("txn_conflict");
@@ -37,6 +60,8 @@ TEST(TxnWriteConflict, SameTableSameIdRejectedAcrossActiveTransactions) {
     EXPECT_FALSE(b.tryReserveWriteKey("users", 7, &reason));
     EXPECT_NE(reason.find("write conflict"), std::string::npos);
     EXPECT_GE(b.writeConflictCount(), 1u);
+    EXPECT_NE(b.runtimeStats().write_conflict_last_sample.find("table=users"), std::string::npos);
+    EXPECT_NE(b.runtimeStats().write_conflict_last_sample.find("tag=reject"), std::string::npos);
 
     ASSERT_TRUE(a.commit().isOk());
     EXPECT_TRUE(b.tryReserveWriteKey("users", 7, &reason));
@@ -197,5 +222,9 @@ TEST(TxnWriteConflict, WaitPolicyTimeoutReturnsConflict) {
     ASSERT_TRUE(b.commit().isOk());
     std::error_code ec;
     fs::remove_all(ws, ec);
+}
+
+TEST(LockKey, RowPkWriteIntentMatchesLegacyStorageKey) {
+    EXPECT_EQ(LockKey::row_pk_write_intent("users", 7).to_storage_key(), "users#7");
 }
 

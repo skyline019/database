@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/where/executor/where.h"
+#include "cli/modules/where/executor/stats/table_stats.h"
 #include "cli/modules/where/executor/internal/query_internal.h"
 #include "cli/modules/sidecar/eq/equality_index_sidecar.h"
 #include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
@@ -122,9 +123,11 @@ std::string build_query_cache_key(const newdb::HeapTable& tbl,
             break;
         }
     }
+    const std::uint64_t schema_fp = table_stats_schema_fingerprint(schema);
     std::ostringstream oss;
     oss << tbl.name << "@"
         << schema.primary_key << "@"
+        << schema_fp << "@"
         << tbl.logical_row_count() << "@"
         << id_fp << "@"
         << build_conds_signature(conds);

@@ -1,0 +1,19 @@
+\contentsline {section}{\numberline {1}文档范围}{2}{section.1}%
+\contentsline {section}{\numberline {2}shared\_bundle 交付模型}{2}{section.2}%
+\contentsline {subsection}{\numberline {2.1}目录位置}{2}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}构建命令}{2}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}依赖优先策略}{2}{subsection.2.3}%
+\contentsline {section}{\numberline {3}newdb C API 完整说明}{3}{section.3}%
+\contentsline {subsection}{\numberline {3.1}头文件与常量}{3}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}错误码}{3}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}线程安全约定}{3}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}导出函数清单}{3}{subsection.3.4}%
+\contentsline {section}{\numberline {4}gtest\_capi 接口说明}{4}{section.4}%
+\contentsline {section}{\numberline {5}功能映射：外部调用 DLL 可以做什么}{4}{section.5}%
+\contentsline {section}{\numberline {6}命令模板速查（传给 \texttt {newdb\_session\_execute}）}{4}{section.6}%
+\contentsline {subsection}{\numberline {6.1}DDL}{4}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}DML 与查询}{5}{subsection.6.2}%
+\contentsline {subsection}{\numberline {6.3}事务与调优}{5}{subsection.6.3}%
+\contentsline {section}{\numberline {7}结果解析规范}{5}{section.7}%
+\contentsline {section}{\numberline {8}部署检查清单}{6}{section.8}%
+\contentsline {section}{\numberline {9}常见问题}{6}{section.9}%

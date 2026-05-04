@@ -41,3 +41,6 @@ bool where_policy_gate(const char* plan,
                        const std::size_t estimated_scan_rows,
                        const bool has_or,
                        WhereQueryContext& ctx);
+
+/// Optional hard cap on estimated scan rows (`NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS`, default 0 = off).
+std::size_t where_policy_heap_scan_budget_rows();

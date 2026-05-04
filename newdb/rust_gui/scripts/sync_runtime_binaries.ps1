@@ -1,5 +1,6 @@
 param(
-    [string]$BuildDir = "..\build_mingw",
+    # Default: MinGW / single-config tree next to `rust_gui/` (i.e. `newdb/build-mingw`).
+    [string]$BuildDir = "..\build-mingw",
     [string]$OutDir = ".\src-tauri\bin",
     [string]$ScriptsOutDir = ".\src-tauri\resources\scripts",
     [string]$GuiScriptsDir = ".\scripts"
@@ -12,6 +13,7 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir = Join-Path $repoRoot $BuildDir
 }
+$BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
 if (-not [System.IO.Path]::IsPathRooted($OutDir)) {
     $OutDir = Join-Path $repoRoot $OutDir
 }
@@ -24,51 +26,107 @@ if (-not [System.IO.Path]::IsPathRooted($GuiScriptsDir)) {
 if (-not (Test-Path -LiteralPath $BuildDir)) {
     throw "BuildDir not found: $BuildDir"
 }
+
+function Resolve-BuildArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string[]]$LeafNames
+    )
+    $configDirs = @("", "bin", "Release", "RelWithDebInfo", "Debug", "MinSizeRel")
+    foreach ($leaf in $LeafNames) {
+        foreach ($sub in $configDirs) {
+            $p = if ($sub) { Join-Path $Root (Join-Path $sub $leaf) } else { Join-Path $Root $leaf }
+            try {
+                $full = [System.IO.Path]::GetFullPath($p)
+            } catch {
+                continue
+            }
+            if (Test-Path -LiteralPath $full) {
+                return $full
+            }
+        }
+    }
+    return $null
+}
 New-Item -Path $OutDir -ItemType Directory -Force | Out-Null
 New-Item -Path $ScriptsOutDir -ItemType Directory -Force | Out-Null
 New-Item -Path $GuiScriptsDir -ItemType Directory -Force | Out-Null
+$OutDir = [System.IO.Path]::GetFullPath($OutDir)
+$ScriptsOutDir = [System.IO.Path]::GetFullPath($ScriptsOutDir)
+$GuiScriptsDir = [System.IO.Path]::GetFullPath($GuiScriptsDir)
 
 $required = @(
-    "newdb_demo.exe",
-    "newdb_perf.exe",
-    "newdb_runtime_report.exe",
-    "libnewdb.dll"
+    @{ Dest = "newdb_demo.exe"; Leaves = @("newdb_demo.exe") },
+    @{ Dest = "newdb_perf.exe"; Leaves = @("newdb_perf.exe") },
+    @{ Dest = "newdb_runtime_report.exe"; Leaves = @("newdb_runtime_report.exe") },
+    @{ Dest = "libnewdb.dll"; Leaves = @("libnewdb.dll", "newdb.dll") },
+    @{ Dest = "libgtest_capi.dll"; Leaves = @("libgtest_capi.dll", "gtest_capi.dll") }
 )
 
-foreach ($name in $required) {
-    if ($name -ieq "libnewdb.dll") {
-        $dllCandidates = @(
-            (Join-Path $BuildDir "libnewdb.dll"),
-            (Join-Path $BuildDir "newdb.dll")
-        )
-        $dllSrc = $dllCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-        if (-not $dllSrc) {
-            throw ("missing required runtime artifact: {0}" -f ($dllCandidates -join " | "))
+foreach ($entry in $required) {
+    $destName = $entry.Dest
+    $src = Resolve-BuildArtifactPath -Root $BuildDir -LeafNames $entry.Leaves
+    if (-not $src) {
+        throw "missing required runtime artifact '${destName}' under $BuildDir (tried leaf names: $($entry.Leaves -join ', '); subdirs: build root, bin, Release, RelWithDebInfo, Debug, MinSizeRel)"
+    }
+    Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir $destName) -Force
+    if ((Split-Path -Leaf $src) -ine $destName) {
+        Write-Host ("[SYNC] {0} <= {1}" -f $destName, $src)
+    } else {
+        Write-Host ("[SYNC] {0}" -f $destName)
+    }
+}
+
+# When GoogleTest is built as DLLs, copy peer DLLs from gtest_capi's build directory first, then build root / bin.
+$capiBuilt = Resolve-BuildArtifactPath -Root $BuildDir -LeafNames @("libgtest_capi.dll", "gtest_capi.dll")
+$peerSearchDirs = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+if ($capiBuilt) {
+    [void]$peerSearchDirs.Add([System.IO.Path]::GetDirectoryName($capiBuilt))
+}
+[void]$peerSearchDirs.Add($BuildDir)
+[void]$peerSearchDirs.Add((Join-Path $BuildDir "bin"))
+$optionalPeerDlls = @(
+    "libgtest.dll",
+    "libgtest_main.dll",
+    "libgmock.dll",
+    "libgmock_main.dll",
+    "gtest.dll",
+    "gtest_main.dll",
+    "gmock.dll",
+    "gmock_main.dll"
+)
+foreach ($name in $optionalPeerDlls) {
+    $src = $null
+    foreach ($d in $peerSearchDirs) {
+        if (-not $d -or -not (Test-Path -LiteralPath $d)) { continue }
+        $p = Join-Path $d $name
+        if (Test-Path -LiteralPath $p) {
+            $src = $p
+            break
         }
-        Copy-Item -LiteralPath $dllSrc -Destination (Join-Path $OutDir "libnewdb.dll") -Force
-        Write-Host ("[SYNC] {0} <= {1}" -f "libnewdb.dll", (Split-Path -Leaf $dllSrc))
-        continue
     }
-    $src = Join-Path $BuildDir $name
-    if (-not (Test-Path -LiteralPath $src)) {
-        throw "missing required runtime artifact: $src"
+    if (-not $src) {
+        $src = Resolve-BuildArtifactPath -Root $BuildDir -LeafNames @($name)
     }
-    Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir $name) -Force
-    Write-Host ("[SYNC] {0}" -f $name)
+    if ($src) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir $name) -Force
+        Write-Host ("[SYNC] {0} (peer test DLL)" -f $name)
+    }
 }
 
 $optional = @(
     "libgcc_s_seh-1.dll",
     "libwinpthread-1.dll",
-    "libstdc++-6.dll"
+    "libstdc++-6.dll",
+    "libssp-0.dll"
 )
 foreach ($name in $optional) {
-    $src = Join-Path $BuildDir $name
-    if (Test-Path -LiteralPath $src) {
+    $src = Resolve-BuildArtifactPath -Root $BuildDir -LeafNames @($name)
+    if ($src) {
         Copy-Item -LiteralPath $src -Destination (Join-Path $OutDir $name) -Force
         Write-Host ("[SYNC] {0}" -f $name)
     } else {
-        Write-Host ("[SYNC][WARN] optional artifact not found: {0}" -f $src)
+        Write-Host ("[SYNC][WARN] optional MinGW runtime not under build tree: {0} (OK if fully static-linked)" -f $name)
     }
 }
 

@@ -12,12 +12,12 @@
 #include <newdb/schema_io.h>
 #include <newdb/session.h>
 
-#include "cli/shell/dispatch/demo_commands.h"
+#include "cli/shell/dispatch/router/dispatch.h"
 #include "cli/shell/diag/demo_diag.h"
 #include "cli/shell/repl/demo_shell.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/shell/state/shell_state.h"
-#include "cli/modules/util/utils.h"
+#include "cli/modules/common/util/utils.h"
 
 namespace {
 

@@ -1,7 +1,6 @@
 #include <newdb/wal_manager.h>
 #include <newdb/heap_page.h>
 #include <newdb/wal_codec.h>
-
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
@@ -268,12 +267,11 @@ Status WalManager::checkpoint(uint64_t snapshot_lsn) {
 }
 
 Status WalManager::checkpoint_begin(uint64_t snapshot_lsn) {
-    (void)snapshot_lsn;
-    return append_control_record_nolock(0, WalOp::CHECKPOINT_BEGIN);
+    return append_control_record_nolock(0, WalOp::CHECKPOINT_BEGIN, &snapshot_lsn);
 }
 
 Status WalManager::checkpoint_end(uint64_t snapshot_lsn) {
-    const Status end_st = append_control_record_nolock(0, WalOp::CHECKPOINT_END);
+    const Status end_st = append_control_record_nolock(0, WalOp::CHECKPOINT_END, &snapshot_lsn);
     if (!end_st.ok) return end_st;
     // PITR anchor: emit a marker after a consistent checkpoint boundary.
     return append_record(0, WalOp::PITR_MARK, /*table=*/"", nullptr, nullptr, nullptr, nullptr,
@@ -352,6 +350,35 @@ Status WalManager::checkpoint_and_truncate(uint64_t snapshot_lsn) {
     if (!fst2.ok) return fst2;
     std::lock_guard<std::mutex> lg(mut_);
     if (fp_ == nullptr) return Status::Fail("WAL not open");
+
+    WalCheckpointTruncateTrace tr{};
+    const bool prune_enabled = []() {
+        const char* raw = std::getenv("NEWDB_WAL_CHECKPOINT_PRUNE");
+        if (raw == nullptr || raw[0] == '\0') {
+            return true;
+        }
+        return std::strcmp(raw, "1") == 0;
+    }();
+    const bool strict_prune = []() {
+        const char* raw = std::getenv("NEWDB_WAL_CHECKPOINT_STRICT");
+        return raw != nullptr && std::strcmp(raw, "1") == 0;
+    }();
+    tr.tail_checkpoint_bracket_depth = recover_scan_checkpoint_bracket_depth_at_eof_nolock();
+    if (!prune_enabled) {
+        tr.skipped_prune_disabled = true;
+        last_checkpoint_truncate_trace_ = tr;
+        return Status::Ok();
+    }
+    if (strict_prune && tr.tail_checkpoint_bracket_depth != 0) {
+        tr.failed_strict_incomplete_bracket = true;
+        last_checkpoint_truncate_trace_ = tr;
+        return Status::Fail("NEWDB_WAL_CHECKPOINT_STRICT: unclosed checkpoint bracket at WAL tail (depth=" +
+                             std::to_string(tr.tail_checkpoint_bracket_depth) + ")");
+    }
+
+    tr.truncate_executed = true;
+    last_checkpoint_truncate_trace_ = tr;
+
     if (std::fflush(fp_) != 0) return Status::Fail("fflush failed before wal truncate");
 #if defined(_WIN32)
     if (sync_mode_ != WalSyncMode::Off && _commit(_fileno(fp_)) != 0) return Status::Fail("commit failed before wal truncate");
@@ -395,237 +422,90 @@ Status WalManager::recover(HeapTable* out_table, const TableSchema& schema, WalR
     WalRecoveryStats local_stats;
     WalRecoveryStats* out_stats = stats ? stats : &local_stats;
     out_stats->begin_ms = wall_clock_ms();
+    out_stats->last_complete_checkpoint_lsn = 0;
+    out_stats->records_after_checkpoint = 0;
+    out_stats->checkpoint_scan_ms = 0;
+    out_stats->redo_plan_ms = 0;
+    out_stats->redo_apply_ms = 0;
+    out_stats->index_rebuild_ms = 0;
+    out_stats->segment_index_partial_tail_stops = 0;
+    out_stats->segment_index_bad_header_stops = 0;
+    out_stats->uncommitted_txn_discarded_count = 0;
+    out_stats->incomplete_checkpoint_count = 0;
+    out_stats->recovery_uncommitted_records_ignored = 0;
+    out_stats->offset_seek_fseek_fallback_count = 0;
+    out_stats->recovery_policy.clear();
 
-    struct PendingTxnOps {
-        std::unordered_map<int, std::pair<WalOp, Row>> by_row_id;
-    };
-    std::unordered_map<uint64_t, PendingTxnOps> txn_ops;
-    struct SegmentIndexEntry {
-        std::string path;
-        std::uint64_t min_lsn{0};
-        std::uint64_t max_lsn{0};
-        std::uint64_t records{0};
-        std::vector<std::pair<std::uint64_t, long>> lsn_offsets;
-    };
     const bool enable_offset_seek = []() {
         const char* raw = std::getenv("NEWDB_RECOVER_ENABLE_OFFSET_SEEK");
         return raw != nullptr && std::strcmp(raw, "1") == 0;
+    }();
+    // Default: replay from last complete checkpoint LSN when present (fast path).
+    // Opt out with NEWDB_RECOVER_USE_CHECKPOINT_LSN=0 for legacy full-segment replay debugging.
+    const bool use_checkpoint_lsn = []() {
+        const char* raw = std::getenv("NEWDB_RECOVER_USE_CHECKPOINT_LSN");
+        if (raw == nullptr || raw[0] == '\0') {
+            return true;
+        }
+        return std::strcmp(raw, "1") == 0;
     }();
     const std::uint64_t min_replay_lsn = []() {
         std::uint64_t v = 0;
         if (parse_u64_env("NEWDB_RECOVER_MIN_LSN", v)) return v;
         return static_cast<std::uint64_t>(0);
     }();
-    std::vector<SegmentIndexEntry> seg_index;
-    for (const auto& path : wal_read_paths_nolock()) {
-        FILE* rf = std::fopen(path.c_str(), "rb");
-        if (rf == nullptr) continue;
-        WalRecordHeader hdr{};
-        std::vector<uint8_t> payload;
-        SegmentIndexEntry ent{};
-        ent.path = path;
-        while (true) {
-            const long rec_pos = std::ftell(rf);
-            payload.clear();
-            Status st = read_record(rf, &hdr, payload);
-            if (!st.ok) break;
-            if (ent.records == 0) {
-                ent.min_lsn = hdr.lsn;
-                ent.max_lsn = hdr.lsn;
-            } else {
-                ent.min_lsn = std::min(ent.min_lsn, hdr.lsn);
-                ent.max_lsn = std::max(ent.max_lsn, hdr.lsn);
-            }
-            ++ent.records;
-            if (ent.records == 1 || (ent.records % 128u) == 0u) {
-                const std::uint64_t lsn_value = hdr.lsn;
-                ent.lsn_offsets.emplace_back(lsn_value, rec_pos);
-            }
-        }
-        std::fclose(rf);
-        if (ent.records == 0) {
-            ++out_stats->skipped_segments;
-            continue;
-        }
-        ++out_stats->indexed_segments;
-        out_stats->indexed_records += ent.records;
-        out_stats->indexed_offsets += ent.lsn_offsets.size();
-        seg_index.push_back(std::move(ent));
+    out_stats->replay_start_lsn = min_replay_lsn;
+    std::vector<RecoverSegmentEntry> seg_index;
+    recover_build_segment_index(seg_index, out_stats);
+
+    std::uint64_t replay_start_lsn = min_replay_lsn;
+    if (use_checkpoint_lsn) {
+        replay_start_lsn = std::max(replay_start_lsn, out_stats->last_complete_checkpoint_lsn);
     }
-    std::sort(seg_index.begin(), seg_index.end(), [](const SegmentIndexEntry& a, const SegmentIndexEntry& b) {
-        return a.min_lsn < b.min_lsn;
-    });
+    out_stats->replay_start_lsn = replay_start_lsn;
 
-    for (const auto& ent : seg_index) {
-        ++out_stats->scanned_segments;
-        FILE* rf = std::fopen(ent.path.c_str(), "rb");
-        if (rf == nullptr) continue;
-        if (enable_offset_seek && min_replay_lsn > 0 && !ent.lsn_offsets.empty() && ent.max_lsn < min_replay_lsn) {
-            std::fclose(rf);
-            ++out_stats->skipped_segments;
-            out_stats->seek_skipped_records += ent.records;
-            continue;
+    {
+        std::string& pol = out_stats->recovery_policy;
+        if (enable_offset_seek) {
+            pol += "offset_seek;";
         }
-        if (enable_offset_seek && min_replay_lsn > 0 && !ent.lsn_offsets.empty() && ent.min_lsn < min_replay_lsn) {
-            const auto it = std::lower_bound(
-                ent.lsn_offsets.begin(), ent.lsn_offsets.end(), min_replay_lsn,
-                [](const std::pair<std::uint64_t, long>& a, const std::uint64_t target) {
-                    return a.first < target;
-                });
-            if (it != ent.lsn_offsets.end()) {
-                (void)std::fseek(rf, it->second, SEEK_SET);
-            }
+        if (use_checkpoint_lsn) {
+            pol += "use_checkpoint_lsn;";
+        } else {
+            pol += "no_checkpoint_lsn;";
         }
-        WalRecordHeader hdr;
-        std::vector<uint8_t> payload;
-        while (true) {
-            payload.clear();
-            Status st = read_record(rf, &hdr, payload);
-            if (!st.ok) break;
-            ++out_stats->records_read;
-            if (!verify_checksum(&hdr, payload.data())) {
-                std::fclose(rf);
-                ++out_stats->checksum_failures;
-                out_stats->end_ms = wall_clock_ms();
-                last_recovery_stats_ = *out_stats;
-                return Status::Fail("WAL record checksum mismatch at LSN " + std::to_string(hdr.lsn));
-            }
-
-            switch (static_cast<WalOp>(hdr.type)) {
-            case WalOp::INSERT:
-            case WalOp::UPDATE:
-            case WalOp::DELETE: {
-                const uint8_t* p = payload.data();
-                const uint8_t* end = payload.data() + payload.size();
-                std::string table_name;
-                Row row;
-                if (walcodec::is_v1_payload(payload.data(), payload.size())) {
-                    walcodec::DecodedPayloadV1 decv1{};
-                    Status dec = walcodec::decode_payload_v1(payload.data(), payload.size(), decv1);
-                    if (!dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode v1 payload from WAL: " + dec.message);
-                    }
-                    table_name = decv1.table;
-                    const bool need_before = static_cast<WalOp>(hdr.type) == WalOp::DELETE;
-                    if ((need_before && !decv1.has_before) || (!need_before && !decv1.has_after)) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("missing required image in v1 WAL payload");
-                    }
-                    const uint8_t* row_payload_ptr = need_before ? decv1.before_row_payload : decv1.after_row_payload;
-                    const uint32_t row_payload_len = need_before ? decv1.before_row_payload_len : decv1.after_row_payload_len;
-                    Status row_dec = decode_row_payload(row_payload_ptr, row_payload_len, row, schema);
-                    if (!row_dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row from v1 WAL payload");
-                    }
-                } else {
-                    Status dec_table = walcodec::decode_table_name(p, end, table_name);
-                    if (!dec_table.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode table name from WAL: " + dec_table.message);
-                    }
-                    uint32_t row_id = 0;
-                    const uint8_t* row_payload_ptr = nullptr;
-                    uint32_t row_payload_len = 0;
-                    Status dec_row = walcodec::decode_row_fields(p, end, row_id, row_payload_ptr, row_payload_len);
-                    if (!dec_row.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row fields from WAL: " + dec_row.message);
-                    }
-                    Status dec = decode_row_payload(row_payload_ptr, row_payload_len, row, schema);
-                    if (!dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row from WAL");
-                    }
-                }
-                if (table_name != out_table->name) break;
-                PendingTxnOps& pending = txn_ops[hdr.txn_id];
-                pending.by_row_id[row.id] = std::make_pair(static_cast<WalOp>(hdr.type), std::move(row));
-                    break;
-                }
-                case WalOp::COMMIT: {
-                auto it = txn_ops.find(hdr.txn_id);
-                if (it != txn_ops.end()) {
-                    for (auto& [row_id, op_row] : it->second.by_row_id) {
-                        (void)row_id;
-                        WalOp op = op_row.first;
-                        Row& row = op_row.second;
-                        switch (op) {
-                            case WalOp::INSERT: {
-                                const auto idx = out_table->index_by_id.find(row.id);
-                                if (idx != out_table->index_by_id.end()) {
-                                    out_table->rows[static_cast<std::size_t>(idx->second)] = row;
-                                } else {
-                                    out_table->rows.push_back(std::move(row));
-                                }
-                                ++out_stats->apply_count;
-                                break;
-                            }
-                            case WalOp::UPDATE: {
-                                const auto idx = out_table->index_by_id.find(row.id);
-                                if (idx != out_table->index_by_id.end()) {
-                                    out_table->rows[static_cast<std::size_t>(idx->second)] = row;
-                                } else {
-                                    out_table->rows.push_back(std::move(row));
-                                }
-                                ++out_stats->apply_count;
-                                break;
-                            }
-                            case WalOp::DELETE: {
-                                const Row* target = out_table->find_by_id(row.id);
-                                if (target) {
-                                    Row tombstone;
-                                    tombstone.id = row.id;
-                                    tombstone.attrs["__deleted"] = "1";
-                                    out_table->rows.push_back(std::move(tombstone));
-                                    ++out_stats->apply_count;
-                                }
-                                break;
-                            }
-                            default: break;
-                        }
-                    }
-                    txn_ops.erase(it);
-                }
-                    break;
-                }
-                case WalOp::ROLLBACK:
-                    txn_ops.erase(hdr.txn_id);
-                    break;
-                case WalOp::CHECKPOINT:
-                case WalOp::CHECKPOINT_BEGIN:
-                    ++out_stats->checkpoint_begin_count;
-                    break;
-                case WalOp::CHECKPOINT_END:
-                    ++out_stats->checkpoint_end_count;
-                    break;
-                case WalOp::SESSION_SNAPSHOT:
-                case WalOp::TXN_PREPARE:
-                case WalOp::SAVEPOINT_SET:
-                case WalOp::SAVEPOINT_ROLLBACK:
-                case WalOp::TXN_ABORT_PARTIAL:
-                case WalOp::PITR_MARK:
-                    break;
-            }
-            current_lsn_ = std::max(current_lsn_, hdr.lsn);
+        if (min_replay_lsn > 0) {
+            pol += "min_lsn_bound;";
         }
-        std::fclose(rf);
+        if (replay_start_lsn > 0) {
+            pol += "replay_start_nonzero;";
+        }
+        if (out_stats->incomplete_checkpoint_count > 0) {
+            pol += "incomplete_checkpoint_tail;";
+        }
+        if (replay_start_lsn == out_stats->last_complete_checkpoint_lsn && out_stats->last_complete_checkpoint_lsn > 0) {
+            pol += "replay_from_last_complete_checkpoint;";
+        } else if (min_replay_lsn > 0 && replay_start_lsn == min_replay_lsn &&
+                   min_replay_lsn > out_stats->last_complete_checkpoint_lsn) {
+            pol += "replay_from_min_lsn;";
+        } else {
+            pol += "replay_full_or_mixed;";
+        }
     }
 
+    const Status rep =
+        recover_replay_segments(out_table, schema, seg_index, out_stats, enable_offset_seek, replay_start_lsn);
+    if (!rep.ok) {
+        return rep;
+    }
+    if (out_stats->offset_seek_fseek_fallback_count > 0) {
+        out_stats->recovery_policy += "offset_seek_fallback;";
+    }
+
+    const std::uint64_t idx0 = wall_clock_ms();
     out_table->rebuild_indexes(schema);
+    const std::uint64_t idx1 = wall_clock_ms();
+    out_stats->index_rebuild_ms = (idx1 >= idx0) ? (idx1 - idx0) : 0;
     out_stats->end_ms = wall_clock_ms();
     last_recovery_stats_ = *out_stats;
     return Status::Ok();
@@ -740,6 +620,11 @@ std::optional<WalRecoveryStats> WalManager::last_recovery_stats() const {
     return last_recovery_stats_;
 }
 
+std::optional<WalCheckpointTruncateTrace> WalManager::last_checkpoint_truncate_trace() const {
+    std::lock_guard<std::mutex> lg(mut_);
+    return last_checkpoint_truncate_trace_;
+}
+
 Status WalManager::encode_row_payload(const Row& row, const TableSchema&, std::vector<uint8_t>& out) const {
     return codec::encode_row_to_heap_payload(row, out);
 }
@@ -771,7 +656,7 @@ Status WalManager::write_record(const WalRecordHeader* hdr, const uint8_t* paylo
     return Status::Ok();
 }
 
-Status WalManager::read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload) {
+Status WalManager::read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload) const {
     if (fp == nullptr) return Status::Fail("null file");
     if (std::fread(hdr, sizeof(WalRecordHeader), 1, fp) != 1) {
         if (std::feof(fp)) return Status::Fail("EOF");
@@ -785,12 +670,17 @@ Status WalManager::read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8
     return Status::Ok();
 }
 
-Status WalManager::append_control_record_nolock(uint64_t txn_id, WalOp op) {
+Status WalManager::append_control_record_nolock(uint64_t txn_id, WalOp op,
+                                                const uint64_t* checkpoint_snapshot_lsn) {
     std::vector<std::uint8_t> payload;
     {
         walcodec::PayloadMetaView meta_view{};
         const std::uint64_t ts = WalManager::wall_clock_ms();
         if (ts != 0) meta_view.record_ts_ms = &ts;
+        if (checkpoint_snapshot_lsn != nullptr &&
+            (op == WalOp::CHECKPOINT_BEGIN || op == WalOp::CHECKPOINT_END)) {
+            meta_view.checkpoint_snapshot_lsn = checkpoint_snapshot_lsn;
+        }
         // Emit a small v1 payload so PITR(ts->lsn) can anchor on control records (e.g. COMMIT).
         (void)walcodec::build_payload(/*table=*/"", /*before_image=*/nullptr, /*after_image=*/nullptr,
                                       /*meta=*/&meta_view, /*op_seq_in_txn=*/0, payload);

@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <sstream>
@@ -13,20 +14,63 @@
 #include <vector>
 
 #include <newdb/page_io.h>
+#include <newdb/heap_table.h>
 
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
-#include "cli/shell/dispatch/internal/dispatch_internal.h"
+#include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/import_export/demo_export.h"
 #include "cli/modules/import_export/import.h"
-#include "cli/modules/logging/logging.h"
+#include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
 #include "cli/shell/state/shell_state.h"
 #include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
-#include "cli/modules/view/table_view.h"
+#include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
-#include "cli/modules/util/utils.h"
+#include "cli/modules/common/util/utils.h"
 #include "cli/modules/where/executor/where.h"
+#include "cli/modules/where/executor/stats/table_stats.h"
+
+namespace {
+
+bool txn_isolation_readpath_enabled() {
+    const char* opt = std::getenv("NEWDB_TXN_ISOLATION_READPATH");
+    if (opt == nullptr || opt[0] == '\0') {
+        return true;
+    }
+    std::string v = opt;
+    for (auto& ch : v) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (v == "0" || v == "off" || v == "false" || v == "no") {
+        return false;
+    }
+    return true;
+}
+
+std::string json_string_escape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (const char c : s) {
+        if (c == '\\' || c == '"') {
+            o.push_back('\\');
+        }
+        o.push_back(c);
+    }
+    return o;
+}
+
+struct WhereQueryStatsHintScope {
+    WhereQueryContext& ctx;
+    const TableStats* prev;
+    WhereQueryStatsHintScope(WhereQueryContext& c, const TableStats* hint)
+        : ctx(c), prev(c.query_stats_hint) {
+        ctx.query_stats_hint = hint;
+    }
+    ~WhereQueryStatsHintScope() { ctx.query_stats_hint = prev; }
+};
+
+}  // namespace
 
 bool handle_query_page_command(ShellState& st,
                                const char* line,
@@ -37,9 +81,10 @@ bool handle_query_page_command(ShellState& st,
         return false;
     }
     std::vector<std::string> args;
-    if (!parse_comma_args(line + 4, args) || args.size() < 2 || args.size() > 4) {
+    if (!parse_comma_args(line + 4, args) || args.size() < 2 || args.size() > 5) {
         log_and_print(log_file,
-                      "[PAGE] usage: PAGE(page, page_size, [order_key], [desc])\n");
+                      "[PAGE] usage: PAGE(page, page_size, [order_key], [desc|asc], [after=<id>])\n"
+                      "       order_key=id supports optional keyset cursor after=<int>\n");
         return true;
     }
     int page = 0;
@@ -54,15 +99,48 @@ bool handle_query_page_command(ShellState& st,
     }
     std::string order_key = "id";
     bool desc = false;
+    std::optional<int> after_id;
+    auto parse_after = [&](const std::string& s) -> bool {
+        static constexpr char kPref[] = "after=";
+        if (s.size() <= sizeof(kPref) - 1 || strncasecmp_ascii(s.c_str(), kPref, static_cast<int>(sizeof(kPref) - 1)) != 0) {
+            return false;
+        }
+        try {
+            after_id = std::stoi(s.substr(sizeof(kPref) - 1));
+            return true;
+        } catch (...) {
+            return false;
+        }
+    };
+
     if (args.size() >= 3 && !args[2].empty()) {
         order_key = args[2];
     }
-    if (args.size() == 4) {
+    if (args.size() == 3) {
+        // page, size, order only
+    } else if (args.size() == 4) {
+        if (parse_after(args[3])) {
+            // page, size, order, after=
+        } else if (args[3].size() == 4 && strcasecmp_ascii(args[3].c_str(), "desc") == 0) {
+            desc = true;
+        }
+    } else if (args.size() >= 5) {
         if (args[3].size() == 4 && strcasecmp_ascii(args[3].c_str(), "desc") == 0) {
             desc = true;
         }
+        if (!parse_after(args[4])) {
+            log_and_print(log_file, "[PAGE] expected after=<id> as last argument\n");
+            return true;
+        }
     }
-    const std::vector<std::size_t> sorted_idx = load_or_build_page_index_sidecar(
+
+    const bool use_keyset = after_id.has_value();
+    if (use_keyset && order_key != "id") {
+        log_and_print(log_file, "[PAGE] keyset after= is only supported for order_key=id\n");
+        return true;
+    }
+    const HeapReadViewGuard _heap_read_view(st, tbl);
+    std::vector<std::size_t> sorted_idx = load_or_build_page_index_sidecar(
         PageSidecarRequest{
             .data_file = eff_data,
             .table_name = st.session.table_name,
@@ -71,11 +149,15 @@ bool handle_query_page_command(ShellState& st,
         },
         st.session.schema,
         tbl);
+    if (use_keyset) {
+        sorted_idx = table_view::page_indices_keyset_after_id(tbl, sorted_idx, desc, *after_id, true);
+    }
     log_and_print(log_file,
-                  "[PAGE] table=%s order_by=%s %s\n",
+                  "[PAGE] table=%s order_by=%s %s%s\n",
                   tbl.name.c_str(),
                   order_key.c_str(),
-                  desc ? "desc" : "asc");
+                  desc ? "desc" : "asc",
+                  use_keyset ? (" after_id=" + std::to_string(*after_id)).c_str() : "");
     table_view::print_page_indexed(st.session.schema,
                                    tbl,
                                    sorted_idx,
@@ -91,6 +173,141 @@ bool handle_query_where_count_commands(ShellState& st,
                                        const std::string& eff_data,
                                        const std::string& current_table,
                                        newdb::HeapTable& tbl) {
+    const HeapReadViewGuard _heap_read_view(st, tbl);
+    TableStats where_stats_buf{};
+    const TableStats* where_stats_hint = nullptr;
+    bool loaded_table_stats_file = false;
+    bool table_stats_file_stale = false;
+    if (const char* raw = std::getenv("NEWDB_QUERY_USE_TABLE_STATS")) {
+        if (raw[0] == '1' && raw[1] == '\0') {
+            if (const char* pr = std::getenv("NEWDB_QUERY_PERSIST_TABLE_STATS")) {
+                if (pr[0] == '1' && pr[1] == '\0') {
+                    namespace fs = std::filesystem;
+                    std::error_code ec;
+                    const std::string sp = table_stats_file_path_for_data_file(eff_data);
+                    if (fs::exists(sp, ec)) {
+                        loaded_table_stats_file = load_table_stats_file(eff_data, st.session.schema, &where_stats_buf);
+                        if (!loaded_table_stats_file) {
+                            table_stats_file_stale = true;
+                        }
+                    }
+                }
+            }
+            if (!loaded_table_stats_file) {
+                (void)build_table_stats_from_heap(tbl, st.session.schema, &where_stats_buf);
+                if (const char* pr = std::getenv("NEWDB_QUERY_PERSIST_TABLE_STATS")) {
+                    if (pr[0] == '1' && pr[1] == '\0') {
+                        (void)save_table_stats_file(eff_data, st.session.schema, where_stats_buf);
+                    }
+                }
+            }
+            where_stats_hint = &where_stats_buf;
+        }
+    }
+    const WhereQueryStatsHintScope _where_stats_hint(st.where_ctx, where_stats_hint);
+    const bool show_plan_json = strncasecmp_ascii(line, "SHOW PLAN", 9) == 0;
+    const bool explain_where = strncasecmp_ascii(line, "EXPLAIN WHERE", 14) == 0;
+    if (show_plan_json || explain_where) {
+        const char* tail = show_plan_json ? (line + 9) : (line + 14);
+        std::vector<std::string> args;
+        if (!parse_comma_args(tail, args) || args.empty()) {
+            log_and_print(log_file,
+                          show_plan_json
+                              ? "[SHOW PLAN] usage: SHOW PLAN(attr, op, value [, AND|OR, attr, op, value] ...)\n"
+                              : "[EXPLAIN WHERE] usage: EXPLAIN WHERE(attr, op, value [, AND|OR, attr, op, value] ...)\n");
+            return true;
+        }
+        std::vector<WhereCond> conds;
+        std::string err_msg;
+        if (!parse_where_args_to_conds(args, conds, err_msg)) {
+            log_and_print(log_file,
+                          show_plan_json ? "[SHOW PLAN] invalid arguments: %s\n" : "[EXPLAIN WHERE] invalid arguments: %s\n",
+                          err_msg.c_str());
+            return true;
+        }
+        const HeapReadViewGuard _heap_read_view_plan(st, tbl);
+        const TxnRuntimeStats plan_stats = st.txn.runtimeStats();
+        const std::uint64_t fb0 = st.where_ctx.fallback_scans.load(std::memory_order_relaxed);
+        const std::uint64_t eq0 = st.where_ctx.plan_eq_sidecar_count.load(std::memory_order_relaxed);
+        const std::uint64_t id0 = st.where_ctx.plan_id_pk_count.load(std::memory_order_relaxed);
+        const std::uint64_t pf0 = st.where_ctx.plan_fallback_count.load(std::memory_order_relaxed);
+        const std::uint64_t sc0 = st.where_ctx.query_rows_scanned_total.load(std::memory_order_relaxed);
+        const std::uint64_t rt0 = st.where_ctx.query_rows_returned_total.load(std::memory_order_relaxed);
+        const std::size_t estimated_scan_rows =
+            where_estimate_scan_rows(tbl, st.session.schema, conds, &st.where_ctx);
+        const std::vector<std::size_t> matched_idx =
+            query_with_index(tbl, st.session.schema, conds, &st.where_ctx);
+        const std::uint32_t plan_candidates_considered =
+            st.where_ctx.last_plan_candidates_considered.load(std::memory_order_relaxed);
+        if (where_policy_last_blocked(&st.where_ctx)) {
+            log_and_print(log_file,
+                          show_plan_json ? "[SHOW PLAN] blocked: %s\n" : "[EXPLAIN WHERE] blocked: %s\n",
+                          where_policy_last_message(&st.where_ctx).c_str());
+            return true;
+        }
+        const std::uint64_t fb1 = st.where_ctx.fallback_scans.load(std::memory_order_relaxed);
+        const std::uint64_t eq1 = st.where_ctx.plan_eq_sidecar_count.load(std::memory_order_relaxed);
+        const std::uint64_t id1 = st.where_ctx.plan_id_pk_count.load(std::memory_order_relaxed);
+        const std::uint64_t pf1 = st.where_ctx.plan_fallback_count.load(std::memory_order_relaxed);
+        const std::uint64_t sc1 = st.where_ctx.query_rows_scanned_total.load(std::memory_order_relaxed);
+        const std::uint64_t rt1 = st.where_ctx.query_rows_returned_total.load(std::memory_order_relaxed);
+        std::string plan_id;
+        {
+            std::lock_guard<std::mutex> lk(st.where_ctx.mu);
+            plan_id = st.where_ctx.last_plan_id;
+        }
+        if (show_plan_json) {
+            const std::size_t logical_rows = tbl.logical_row_count();
+            const std::uint64_t snapshot_lsn =
+                tbl.active_snapshot.has_value() ? tbl.active_snapshot->snapshot_lsn : 0;
+            const char* readpath_json = txn_isolation_readpath_enabled() ? "true" : "false";
+            const std::vector<PlanCandidate> plan_cands =
+                where_build_plan_candidates(tbl, st.session.schema, conds, where_stats_hint);
+            std::ostringstream cand_json;
+            cand_json << "[";
+            for (std::size_t i = 0; i < plan_cands.size(); ++i) {
+                if (i > 0) {
+                    cand_json << ',';
+                }
+                cand_json << "{\"id\":\"" << json_string_escape(plan_cands[i].id) << "\",\"estimated_cost\":"
+                          << plan_cands[i].estimated_cost << ",\"cost\":{\"estimated_rows\":"
+                          << plan_cands[i].cost.estimated_rows << "}}";
+            }
+            cand_json << "]";
+            const std::string plan_id_esc = json_string_escape(plan_id.empty() ? "?" : plan_id);
+            const std::string snap_esc = json_string_escape(plan_stats.last_snapshot_source);
+            std::ostringstream json;
+            json << "{\"plan_id\":\"" << plan_id_esc << "\",\"logical_rows\":" << logical_rows
+                 << ",\"matched_rows\":" << matched_idx.size() << ",\"estimated_scan_rows\":" << estimated_scan_rows
+                 << ",\"plan_candidates_considered\":"
+                 << static_cast<unsigned>(plan_candidates_considered == 0u ? 1u : plan_candidates_considered)
+                 << ",\"plan_candidates\":" << cand_json.str() << ",\"table_stats_stale\":"
+                 << (table_stats_file_stale ? "true" : "false") << ",\"path\":\"where_executor\""
+                 << ",\"snapshot_lsn\":" << static_cast<unsigned long long>(snapshot_lsn) << ",\"snapshot_source\":\""
+                 << snap_esc << "\",\"readpath_enabled\":" << readpath_json << ",\"delta\":{\"fallback_scans\":"
+                 << static_cast<unsigned long long>(fb1 - fb0) << ",\"eq_sidecar\":"
+                 << static_cast<unsigned long long>(eq1 - eq0) << ",\"id_pk\":"
+                 << static_cast<unsigned long long>(id1 - id0) << ",\"plan_fallback\":"
+                 << static_cast<unsigned long long>(pf1 - pf0) << ",\"rows_scanned\":"
+                 << static_cast<unsigned long long>(sc1 - sc0) << ",\"rows_returned\":"
+                 << static_cast<unsigned long long>(rt1 - rt0) << "}}\n";
+            log_and_print(log_file, "%s", json.str().c_str());
+        } else {
+            log_and_print(log_file,
+                          "[EXPLAIN WHERE] plan_id=%s matched=%zu logical_rows=%zu delta{fallback_scans=%llu eq_sidecar=%llu "
+                          "id_pk=%llu plan_fallback=%llu rows_scanned=%llu rows_returned=%llu}\n",
+                          plan_id.empty() ? "?" : plan_id.c_str(),
+                          matched_idx.size(),
+                          tbl.logical_row_count(),
+                          static_cast<unsigned long long>(fb1 - fb0),
+                          static_cast<unsigned long long>(eq1 - eq0),
+                          static_cast<unsigned long long>(id1 - id0),
+                          static_cast<unsigned long long>(pf1 - pf0),
+                          static_cast<unsigned long long>(sc1 - sc0),
+                          static_cast<unsigned long long>(rt1 - rt0));
+        }
+        return true;
+    }
     if (strncasecmp_ascii(line, "WHEREP", 6) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 6, args) || args.size() < 5) {
@@ -371,6 +588,7 @@ bool handle_query_find_commands(ShellState& st,
                                 const char* log_file,
                                 const std::string& eff_data,
                                 newdb::HeapTable& tbl) {
+    const HeapReadViewGuard _heap_read_view(st, tbl);
     if (strncasecmp_ascii(line, "FIND(", 5) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 4, args) || args.size() != 1) {
@@ -466,6 +684,7 @@ bool handle_query_sum_avg_commands(ShellState& st,
                                    const char* log_file,
                                    const std::string& eff_data,
                                    newdb::HeapTable& tbl) {
+    const HeapReadViewGuard _heap_read_view(st, tbl);
     auto run_numeric_agg = [&](const char* tag, bool is_avg, const char* args_text) -> bool {
         std::vector<std::string> args;
         if (!parse_comma_args(args_text, args) || args.empty()) {

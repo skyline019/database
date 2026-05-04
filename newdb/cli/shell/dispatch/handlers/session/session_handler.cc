@@ -1,7 +1,7 @@
 #include <waterfall/config.h>
 
-#include "cli/modules/logging/logging.h"
-#include "cli/shell/dispatch/internal/dispatch_internal.h"
+#include "cli/modules/common/logging/logging.h"
+#include "cli/shell/dispatch/shared/dispatch_internal.h"
 
 bool handle_session_commands(const char* line, const char* log_file, bool& handled) {
     handled = false;

@@ -1,8 +1,11 @@
 #include "cli/modules/sidecar/eq/eq_bloom.h"
 
 #include <cctype>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -150,10 +153,16 @@ void eq_bloom_write(const std::string& bloom_path,
     for (const auto& k : keys) {
         bloom_add(bits, hdr.bits, hdr.k, k);
     }
-    std::ofstream out(bloom_path, std::ios::out | std::ios::trunc);
+    const std::string tmp_path = bloom_path + ".tmp";
+    std::ofstream out(tmp_path, std::ios::out | std::ios::trunc);
     if (!out) return;
     out << "v=1;data_sig=" << hdr.data_sig << ";attr_sig=" << hdr.attr_sig << ";wal_lsn=" << hdr.wal_lsn
         << ";bits=" << hdr.bits << ";k=" << static_cast<unsigned>(hdr.k) << "\n";
     out << hex_encode(bits) << "\n";
+    out.flush();
+    out.close();
+    std::error_code ec;
+    fs::remove(bloom_path, ec);
+    fs::rename(tmp_path, bloom_path, ec);
 }
 

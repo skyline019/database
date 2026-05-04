@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { shouldStopAndSkipHistory } from "./commandPolicy";
+import { RUNTIME_TUNING_DIAGNOSTIC_GROUPS, shouldStopAndSkipHistory } from "./commandPolicy";
 import { shouldApplyPageResult } from "./pagePolicy";
 import { buildReindexInsertArgs } from "./reindexPolicy";
 import { buildDefattrAppendCommand } from "./attrPolicy";
@@ -32,9 +32,20 @@ import {
 type PageResult = { headers: string[]; rows: string[][]; raw: string; columns?: { name: string; ty: string }[] };
 type State = { dataDir: string; currentTable: string; pageSize: number };
 type DllInfo = { loaded: boolean; version: string; path: string; message: string };
-type CommandExecResult = { ok: boolean; output: string; errorCode?: string | null };
+type CommandExecResult = {
+  ok: boolean;
+  output: string;
+  errorCode?: string | null;
+  errorCodeNumeric?: number | null;
+};
 type ScriptExecResult = { ok: boolean; output: string; errorCode?: string | null; stopLine?: number | null };
-type TimedExecResult = { ok: boolean; output: string; errorCode?: string | null; elapsedMs: number };
+type TimedExecResult = {
+  ok: boolean;
+  output: string;
+  errorCode?: string | null;
+  errorCodeNumeric?: number | null;
+  elapsedMs: number;
+};
 type TimedScriptResult = { ok: boolean; output: string; elapsedMs: number };
 type ExportBundleResult = { path: string };
 type RuntimeArtifactInfo = {
@@ -48,6 +59,11 @@ type RuntimeArtifactInfo = {
   runtimeReportModified: string;
   dllPath: string;
   dllModified: string;
+  runtimeStatsSchemaVersion?: string;
+  backendGitCommit?: string;
+  buildProfile?: string;
+  /** `debug` | `release` — GUI/Tauri build kind from `runtime_artifact_info`. */
+  guiPackageKind?: string;
 };
 type PressureBenchProfile = {
   jobs: number;
@@ -239,6 +255,8 @@ type MenuAction =
     };
 type MenuNode = {
   label: string;
+  /** Non-clickable group title inside dropdown (classification). */
+  section?: boolean;
   divider?: boolean;
   action?: MenuAction;
   children?: MenuNode[];
@@ -268,6 +286,9 @@ const activeTab = ref<"data" | "mdb">("data");
 const busy = ref(false);
 const dll = ref<DllInfo>({ loaded: false, version: "n/a", path: "", message: "" });
 const runtimeArtifacts = ref<RuntimeArtifactInfo | null>(null);
+/** Last SHOW PLAN / EXPLAIN WHERE raw output (for Export modal diagnostics). */
+const lastShowPlanRaw = ref("");
+const lastCommandErrorCodeNumeric = ref<number | null>(null);
 const runtimeDashboard = ref<RuntimeTrendDashboard | null>(null);
 const runtimeDashboardUpdatedAt = ref("");
 const runtimeDashboardPrevTier = ref<string>("");
@@ -1024,12 +1045,14 @@ const helpEntries: Array<{
   { category: "数据", command: "DELETE / DELETEPK / FIND / FINDPK", syntax: "DELETE(id) / DELETEPK(key) / FIND(id) / FINDPK(key)", overloads: ["DELETE(1)", "DELETEPK(1001)", "FIND(2)", "FINDPK(1001)"], example: "DELETE(3)", desc: "删除与定位记录", detail: "DELETE 按 id 删除；DELETEPK 按主键删除。FIND/FINDPK 用于定位验证。删除后若启用自动重排，UI 会触发 id 重新编号。" },
   { category: "查询", command: "WHERE", syntax: "WHERE(attr,op,val[,AND|OR,...])", overloads: ["WHERE(age,>=,18)", "WHERE(dept,=,ENG,AND,salary,>,20000)"], example: "WHERE(dept,=,ENG,AND,age,>=,30)", desc: "条件筛选查询", detail: "常用操作符：= != > < >= <= contains。复杂条件建议在 MDB 脚本中多行维护，便于复用与调试。" },
   { category: "查询", command: "WHEREP", syntax: "WHEREP(proj_attr,WHERE,key_attr,=,key_value)", overloads: ["WHEREP(name,WHERE,dept,=,ENG)", "WHEREP(salary,WHERE,dept,=,FIN)"], example: "WHEREP(name,WHERE,dept,=,ENG)", desc: "等值过滤 + 单列投影（只读快速命中）", detail: "适用于“WHERE(单列=) + 只看某一列”的读路径优化。该路径会优先命中 covering projection sidecar，最多输出前 50 行。key_attr 需为非 id 的等值条件；若要按 id 定位请用 FIND。" },
-  { category: "查询", command: "PAGE", syntax: "PAGE(page,size,order,asc|desc)", overloads: ["PAGE(1,12,id,asc)", "PAGE(2,50,salary,desc)"], example: "PAGE(1,25,join_date,desc)", desc: "分页+排序输出", detail: "UI 的分页器、排序框最终都会映射到该语义。order 为空时默认 id。页码越界返回空页，不会导致崩溃。" },
+  { category: "查询", command: "PAGE", syntax: "PAGE(page,size,order,asc|desc[,after=id])", overloads: ["PAGE(1,12,id,asc)", "PAGE(2,50,salary,desc)", "PAGE(1,20,id,desc,after=1000)"], example: "PAGE(1,25,join_date,desc)", desc: "分页+排序输出", detail: "UI 的分页器、排序框最终都会映射到该语义。order 为空时默认 id。可选第 5 参数 after=<id> 在 order=id 时启用 keyset 游标分页。页码越界返回空页，不会导致崩溃。" },
+  { category: "查询", command: "EXPLAIN WHERE / SHOW PLAN", syntax: "EXPLAIN WHERE(...) / SHOW PLAN(...)", overloads: ["EXPLAIN WHERE(dept,=,ENG)", "SHOW PLAN(age,>=,30,AND,dept,=,FIN)"], example: "SHOW PLAN(dept,=,ENG)", desc: "WHERE 执行计划（文本 / JSON）", detail: "谓词语法与 WHERE 相同。EXPLAIN WHERE 输出人类可读计划行；SHOW PLAN 输出单行 JSON（含 plan_id、候选成本、table_stats_stale 等），便于与诊断包、Runtime Dashboard 对照。" },
   { category: "查询", command: "COUNT / SUM / AVG / MIN / MAX", syntax: "COUNT() / SUM(attr) / AVG(attr) / MIN(attr) / MAX(attr)", overloads: ["COUNT()", "SUM(salary)", "AVG(age)", "MIN(join_date)", "MAX(salary)"], example: "SUM(salary)", desc: "聚合统计", detail: "仅可聚合字段（通常为数值/可比较类型）有效。可先 WHERE 过滤后再统计；结果输出在日志区，可复制用于报表。" },
   { category: "导入导出", command: "IMPORTDIR / EXPORT", syntax: "IMPORTDIR(path) / EXPORT CSV file / EXPORT JSON file", overloads: ["IMPORTDIR(C:/tmp/newdb_import)", "EXPORT CSV out.csv", "EXPORT JSON out.json"], example: "EXPORT CSV hr_employees.csv", desc: "批量导入与导出", detail: "IMPORTDIR 扫描目录加载表文件；EXPORT 默认针对当前 USE 表。导出前建议确认分页排序键，避免误导出其他表。" },
   { category: "事务", command: "BEGIN / COMMIT / ROLLBACK", syntax: "BEGIN [table] / COMMIT / ROLLBACK", overloads: ["BEGIN", "BEGIN hr.employees", "COMMIT", "ROLLBACK"], example: "BEGIN", desc: "事务控制与回滚", detail: "BEGIN 后进行多条写操作，COMMIT 提交，ROLLBACK 回退。当前 GUI 通过 DLL 会话保持事务状态，exe 仅用于分页读取，不影响回滚可用性。" },
   { category: "维护", command: "VACUUM / SCAN / RESET / SHOWLOG", syntax: "VACUUM / SCAN / RESET / SHOWLOG", overloads: ["VACUUM", "SCAN", "RESET", "SHOWLOG"], example: "VACUUM", desc: "诊断、整理、重置维护", detail: "VACUUM 整理碎片并压缩存储；SCAN 扫描底层结构；RESET 清空表（危险）；SHOWLOG 查看日志。" },
-  { category: "维护", command: "AUTOVACUUM / WALSYNC / SHOW TUNING", syntax: "AUTOVACUUM [0|1|on|off] | WALSYNC [full|normal [interval_ms]|off] | SHOW TUNING", overloads: ["AUTOVACUUM", "AUTOVACUUM on", "AUTOVACUUM off", "WALSYNC normal 20", "SHOW TUNING"], example: "SHOW TUNING", desc: "写入路径调优与状态查看", detail: "AUTOVACUUM 支持 on/off 开关；WALSYNC 支持 full/normal/off 并可配置 normal interval；SHOW TUNING 统一输出 WAL 与自动 VACUUM 当前状态，便于压测前后校验。百万级压测建议先从 100k 单档开始，确认耗时后再放大规模。" }
+  { category: "维护", command: "AUTOVACUUM / WALSYNC / SHOW TUNING", syntax: "AUTOVACUUM [0|1|on|off] | WALSYNC [full|normal [interval_ms]|off] | SHOW TUNING", overloads: ["AUTOVACUUM", "AUTOVACUUM on", "AUTOVACUUM off", "WALSYNC normal 20", "SHOW TUNING"], example: "SHOW TUNING", desc: "写入路径调优与状态查看", detail: "AUTOVACUUM 支持 on/off 开关；WALSYNC 支持 full/normal/off 并可配置 normal interval；SHOW TUNING 统一输出 WAL 与自动 VACUUM 当前状态，便于压测前后校验。百万级压测建议先从 100k 单档开始，确认耗时后再放大规模。" },
+  { category: "维护", command: "SHOW TUNING JSON / SHOW STORAGE", syntax: "SHOW TUNING JSON | SHOW STORAGE", overloads: ["SHOW TUNING JSON", "SHOW STATUS JSON", "SHOW STORAGE"], example: "SHOW TUNING JSON", desc: "运行时统计 JSON 与工作区磁盘摘要", detail: "SHOW TUNING JSON（同 SHOW STATUS JSON）输出与 `RUNTIME_STATS_SCHEMA` 对齐的键值，含 page cache、WAL 恢复、WHERE 计数与 table_storage_health_* 等。SHOW STORAGE 汇总 demodb.wal 大小、wal_lsn 与 workspace 下全部 *.bin 占用。" }
 ];
 
 const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
@@ -1037,9 +1060,11 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "文件(File)",
     key: "file",
     items: [
+      { section: true, label: "工作区" },
       { label: "设置数据目录...", action: { kind: "workspace" } },
       { label: "导入目录...", action: { kind: "dialog", opType: "generic", title: "导入目录", template: "IMPORTDIR({path})", fields: [{ key: "path", label: "目录路径", value: "C:/tmp/newdb_import" }] } },
       { divider: true, label: "-" },
+      { section: true, label: "导出当前表" },
       { label: "导出 CSV...", action: { kind: "dialog", opType: "generic", title: "导出 CSV", template: "EXPORT CSV {file}", fields: [{ key: "file", label: "导出文件", value: "out.csv" }] } },
       { label: "导出 JSON...", action: { kind: "dialog", opType: "generic", title: "导出 JSON", template: "EXPORT JSON {file}", fields: [{ key: "file", label: "导出文件", value: "out.json" }] } }
     ]
@@ -1048,6 +1073,7 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "编辑(Edit)",
     key: "edit",
     items: [
+      { section: true, label: "撤销栈" },
       { label: "撤销", action: { kind: "command", command: "__UNDO__" } },
       { label: "重做", action: { kind: "command", command: "__REDO__" } }
     ]
@@ -1056,6 +1082,7 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "表(Table)",
     key: "table",
     items: [
+      { section: true, label: "表与空间" },
       { label: "刷新表列表", action: { kind: "command", command: "SHOW TABLES", opType: "generic", title: "刷新表列表" } },
       { label: "创建表(向导)...", action: { kind: "createTableWizard" } },
       { label: "创建表...", action: { kind: "dialog", opType: "table_create", title: "创建表", template: "CREATE TABLE({name})", fields: [{ key: "name", label: "表名", value: "users" }], reversible: true } },
@@ -1063,11 +1090,13 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { label: "使用表", action: { kind: "dialog", opType: "table_use", title: "使用表", template: "USE({name})", fields: [{ key: "name", label: "表名", value: "users" }] } },
       { label: "重命名表...", action: { kind: "dialog", opType: "table_rename", title: "重命名表", template: "RENAME TABLE({newName})", fields: [{ key: "newName", label: "新表名", value: "users_new" }], reversible: true } },
       { divider: true, label: "-" },
+      { section: true, label: "结构" },
       { label: "定义属性...", action: { kind: "dialog", opType: "schema_defattr", title: "定义属性", template: "DEFATTR({attrs})", fields: [{ key: "attrs", label: "属性定义", value: "name:string,age:int" }] } },
       { label: "显示属性", action: { kind: "command", command: "SHOW ATTR", opType: "generic", title: "显示属性" } },
       { label: "显示主键", action: { kind: "command", command: "SHOW PRIMARY KEY", opType: "generic", title: "显示主键" } },
       { label: "设置主键...", action: { kind: "dialog", opType: "schema_set_pk", title: "设置主键", template: "SET PRIMARY KEY({pk})", fields: [{ key: "pk", label: "主键字段", value: "id" }] } },
       { divider: true, label: "-" },
+      { section: true, label: "表级维护" },
       { label: "清空表数据", action: { kind: "command", command: "RESET", opType: "generic", title: "清空表数据" } },
       { label: "整理表碎片", action: { kind: "command", command: "VACUUM", opType: "generic", title: "整理表碎片" } },
       { label: "扫描原始数据", action: { kind: "command", command: "SCAN", opType: "generic", title: "扫描原始数据" } }
@@ -1077,15 +1106,21 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "数据(Data)",
     key: "data",
     items: [
+      { section: true, label: "写入" },
       { label: "插入数据...", action: { kind: "dialog", opType: "data_insert", title: "插入数据", template: "INSERT({values})", fields: [{ key: "values", label: "参数", value: "1,alice,20" }], reversible: true } },
       { label: "批量插入(压测)...", action: { kind: "dialog", opType: "data_insert", title: "批量插入", template: "BULKINSERT({start},{count})", fields: [{ key: "start", label: "起始ID", value: "100000" }, { key: "count", label: "条数", value: "5000" }] } },
       { label: "更新数据...", action: { kind: "dialog", opType: "data_update", title: "更新数据", template: "UPDATE({values})", fields: [{ key: "values", label: "参数", value: "1,alice,21" }] } },
       { label: "删除数据...", action: { kind: "dialog", opType: "data_delete", title: "删除数据", template: "DELETE({id})", fields: [{ key: "id", label: "ID", value: "1" }] } },
       { divider: true, label: "-" },
+      { section: true, label: "查询与执行计划" },
       { label: "条件查询...", action: { kind: "dialog", opType: "query_where", title: "条件查询", template: "WHERE({expr})", fields: [{ key: "expr", label: "条件", value: "age,>=,18" }] } },
       { label: "条件投影(只读命中)...", action: { kind: "dialog", opType: "query_wherep", title: "条件投影", template: "WHEREP({proj},WHERE,{key},=,{value})", fields: [{ key: "proj", label: "投影字段", value: "name" }, { key: "key", label: "等值字段", value: "dept" }, { key: "value", label: "等值", value: "ENG" }] } },
+      { label: "执行计划(JSON)...", action: { kind: "dialog", opType: "generic", title: "SHOW PLAN", template: "SHOW PLAN({expr})", fields: [{ key: "expr", label: "条件(同 WHERE)", value: "dept,=,ENG" }] } },
+      { label: "执行计划(文本)...", action: { kind: "dialog", opType: "generic", title: "EXPLAIN WHERE", template: "EXPLAIN WHERE({expr})", fields: [{ key: "expr", label: "条件(同 WHERE)", value: "dept,=,ENG" }] } },
       { label: "分页查询...", action: { kind: "dialog", opType: "query_page", title: "分页查询", template: "PAGE({page},{size},{order},{dir})", fields: [{ key: "page", label: "页码", value: "1" }, { key: "size", label: "每页", value: "12" }, { key: "order", label: "排序键", value: "id" }, { key: "dir", label: "方向", value: "asc" }] } },
+      { label: "分页查询(keyset)...", action: { kind: "dialog", opType: "generic", title: "PAGE keyset", template: "PAGE({page},{size},{order},{dir},after={after})", fields: [{ key: "page", label: "页码", value: "1" }, { key: "size", label: "每页", value: "20" }, { key: "order", label: "排序键", value: "id" }, { key: "dir", label: "方向", value: "desc" }, { key: "after", label: "after(id)", value: "0" }] } },
       { divider: true, label: "-" },
+      { section: true, label: "聚合" },
       { label: "统计行数", action: { kind: "command", command: "COUNT()", opType: "aggregate", title: "统计行数" } },
       { label: "求和...", action: { kind: "dialog", opType: "aggregate", title: "求和", template: "SUM({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
       { label: "平均值...", action: { kind: "dialog", opType: "aggregate", title: "平均值", template: "AVG({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
@@ -1097,34 +1132,45 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "事务(Transaction)",
     key: "txn",
     items: [
+      { section: true, label: "会话事务" },
       { label: "开始事务", action: { kind: "command", command: "BEGIN", opType: "txn_begin", title: "开始事务" } },
       { label: "提交事务", action: { kind: "command", command: "COMMIT", opType: "txn_commit", title: "提交事务" } },
       { label: "回滚事务", action: { kind: "command", command: "ROLLBACK", opType: "txn_rollback", title: "回滚事务" } },
       { divider: true, label: "-" },
+      { section: true, label: "恢复与检查点" },
       { label: "Txn & Recovery 面板...", action: { kind: "txnRecovery" } }
     ]
   },
   {
-    label: "工具(Tools)",
+    label: "工具与观测",
     key: "tools",
     items: [
+      { section: true, label: "界面与日志" },
       { label: "设置(Settings)", action: { kind: "settings" } },
       { label: "日志窗口", action: { kind: "logWindow" } },
       { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } },
+      { divider: true, label: "-" },
+      { section: true, label: "压测与跑批" },
       { label: "百万级性能压测(可执行)...", action: { kind: "perfBench" } },
-      { label: "Concurrent Pressure 压测(可执行)...", action: { kind: "pressureBench" } },
+      { label: "Concurrent Pressure 压测...", action: { kind: "pressureBench" } },
       { label: "Nightly Soak 趋势跑批...", action: { kind: "nightlySoak" } },
+      { divider: true, label: "-" },
+      { section: true, label: "观测与诊断导出" },
       { label: "Runtime Dashboard...", action: { kind: "runtimeDashboard" } },
       { label: "Crash Matrix...", action: { kind: "crashMatrix" } },
       { label: "WAL & Recovery...", action: { kind: "walRecovery" } },
       { label: "Gates...", action: { kind: "gates" } },
       { label: "导出诊断包(Export Bundle)...", action: { kind: "exportBundle" } },
       { divider: true, label: "-" },
+      { section: true, label: "会话调优（当前库 CLI）" },
       { label: "调优状态", action: { kind: "command", command: "SHOW TUNING", opType: "generic", title: "调优状态" } },
+      { label: "调优状态(JSON)", action: { kind: "command", command: "SHOW TUNING JSON", opType: "generic", title: "SHOW TUNING JSON" } },
+      { label: "工作区存储摘要", action: { kind: "command", command: "SHOW STORAGE", opType: "generic", title: "SHOW STORAGE" } },
       { label: "WALSYNC normal 20", action: { kind: "command", command: "WALSYNC normal 20", opType: "generic", title: "WALSYNC normal 20" } },
       { label: "AUTOVACUUM on", action: { kind: "command", command: "AUTOVACUUM on", opType: "generic", title: "AUTOVACUUM on" } },
       { label: "AUTOVACUUM off", action: { kind: "command", command: "AUTOVACUUM off", opType: "generic", title: "AUTOVACUUM off" } },
       { divider: true, label: "-" },
+      { section: true, label: "其他" },
       { label: "清空日志", action: { kind: "command", command: "__CLEAR_LOG__", title: "清空日志" } },
       { label: "帮助", action: { kind: "help" } }
     ]
@@ -2153,6 +2199,14 @@ async function runCommand(
   try {
     const exec = await invoke<CommandExecResult>("execute_command_ex", { command: text });
     const result = exec.output ?? "";
+    {
+      const u = normalizeCmd(text).toUpperCase();
+      if (u.includes("SHOW PLAN") || u.startsWith("EXPLAIN WHERE")) {
+        lastShowPlanRaw.value = result;
+        lastCommandErrorCodeNumeric.value =
+          exec.errorCodeNumeric === undefined || exec.errorCodeNumeric === null ? null : exec.errorCodeNumeric;
+      }
+    }
     logLine(`> ${text}`);
     logLine(result);
     const failed = shouldStopAndSkipHistory(text, result, exec.errorCode ?? null);
@@ -3392,10 +3446,12 @@ onUnmounted(() => {
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item
-                v-for="item in menu.items"
-                :key="item.label + menu.key"
+                v-for="(item, menuIdx) in menu.items"
+                :key="`${menu.key}-${menuIdx}`"
                 :divided="!!item.divider"
-                @click="item.action && runMenuAction(item.action)"
+                :disabled="!!item.section"
+                :class="{ 'menu-dropdown-section': item.section }"
+                @click="!item.section && item.action && runMenuAction(item.action)"
               >
                 <span v-if="!item.divider">{{ item.label }}</span>
               </el-dropdown-item>
@@ -3724,6 +3780,14 @@ onUnmounted(() => {
         <div><strong>Perf EXE：</strong>{{ runtimeArtifacts.perfPath }} (mtime={{ runtimeArtifacts.perfModified }})</div>
         <div><strong>Runtime Report EXE：</strong>{{ runtimeArtifacts.runtimeReportPath }} (mtime={{ runtimeArtifacts.runtimeReportModified }})</div>
         <div><strong>Core DLL：</strong>{{ runtimeArtifacts.dllPath }} (mtime={{ runtimeArtifacts.dllModified }})</div>
+        <div v-if="runtimeArtifacts.runtimeStatsSchemaVersion">
+          <strong>Runtime stats schema：</strong>{{ runtimeArtifacts.runtimeStatsSchemaVersion }}
+        </div>
+        <div v-if="runtimeArtifacts.backendGitCommit">
+          <strong>Backend git：</strong>{{ runtimeArtifacts.backendGitCommit }}
+        </div>
+        <div v-if="runtimeArtifacts.buildProfile"><strong>Build profile：</strong>{{ runtimeArtifacts.buildProfile }}</div>
+        <div v-if="runtimeArtifacts.guiPackageKind"><strong>GUI package：</strong>{{ runtimeArtifacts.guiPackageKind }}</div>
       </template>
       <template #footer>
         <el-button @click="showDllModal = false">关闭</el-button>
@@ -4014,9 +4078,34 @@ onUnmounted(() => {
             demo={{ runtimeArtifacts.demoPath }}\n
             perf={{ runtimeArtifacts.perfPath }}\n
             report={{ runtimeArtifacts.runtimeReportPath }}\n
-            dll={{ runtimeArtifacts.dllPath }}
+            dll={{ runtimeArtifacts.dllPath }}\n
+            stats_schema={{ runtimeArtifacts.runtimeStatsSchemaVersion ?? "" }}\n
+            git={{ runtimeArtifacts.backendGitCommit ?? "" }}\n
+            profile={{ runtimeArtifacts.buildProfile ?? "" }}\n
+            gui_pkg={{ runtimeArtifacts.guiPackageKind ?? "" }}
           </div>
           <div v-else class="mini-tip">未加载 artifacts（点“刷新版本”）</div>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">计划 / 诊断</div>
+          <div class="mini-tip">最近一次 SHOW PLAN 或 EXPLAIN WHERE 的原始输出；errorCodeNumeric 取自该次命令结果。</div>
+          <div class="mini-tip mono">errorCodeNumeric={{ lastCommandErrorCodeNumeric ?? "n/a" }}</div>
+          <pre class="mono" style="white-space: pre-wrap; max-height: 220px; overflow: auto; margin: 8px 0 0">{{
+            lastShowPlanRaw || "（尚未运行 SHOW PLAN / EXPLAIN WHERE）"
+          }}</pre>
+        </div>
+        <div class="tool-card">
+          <div class="tool-title">Runtime 字段对齐（CLI / C API）</div>
+          <div class="mini-tip">与校验脚本契约一致；导出诊断包前可对照下列键是否在 `SHOW TUNING JSON` 中出现。</div>
+          <div
+            v-for="g in RUNTIME_TUNING_DIAGNOSTIC_GROUPS"
+            :key="g.title"
+            class="mini-tip mono"
+            style="margin-top: 6px; line-height: 1.35"
+          >
+            <div><strong>{{ g.title }}</strong></div>
+            <div>{{ g.keys.join(", ") }}</div>
+          </div>
         </div>
       </div>
       <template #footer>

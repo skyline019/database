@@ -15,8 +15,13 @@
 
 #include <newdb/wal_manager.h>
 
-#include "cli/modules/util/result.h"
-#include "cli/modules/util/constants.h"
+namespace newdb {
+class HeapTable;
+}
+
+#include "cli/modules/common/util/result.h"
+#include "cli/modules/common/util/constants.h"
+#include "cli/modules/storage/table_storage_health.h"
 
 // 事务状态
 enum class TxnState {
@@ -55,6 +60,14 @@ struct TxnRuntimeStats {
     std::uint64_t write_conflict_count{0};
     std::uint64_t write_conflict_wait_count{0};
     std::uint64_t write_conflict_wait_timeout_count{0};
+    /// Last sampled write-conflict line (`table=...;row=...;holder=...;tag=...`) for observability.
+    std::string write_conflict_last_sample;
+    std::uint64_t file_lock_acquire_fail_count{0};
+    std::uint64_t file_lock_same_process_reuse_count{0};
+    /// Lock marker removed as stale (strict env + age); best-effort cross-process cleanup.
+    std::uint64_t file_lock_stale_marker_count{0};
+    std::uint64_t sidecar_invalidate_count{0};
+    std::uint64_t sidecar_invalidate_fail_count{0};
     std::uint64_t txn_begin_lock_conflict_count{0};
     std::uint64_t wal_compact_count{0};
     std::uint64_t wal_recovery_runs{0};
@@ -65,6 +78,14 @@ struct TxnRuntimeStats {
     std::uint64_t wal_recovery_finalize_ms{0};
     std::uint64_t wal_recovery_records_scanned{0};
     std::uint64_t wal_recovery_dangling_txns{0};
+    /// WAL recovery redo phase (committed replay) wall time for the CLI coordinator path.
+    std::uint64_t wal_recovery_redo_ms{0};
+    /// Count of CHECKPOINT_BEGIN records observed during the last `recoverFromWAL` scan pass.
+    std::uint64_t wal_recovery_checkpoint_begin_count{0};
+    /// Count of CHECKPOINT_END records observed during the last `recoverFromWAL` scan pass.
+    std::uint64_t wal_recovery_checkpoint_end_count{0};
+    /// Last successful coordinator WAL reconcile policy tag (may include `|heap_policy=...` when engine stats exist).
+    std::string wal_recovery_policy;
     std::uint64_t wal_group_commit_count{0};
     std::uint64_t wal_group_commit_batch_commits{0};
     std::uint64_t wal_group_commit_pending_commits{0};
@@ -105,6 +126,60 @@ struct TxnRuntimeStats {
     std::uint64_t pitr_target_lsn{0};
     std::uint64_t pitr_elapsed_ms{0};
     std::uint64_t undo_chain_fallback_count{0};
+    std::uint64_t lazy_materialize_count{0};
+    std::uint64_t lazy_materialize_rows_total{0};
+    std::uint64_t lazy_materialize_max_rows{0};
+    std::uint64_t lazy_materialize_elapsed_ms{0};
+    /// Last observed vacuum queue pressure heuristic (depth-based; phase 9).
+    std::uint64_t vacuum_priority_score{0};
+    /// Last `measure_table_storage_health`-derived bonus added to file-size debt when
+    /// `NEWDB_VACUUM_QUEUE_USE_HEALTH=1` (0 when disabled or load failed).
+    std::uint64_t vacuum_health_bonus_last{0};
+    /// Last vacuum enqueue score decomposition (see `compute_vacuum_score_breakdown` in vacuum_service.cc).
+    std::uint64_t vacuum_score_file_bytes_term{0};
+    std::uint64_t vacuum_score_health_bonus_term{0};
+    std::uint64_t vacuum_score_wal_since_term{0};
+    /// Last successful `measure_table_storage_health` snapshot (vacuum enqueue path when health env on).
+    std::uint64_t table_storage_health_logical_rows{0};
+    std::uint64_t table_storage_health_physical_rows{0};
+    std::uint64_t table_storage_health_tombstone_rows{0};
+    std::uint64_t table_storage_health_data_file_bytes{0};
+    std::uint64_t table_storage_health_live_bytes{0};
+    std::uint64_t table_storage_health_dead_bytes{0};
+    double table_storage_health_fragmentation_ratio{0.0};
+    std::uint64_t table_storage_health_last_vacuum_lsn{0};
+    std::uint64_t table_storage_health_last_vacuum_elapsed_ms{0};
+    /// `good` | `watch` | `degraded` | `critical` — derived from last storage health snapshot (see `stats_impl.cc`).
+    std::string table_storage_health_tier{"good"};
+    /// Last vacuum enqueue debt (file bytes + optional health bonus); see `triggerVacuum`.
+    std::uint64_t compact_debt_bytes{0};
+    std::uint64_t compact_debt_rows{0};
+    double compact_debt_ratio{0.0};
+    std::uint64_t compact_debt_priority{0};
+    /// Process-wide heap page cache (see `NEWDB_PAGE_CACHE_MAX_BYTES`); counters since process start.
+    std::uint64_t page_cache_hits{0};
+    std::uint64_t page_cache_misses{0};
+    std::uint64_t page_cache_evictions{0};
+    std::uint64_t page_cache_bytes_in_cache{0};
+    /// Configured process-wide page cache cap (`NEWDB_PAGE_CACHE_MAX_BYTES`, 0 = disabled / unlimited).
+    std::uint64_t memory_budget_max_bytes{0};
+    /// Current bytes attributed to the page cache LRU (phase-1 stand-in for unified engine memory budget).
+    std::uint64_t memory_budget_used_bytes{0};
+    /// Page cache refused `put` because one page exceeded `NEWDB_PAGE_CACHE_MAX_BYTES` (see `PageCacheGlobalStats`).
+    std::uint64_t memory_budget_reject_count{0};
+    /// LRU eviction volume (see `PageCacheGlobalStats::bytes_evicted_total`).
+    std::uint64_t memory_budget_bytes_evicted_total{0};
+    /// Eq sidecar loads skipped when on-disk index size + page-cache bytes would exceed memory budget cap.
+    std::uint64_t memory_budget_sidecar_load_skipped_total{0};
+    /// `BEGIN` snapshot / ReadCommitted statement refresh diagnostics (see `syncHeapReadSnapshotForQuery`).
+    std::uint64_t txn_snapshot_refresh_count{0};
+    std::uint64_t txn_snapshot_pinned_count{0};
+    std::uint64_t txn_readpath_disabled_count{0};
+    std::string last_snapshot_source{"none"};
+    /// Last LSN pinned for Snapshot isolation `BEGIN` (0 when none / ReadCommitted).
+    std::uint64_t transaction_snapshot_lsn{0};
+    /// Last LSN used for statement-level read view refresh (ReadCommitted or Snapshot without txn pin).
+    std::uint64_t statement_snapshot_lsn{0};
 
     // Write-path staged timing (p95/max of sampled operations).
     std::uint64_t write_heap_append_p95_ms{0};
@@ -130,6 +205,7 @@ enum class WriteConflictPolicy {
     Wait,
 };
 
+// Semantics vs SQL/InnoDB and write-intent locking: docs/txn/TXN_ISOLATION_AND_LOCKING.md
 enum class TxnIsolationLevel {
     ReadCommitted,
     Snapshot,
@@ -167,9 +243,10 @@ public:
     int64_t getTxnId() const { return m_txn_id.load(); }
     bool inTransaction() const { return m_state.load() == TxnState::Active; }
     
-    // 文件锁
+    // 文件锁（本进程内 TxnCoordinator 持有的 OS 锁句柄表；跨进程互斥不由此查询。）
     Result<bool> acquireLock(const std::string& file_path);
     Result<bool> releaseLock(const std::string& file_path);
+    // True iff this coordinator currently holds `acquireLock(file_path)` for the same `file_path`.
     bool isLocked(const std::string& file_path) const;
     
     // WAL (Write-Ahead Log)
@@ -224,6 +301,9 @@ public:
     std::uint64_t walRecoveryFinalizeMs() const { return m_wal_recovery_finalize_ms.load(); }
     std::uint64_t walRecoveryRecordsScanned() const { return m_wal_recovery_records_scanned.load(); }
     std::uint64_t walRecoveryDanglingTxns() const { return m_wal_recovery_dangling_txns.load(); }
+    std::uint64_t walRecoveryRedoMs() const { return m_wal_recovery_redo_ms.load(); }
+    std::uint64_t walRecoveryCheckpointBeginCount() const { return m_wal_recovery_checkpoint_begin_count.load(); }
+    std::uint64_t walRecoveryCheckpointEndCount() const { return m_wal_recovery_checkpoint_end_count.load(); }
     std::uint64_t walGroupCommitCount() const { return m_wal_group_commit_count.load(); }
     std::uint64_t walGroupCommitBatchCommits() const { return m_wal_group_commit_batch_commits.load(); }
     std::uint64_t walGroupCommitPendingCommits() const { return m_wal_group_commit_pending_commits.load(); }
@@ -258,8 +338,17 @@ public:
     bool hybridAdaptiveEnabled() const;
     void onSchedulerThrottled();
     void onWriteTiming(WriteTimingStage stage, std::uint64_t elapsed_ms);
+    /// Full heap materialization from lazy decode path (DML / explicit materialize).
+    void noteLazyMaterialize(std::uint64_t rows, std::uint64_t elapsed_ms);
+    /// LSN-based read snapshot for query paths (`HeapTable::active_snapshot`). Respects
+    /// `TxnIsolationLevel`, `NEWDB_TXN_ISOLATION_READPATH=0` to disable, `NEWDB_TXN_TRACE=1` for stderr trace.
+    void syncHeapReadSnapshotForQuery(newdb::HeapTable& table);
     TxnRuntimeStats runtimeStats() const;
     bool vacuumRunning() const { return m_vacuum_running.load(); }
+    /// Updated when vacuum enqueue runs `measure_table_storage_health` (health queue env on, load ok).
+    void recordLastStorageHealthSnapshot(const newdb::TableStorageHealth& h);
+    /// Updates only `last_vacuum_*` fields without resetting other health columns (vacuum thread).
+    void mergeLastVacuumIntoStorageHealth(std::uint64_t last_vacuum_lsn, std::uint64_t last_vacuum_elapsed_ms);
 
     // Prefix for <table>.bin lock paths (same as ShellState::data_dir). Empty => cwd-relative names.
     void set_workspace_root(std::string path);
@@ -287,6 +376,7 @@ private:
     void maybeCompactWalAfterCommit(const std::string& committed_table);
     void persistWalsnHighWaterUnlocked(newdb::WalManager* wm);
     void clearWriteIntents();
+    void recordWriteConflictSample(const std::string& table_name, int row_id, std::uint64_t holder_txn, const char* tag);
     std::uint64_t wal_compact_max_bytes{4ull * 1024ull * 1024ull};
     
     // 事务状态
@@ -297,8 +387,8 @@ private:
     // 事务记录缓冲 (用于回滚)
     std::vector<TxnRecord> m_txn_records;
     
-    // 文件锁
-    std::mutex m_lock_mutex;
+    // 文件锁（查询是否持锁需在 const 方法中加锁，故 mutex 为 mutable）
+    mutable std::mutex m_lock_mutex;
     std::vector<std::string> m_locked_files;
     std::unordered_map<std::string, LockHandleState> m_lock_handles;
     
@@ -331,7 +421,8 @@ private:
     std::atomic<bool> m_vacuum_running{false};
     std::mutex m_vacuum_mutex;
     std::condition_variable m_vacuum_cv;
-    std::vector<std::string> m_vacuum_queue;
+    /// `(table_name, debt_score)` — higher `debt_score` (file bytes + optional health bonus) runs first.
+    std::vector<std::pair<std::string, std::uint64_t>> m_vacuum_queue;
     std::unordered_set<std::string> m_vacuum_pending;
     std::function<void(const std::string&)> m_vacuum_callback;
     std::atomic<std::size_t> m_vacuum_ops_threshold{300};
@@ -354,6 +445,11 @@ private:
     std::atomic<std::uint64_t> m_write_conflict_count{0};
     std::atomic<std::uint64_t> m_write_conflict_wait_count{0};
     std::atomic<std::uint64_t> m_write_conflict_wait_timeout_count{0};
+    mutable std::mutex m_write_conflict_sample_mu;
+    std::string m_write_conflict_last_sample;
+    std::atomic<std::uint64_t> m_file_lock_acquire_fail_count{0};
+    std::atomic<std::uint64_t> m_file_lock_same_process_reuse_count{0};
+    std::atomic<std::uint64_t> m_file_lock_stale_marker_count{0};
     std::atomic<std::uint64_t> m_txn_begin_lock_conflict_count{0};
     std::atomic<std::uint64_t> m_wal_compact_count{0};
     std::atomic<std::uint64_t> m_wal_recovery_runs{0};
@@ -364,6 +460,11 @@ private:
     std::atomic<std::uint64_t> m_wal_recovery_finalize_ms{0};
     std::atomic<std::uint64_t> m_wal_recovery_records_scanned{0};
     std::atomic<std::uint64_t> m_wal_recovery_dangling_txns{0};
+    std::atomic<std::uint64_t> m_wal_recovery_redo_ms{0};
+    std::atomic<std::uint64_t> m_wal_recovery_checkpoint_begin_count{0};
+    std::atomic<std::uint64_t> m_wal_recovery_checkpoint_end_count{0};
+    mutable std::mutex m_wal_recovery_policy_mu;
+    std::string m_wal_recovery_policy;
     std::atomic<std::uint64_t> m_wal_group_commit_count{0};
     std::atomic<std::uint64_t> m_wal_group_commit_batch_commits{0};
     std::atomic<std::uint64_t> m_wal_group_commit_pending_commits{0};
@@ -420,4 +521,28 @@ private:
     std::atomic<std::uint64_t> m_pitr_target_lsn{0};
     std::atomic<std::uint64_t> m_pitr_elapsed_ms{0};
     std::atomic<std::uint64_t> m_undo_chain_fallback_count{0};
+    std::atomic<std::uint64_t> m_lazy_materialize_count{0};
+    std::atomic<std::uint64_t> m_lazy_materialize_rows_total{0};
+    std::atomic<std::uint64_t> m_lazy_materialize_max_rows{0};
+    std::atomic<std::uint64_t> m_lazy_materialize_elapsed_ms{0};
+    std::atomic<std::uint64_t> m_vacuum_priority_score_last{0};
+    std::atomic<std::uint64_t> m_vacuum_health_bonus_last{0};
+    std::atomic<std::uint64_t> m_vacuum_score_file_term_last{0};
+    std::atomic<std::uint64_t> m_vacuum_score_health_bonus_term_last{0};
+    std::atomic<std::uint64_t> m_vacuum_score_wal_since_term_last{0};
+    std::atomic<std::uint64_t> m_compact_debt_bytes_last{0};
+    std::atomic<std::uint64_t> m_compact_debt_rows_last{0};
+    std::atomic<std::uint64_t> m_compact_debt_ratio_micro_last{0};
+    std::atomic<std::uint64_t> m_compact_debt_priority_last{0};
+    mutable std::mutex m_last_storage_health_mu;
+    newdb::TableStorageHealth m_last_storage_health{};
+    /// Fixed `snapshot_lsn` for Snapshot isolation for the duration of an active txn (0 = not set).
+    std::atomic<std::uint64_t> m_txn_read_view_lsn{0};
+    std::atomic<std::uint64_t> m_txn_snapshot_refresh_count{0};
+    std::atomic<std::uint64_t> m_txn_snapshot_pinned_count{0};
+    std::atomic<std::uint64_t> m_txn_readpath_disabled_count{0};
+    /// 0=none, 1=txn, 2=statement, 3=disabled — surfaced as `last_snapshot_source` string in runtime stats.
+    std::atomic<std::uint8_t> m_last_snapshot_source_code{0};
+    std::atomic<std::uint64_t> m_last_transaction_snapshot_lsn{0};
+    std::atomic<std::uint64_t> m_last_statement_snapshot_lsn{0};
 };

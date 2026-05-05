@@ -62,6 +62,24 @@ def _apply_recommended_thresholds_path(args: argparse.Namespace, path: str) -> N
     _apply_recommended_thresholds_blob(args, blob)
 
 
+def _resolve_workspace_root(here: str) -> str:
+    """Checkout root for monorepo CMake (``cmake -S newdb -B build`` → ``<root>/build``).
+
+    ``here`` is the directory containing this script (``.../<root>/newdb/scripts/ci``).
+
+    When ``<root>/.git`` exists and ``here`` resolves to ``<root>/newdb/scripts/ci``,
+    return ``<root>``. Otherwise return the ``newdb`` project directory (standalone layout).
+    """
+    newdb_root = os.path.dirname(os.path.dirname(here))
+    parent = os.path.dirname(newdb_root)
+    if parent and (
+        (os.path.isdir(os.path.join(parent, ".git")) or os.path.isfile(os.path.join(parent, ".git")))
+        and os.path.normpath(newdb_root) == os.path.normpath(os.path.join(parent, "newdb"))
+    ):
+        return parent
+    return newdb_root
+
+
 def _detect_local_host_slug() -> str:
     """Best-effort local host_slug shaped like capture_baseline.py output (without compiler tail)."""
     try:
@@ -125,7 +143,7 @@ def _apply_baseline_host_index(args: argparse.Namespace) -> None:
         return
     if not os.path.isabs(idx_path):
         here_dir = os.path.dirname(os.path.abspath(__file__))
-        repo_root = os.path.dirname(os.path.dirname(here_dir))
+        repo_root = _resolve_workspace_root(here_dir)
         idx_path = os.path.join(repo_root, idx_path.replace("/", os.sep))
     if not os.path.isfile(idx_path):
         print(f"NOTE: --baseline-host-index file not found: {idx_path}", file=sys.stderr)
@@ -663,7 +681,7 @@ def main() -> int:
         rp = args.recommended_thresholds_json
         if not os.path.isabs(rp):
             here_dir = os.path.dirname(os.path.abspath(__file__))
-            repo_root = os.path.dirname(os.path.dirname(here_dir))
+            repo_root = _resolve_workspace_root(here_dir)
             rp = os.path.join(repo_root, rp.replace("/", os.sep))
         _apply_recommended_thresholds_path(args, rp)
     setattr(args, "_baseline_host_slug_used", "")
@@ -677,8 +695,7 @@ def main() -> int:
         if args.max_lock_deadlock_victim_delta < 0.0:
             args.max_lock_deadlock_victim_delta = 0.0
     here = os.path.dirname(os.path.abspath(__file__))
-    # scripts/ci/ci_bench_gate.py -> repo root is two levels up.
-    repo_root = os.path.dirname(os.path.dirname(here))
+    repo_root = _resolve_workspace_root(here)
     b = args.build_dir if os.path.isabs(args.build_dir) else os.path.join(repo_root, args.build_dir)
     if not os.path.isdir(b):
         print(f"ERROR: build dir not found: {b}", file=sys.stderr)

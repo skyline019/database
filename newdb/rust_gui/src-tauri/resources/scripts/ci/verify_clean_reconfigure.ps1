@@ -167,6 +167,17 @@ if (-not $SkipGuiGate) {
     $guiRoot = Join-Path $repoRoot "rust_gui"
     $tauriRoot = Join-Path $guiRoot "src-tauri"
     if ((Test-Path -LiteralPath $guiRoot) -and (Test-Path -LiteralPath $tauriRoot)) {
+        Write-Host "[verify_clean_reconfigure] syncing CMake outputs into rust_gui/src-tauri/bin (Tauri bundle resources)"
+        $syncScript = Join-Path $guiRoot "scripts\sync_runtime_binaries.ps1"
+        if (-not (Test-Path -LiteralPath $syncScript)) {
+            throw "sync_runtime_binaries.ps1 missing: $syncScript"
+        }
+        & $syncScript `
+            -BuildDir $buildPath `
+            -OutDir (Join-Path $guiRoot "src-tauri\bin") `
+            -ScriptsOutDir (Join-Path $guiRoot "src-tauri\resources\scripts") `
+            -GuiScriptsDir (Join-Path $guiRoot "scripts")
+
         Write-Host "[verify_clean_reconfigure] running rust_gui gates (cargo test --lib + npm test + npm run build)"
         Push-Location $tauriRoot
         try {

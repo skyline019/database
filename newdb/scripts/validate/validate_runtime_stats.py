@@ -208,6 +208,12 @@ LEGACY_DEFAULT_STATS = {
     "mem_query_temp_admit_rejects": 0,
     "mem_global_used_bytes": 0,
     "mem_global_admit_rejects": 0,
+    # LSM queue / cache counters (required schema; often omitted in older JSONL)
+    "lsm_compaction_queue_pending": 0,
+    "lsm_compaction_queue_inflight": 0,
+    "lsm_compaction_enqueue_skipped_backpressure": 0,
+    "lsm_segment_cache_hits": 0,
+    "lsm_segment_cache_misses": 0,
 }
 
 

@@ -26,10 +26,31 @@ def parse_header_symbols(header_text: str) -> list[str]:
     return sorted(set(pat.findall(header_text)))
 
 
+def _newdb_root() -> Path:
+    """``newdb/`` root (directory that contains ``engine/include/newdb/c_api.h``)."""
+    p = Path(__file__).resolve().parent
+    for _ in range(8):
+        if (p / "engine" / "include" / "newdb" / "c_api.h").is_file():
+            return p
+        if p.parent == p:
+            break
+        p = p.parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
 def main() -> int:
+    root = _newdb_root()
     p = argparse.ArgumentParser()
-    p.add_argument("--header", default="engine/include/newdb/c_api.h")
-    p.add_argument("--expected-symbols", default="scripts/validate/c_api_expected_symbols.txt")
+    p.add_argument(
+        "--header",
+        default=str(root / "engine/include/newdb/c_api.h"),
+        help="Path to c_api.h (default: under newdb/ next to this script)",
+    )
+    p.add_argument(
+        "--expected-symbols",
+        default=str(root / "scripts/validate/c_api_expected_symbols.txt"),
+        help="Expected NEWDB_API symbol list (default: newdb/scripts/validate/...)",
+    )
     p.add_argument("--expected-abi", type=int, default=1)
     args = p.parse_args()
 

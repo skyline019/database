@@ -6,12 +6,14 @@ on:
       - "newdb/**"
       - "waterfall/**"
       - ".github/workflows/newdb-ci.yml"
+      - ".github/workflows/newdb-ci-reusable.yml"
       - "newdb/.github/workflows/**"
   pull_request:
     paths:
       - "newdb/**"
       - "waterfall/**"
       - ".github/workflows/newdb-ci.yml"
+      - ".github/workflows/newdb-ci-reusable.yml"
       - "newdb/.github/workflows/**"
   workflow_dispatch:
   schedule:
@@ -19,4 +21,4 @@ on:
 
 jobs:
   reusable-ci:
-    uses: ./newdb/.github/workflows/newdb-ci-reusable.yml
+    uses: ./.github/workflows/newdb-ci-reusable.yml@${{ github.sha }}

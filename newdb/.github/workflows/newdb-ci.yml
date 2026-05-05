@@ -1,4 +1,5 @@
 # Manual / local entry: use repo-root `.github/workflows/newdb-ci.yml` for PR/push/schedule.
+# Reusable jobs live in `.github/workflows/newdb-ci-reusable.yml` (repository root; required by GitHub).
 name: newdb-ci
 
 on:
@@ -6,4 +7,4 @@ on:
 
 jobs:
   reusable-ci:
-    uses: ./newdb/.github/workflows/newdb-ci-reusable.yml
+    uses: ./.github/workflows/newdb-ci-reusable.yml@${{ github.sha }}

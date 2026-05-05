@@ -208,7 +208,8 @@ if (-not $SkipGuiGate) {
 
 if (-not $SkipBenchGate) {
     Write-Host "[verify_clean_reconfigure] running bench gate"
-    $benchArgs = @($BuildDir)
+    # ci_bench_gate resolves relative paths against monorepo root; pass absolute newdb build path.
+    $benchArgs = @([System.IO.Path]::GetFullPath($buildPath))
     if ($isMultiConfig) {
         $benchArgs += @("--build-config", $BuildConfig)
     }

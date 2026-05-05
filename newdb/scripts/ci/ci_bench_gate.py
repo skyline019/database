@@ -696,7 +696,16 @@ def main() -> int:
             args.max_lock_deadlock_victim_delta = 0.0
     here = os.path.dirname(os.path.abspath(__file__))
     repo_root = _resolve_workspace_root(here)
-    b = args.build_dir if os.path.isabs(args.build_dir) else os.path.join(repo_root, args.build_dir)
+    newdb_proj_root = os.path.dirname(os.path.dirname(here))
+    if os.path.isabs(args.build_dir):
+        b = args.build_dir
+    else:
+        b = os.path.join(repo_root, args.build_dir)
+        # Monorepo: verify_clean_reconfigure uses -B under newdb/ (e.g. newdb/build_ci_windows), not workspace root.
+        if not os.path.isdir(b):
+            alt = os.path.join(newdb_proj_root, args.build_dir)
+            if os.path.isdir(alt):
+                b = alt
     if not os.path.isdir(b):
         print(f"ERROR: build dir not found: {b}", file=sys.stderr)
         _emit_gate_fail_json(

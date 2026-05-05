@@ -6,6 +6,12 @@
 *.dylib
 *.exe
 *.out
+*.obj
+*.pdb
+*.lib
+*.dll
+*.ilk
+*.exp
 build/
 build_*/
 build-*/
@@ -40,6 +46,8 @@ coverage_html/
 
 # WAL files (for development)
 *.wal
+*.wal_lsn
+*.walsync.conf
 *.lock
 
 # Temporary

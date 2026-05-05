@@ -223,6 +223,13 @@ public:
     std::optional<WalRecoveryStats> last_recovery_stats() const;
     std::optional<WalCheckpointTruncateTrace> last_checkpoint_truncate_trace() const;
 
+    /// Segment index + checkpoint discovery only (no heap replay). Populates `indexed_*`,
+    /// `last_complete_checkpoint_lsn`, `checkpoint_scan_ms`, etc.
+    Status capture_recovery_scan_stats(WalRecoveryStats* out);
+
+    /// Raw WAL frame reader (recovery tooling / `wal_recovery_pipeline.h`).
+    Status read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload) const;
+
     static std::uint64_t wall_clock_ms();
 
     Status checkpoint(uint64_t snapshot_lsn);
@@ -268,7 +275,6 @@ private:
     uint16_t compute_checksum(const WalRecordHeader* hdr, const uint8_t* payload, uint32_t paylen);
     bool verify_checksum(const WalRecordHeader* hdr, const uint8_t* payload);
     Status write_record(const WalRecordHeader* hdr, const uint8_t* payload, uint32_t paylen);
-    Status read_record(FILE* fp, WalRecordHeader* hdr, std::vector<uint8_t>& payload) const;
     Status append_control_record_nolock(uint64_t txn_id, WalOp op,
                                        const std::uint64_t* checkpoint_snapshot_lsn = nullptr);
     Status enqueue_and_wait(QueuedWalOp&& op);

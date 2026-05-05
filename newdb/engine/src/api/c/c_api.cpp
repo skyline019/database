@@ -17,6 +17,7 @@
 #include <sstream>
 #include <chrono>
 #include <cctype>
+#include <vector>
 
 namespace {
 
@@ -241,6 +242,11 @@ std::string build_runtime_stats_json(const CApiSession& s) {
         << "\"wal_recovery_redo_ms\":" << stats.wal_recovery_redo_ms << ","
         << "\"wal_recovery_checkpoint_begin_count\":" << stats.wal_recovery_checkpoint_begin_count << ","
         << "\"wal_recovery_checkpoint_end_count\":" << stats.wal_recovery_checkpoint_end_count << ","
+        << "\"wal_recovery_records_after_checkpoint\":" << stats.wal_recovery_records_after_checkpoint << ","
+        << "\"wal_recovery_segments_after_checkpoint\":" << stats.wal_recovery_segments_after_checkpoint << ","
+        << "\"wal_recovery_redo_plan_pending_txn_count\":" << stats.wal_recovery_redo_plan_pending_txn_count
+        << ","
+        << "\"wal_recovery_apply_conflict_count\":" << stats.wal_recovery_apply_conflict_count << ","
         << "\"wal_recovery_policy\":\"" << json_escape_local(stats.wal_recovery_policy) << "\","
         << "\"write_conflict_last_sample\":\"" << json_escape_local(stats.write_conflict_last_sample) << "\","
         << "\"file_lock_acquire_fail_count\":" << stats.file_lock_acquire_fail_count << ","
@@ -321,12 +327,25 @@ std::string build_runtime_stats_json(const CApiSession& s) {
         << "\"memory_budget_reject_count\":" << stats.memory_budget_reject_count << ","
         << "\"memory_budget_bytes_evicted_total\":" << stats.memory_budget_bytes_evicted_total << ","
         << "\"memory_budget_sidecar_load_skipped_total\":" << stats.memory_budget_sidecar_load_skipped_total << ","
+        << "\"mem_page_cache_used_bytes\":" << stats.mem_page_cache_used_bytes << ","
+        << "\"mem_page_cache_evictions\":" << stats.mem_page_cache_evictions << ","
+        << "\"mem_page_cache_admit_rejects\":" << stats.mem_page_cache_admit_rejects << ","
+        << "\"mem_sidecar_used_bytes\":" << stats.mem_sidecar_used_bytes << ","
+        << "\"mem_sidecar_evictions\":" << stats.mem_sidecar_evictions << ","
+        << "\"mem_sidecar_admit_rejects\":" << stats.mem_sidecar_admit_rejects << ","
+        << "\"mem_query_temp_used_bytes\":" << stats.mem_query_temp_used_bytes << ","
+        << "\"mem_query_temp_evictions\":" << stats.mem_query_temp_evictions << ","
+        << "\"mem_query_temp_admit_rejects\":" << stats.mem_query_temp_admit_rejects << ","
+        << "\"mem_global_used_bytes\":" << stats.mem_global_used_bytes << ","
+        << "\"mem_global_admit_rejects\":" << stats.mem_global_admit_rejects << ","
         << "\"txn_snapshot_refresh_count\":" << stats.txn_snapshot_refresh_count << ","
         << "\"txn_snapshot_pinned_count\":" << stats.txn_snapshot_pinned_count << ","
         << "\"txn_readpath_disabled_count\":" << stats.txn_readpath_disabled_count << ","
         << "\"last_snapshot_source\":\"" << json_escape_local(stats.last_snapshot_source) << "\","
         << "\"transaction_snapshot_lsn\":" << stats.transaction_snapshot_lsn << ","
         << "\"statement_snapshot_lsn\":" << stats.statement_snapshot_lsn << ","
+        << "\"lock_key_range_count\":" << stats.lock_key_range_count << ","
+        << "\"lock_key_predicate_count\":" << stats.lock_key_predicate_count << ","
         << "\"table_storage_health_logical_rows\":" << stats.table_storage_health_logical_rows << ","
         << "\"table_storage_health_physical_rows\":" << stats.table_storage_health_physical_rows << ","
         << "\"table_storage_health_tombstone_rows\":" << stats.table_storage_health_tombstone_rows << ","
@@ -541,6 +560,93 @@ int newdb_session_runtime_stats(newdb_session_handle handle,
     output_buf[copy_len] = '\0';
     set_last_error(ptr, NEWDB_OK);
     return 1;
+}
+
+int newdb_session_where_plan_json(newdb_session_handle handle,
+                                  int argc,
+                                  const char* const* argv_where_tokens,
+                                  char* output_buf,
+                                  size_t output_buf_size) {
+    auto* ptr = static_cast<CApiSession*>(handle);
+    if (ptr == nullptr || output_buf == nullptr || output_buf_size == 0) {
+        set_last_error(ptr, ptr == nullptr ? NEWDB_ERR_INVALID_HANDLE : NEWDB_ERR_INVALID_ARGUMENT);
+        return 0;
+    }
+    if (argc < 3 || argv_where_tokens == nullptr) {
+        set_last_error(ptr, NEWDB_ERR_INVALID_ARGUMENT);
+        return 0;
+    }
+    std::vector<std::string> args;
+    args.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+        args.emplace_back(argv_where_tokens[i] ? argv_where_tokens[i] : "");
+    }
+    std::vector<WhereCond> conds;
+    std::string err;
+    if (!parse_where_args_to_conds(args, conds, err)) {
+        std::ostringstream oss;
+        oss << "{\"ok\":0,\"error\":\"" << json_escape_local(err) << "\"}\n";
+        const std::string o = oss.str();
+        const size_t copy_len = (o.size() < output_buf_size - 1) ? o.size() : (output_buf_size - 1);
+        std::memcpy(output_buf, o.data(), copy_len);
+        output_buf[copy_len] = '\0';
+        set_last_error(ptr, NEWDB_OK);
+        return 1;
+    }
+    try {
+        auto ha = ptr->shell.session.lock_heap(ptr->log_path.c_str());
+        if (!ha) {
+            std::string fail = "{\"ok\":0,\"error\":\"lock_heap_failed\"}\n";
+            const size_t copy_len =
+                (fail.size() < output_buf_size - 1) ? fail.size() : (output_buf_size - 1);
+            std::memcpy(output_buf, fail.data(), copy_len);
+            output_buf[copy_len] = '\0';
+            set_last_error(ptr, NEWDB_ERR_EXECUTION_FAILED);
+            return 0;
+        }
+        const auto plan =
+            where_build_plan_candidates(*ha.table(), ptr->shell.session.schema, conds,
+                                        ptr->shell.where_ctx.query_stats_hint);
+        std::size_t chosen = 0;
+        for (std::size_t i = 1; i < plan.size(); ++i) {
+            if (plan[i].estimated_cost < plan[chosen].estimated_cost) {
+                chosen = i;
+            }
+        }
+        std::ostringstream oss;
+        oss << "{\"ok\":1";
+        if (!plan.empty()) {
+            oss << ",\"chosen_plan_id\":\"" << json_escape_local(plan[chosen].id) << "\""
+                << ",\"chosen_reason\":\"" << json_escape_local(plan[chosen].rationale) << "\""
+                << ",\"chosen_estimated_cost\":" << plan[chosen].estimated_cost;
+        }
+        oss << ",\"candidates\":[";
+        for (std::size_t i = 0; i < plan.size(); ++i) {
+            if (i > 0) oss << ",";
+            const auto& p = plan[i];
+            oss << "{\"id\":\"" << json_escape_local(p.id) << "\",\"estimated_cost\":" << p.estimated_cost
+                << ",\"estimated_rows\":" << p.cost.estimated_rows << ",\"rationale\":\""
+                << json_escape_local(p.rationale) << "\"";
+            if (!plan.empty() && i != chosen) {
+                oss << ",\"reason_rejected\":\"not_chosen\"";
+            } else if (!plan.empty() && i == chosen) {
+                oss << ",\"chosen\":true";
+            }
+            oss << "}";
+        }
+        oss << "]}\n";
+        const std::string o = oss.str();
+        const size_t copy_len = (o.size() < output_buf_size - 1) ? o.size() : (output_buf_size - 1);
+        std::memcpy(output_buf, o.data(), copy_len);
+        output_buf[copy_len] = '\0';
+        set_last_error(ptr, NEWDB_OK);
+        return 1;
+    } catch (...) {
+        const char* fail = "{\"ok\":0,\"error\":\"exception\"}\n";
+        std::memcpy(output_buf, fail, std::strlen(fail));
+        set_last_error(ptr, NEWDB_ERR_INTERNAL);
+        return 0;
+    }
 }
 
 int newdb_session_append_runtime_snapshot(newdb_session_handle handle,

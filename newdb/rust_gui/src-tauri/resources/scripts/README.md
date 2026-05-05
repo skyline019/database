@@ -12,6 +12,13 @@
 
 ## 1) 验证与质量门禁（scripts/ci）
 
+- `ci/sync_validate_scripts.py`  
+  校验（或 `--apply` 同步）`scripts/validate/` 到 `rust_gui/scripts/validate/` 与
+  `rust_gui/src-tauri/resources/scripts/validate/`，避免 Tauri bundle 与主干契约漂移。
+
+- `ci/capture_baseline.py`  
+  可选 `--emit-baseline-dir DIR` 生成 `baseline/`（runtime JSONL、manifest、ctest 日志）；产物默认不入库（见根 `.gitignore` / `newdb/.gitignore` 的 `/baseline/`）。可选 **`--cross-host-baseline-dir DIR`**（需与 `--emit-baseline-dir` 同用）复制 `manifest.json` 到 **`DIR/<host_slug>/`** 并维护 **`DIR/host_index.json`**，供跨机基线与 `ci_bench_gate.py --recommended-thresholds-json` 配套。
+
 - `ci/verify_clean_reconfigure.ps1`  
   一体化验证入口（CMake clean configure/build/test + Rust/Vue gates + release-grade 规则）。
 
@@ -19,7 +26,7 @@
   覆盖率阈值检查。
 
 - `ci/ci_bench_gate.py`  
-  CI 轻量压测门禁；支持可选 `--runtime-jsonl` + 阈值参数
+  CI 轻量压测门禁；支持 **`--recommended-thresholds-json`**（合并 `nightly_soak_hints` 导出的 PR 建议阈值到仍为 sentinel 的门禁参数）；支持可选 `--runtime-jsonl` + 阈值参数
   （`--min-vacuum-efficiency` / `--max-conflict-rate`）调用 `newdb_runtime_report`
   做运行时统计趋势门禁。额外支持 `--runtime-last-n` 与
   `--runtime-label-prefix`，用于单次窗口隔离与标签过滤。P11 增补

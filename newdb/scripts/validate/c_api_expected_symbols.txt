@@ -6,10 +6,13 @@ newdb_api_version_patch
 newdb_check_schema_file
 newdb_error_code_string
 newdb_negotiate_abi
+newdb_session_append_runtime_snapshot
 newdb_session_create
 newdb_session_destroy
 newdb_session_execute
 newdb_session_last_error
+newdb_session_runtime_stats
 newdb_session_set_table
+newdb_session_where_plan_json
 newdb_sum
 newdb_version_string

@@ -1,6 +1,8 @@
 #include <newdb/page_cache.h>
+#include <newdb/memory_registry.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <list>
@@ -28,6 +30,7 @@ std::unordered_map<std::string, std::list<Entry>::iterator> g_index;
 std::uint64_t g_bytes{0};
 std::uint64_t g_reject_oversized{0};
 std::uint64_t g_bytes_evicted_total{0};
+std::atomic<bool> g_evictor_registered{false};
 
 std::size_t max_cache_bytes() {
     if (const char* e = std::getenv("NEWDB_PAGE_CACHE_MAX_BYTES")) {
@@ -49,7 +52,43 @@ std::string make_key(const std::string& path, std::size_t page_no) {
     return k;
 }
 
-void evict_until_under_unlocked(const std::size_t cap, const std::size_t reserve_for_new) {
+std::uint64_t evict_bytes_from_tail_unlocked(std::uint64_t target_free) {
+    std::uint64_t freed = 0;
+    while (freed < target_free && !g_lru.empty()) {
+        auto it = std::prev(g_lru.end());
+        const std::size_t sz = it->data.size();
+        g_bytes -= sz;
+        g_bytes_evicted_total += static_cast<std::uint64_t>(sz);
+        g_index.erase(it->key);
+        g_lru.erase(it);
+        ++g_evictions;
+        freed += sz;
+    }
+    return freed;
+}
+
+std::uint64_t page_cache_evictor_callback(std::uint64_t target_free) {
+    std::uint64_t freed = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        freed = evict_bytes_from_tail_unlocked(target_free);
+    }
+    if (freed > 0) {
+        memory_registry_release(MemoryKind::PageCache, freed);
+        memory_registry_record_eviction(MemoryKind::PageCache, freed);
+    }
+    return freed;
+}
+
+void ensure_evictor_registered() {
+    bool expected = false;
+    if (g_evictor_registered.compare_exchange_strong(expected, true)) {
+        memory_registry_register_evictor(MemoryKind::PageCache, &page_cache_evictor_callback);
+    }
+}
+
+std::uint64_t evict_until_under_unlocked(const std::size_t cap, const std::size_t reserve_for_new) {
+    std::uint64_t freed_total = 0;
     while (g_bytes + reserve_for_new > cap && !g_lru.empty()) {
         auto it = std::prev(g_lru.end());
         const std::size_t freed = it->data.size();
@@ -58,7 +97,9 @@ void evict_until_under_unlocked(const std::size_t cap, const std::size_t reserve
         g_index.erase(it->key);
         g_lru.erase(it);
         ++g_evictions;
+        freed_total += freed;
     }
+    return freed_total;
 }
 
 } // namespace
@@ -76,12 +117,24 @@ PageCacheGlobalStats page_cache_global_stats() {
 }
 
 void page_cache_reset_stats_for_test() {
-    std::lock_guard<std::mutex> lk(g_mu);
-    g_hits = 0;
-    g_misses = 0;
-    g_evictions = 0;
-    g_reject_oversized = 0;
-    g_bytes_evicted_total = 0;
+    std::uint64_t to_release = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        to_release = g_bytes;
+        g_lru.clear();
+        g_index.clear();
+        g_bytes = 0;
+        g_hits = 0;
+        g_misses = 0;
+        g_evictions = 0;
+        g_reject_oversized = 0;
+        g_bytes_evicted_total = 0;
+        // Allow re-registration after `memory_registry_reset_for_test()` clears registry evictors.
+        g_evictor_registered.store(false, std::memory_order_relaxed);
+    }
+    if (to_release > 0) {
+        memory_registry_release(MemoryKind::PageCache, to_release);
+    }
 }
 
 bool page_cache_try_get(const std::string& heap_file_path,
@@ -122,23 +175,42 @@ void page_cache_put(const std::string& heap_file_path,
         ++g_reject_oversized;
         return;
     }
-    const std::string key = make_key(heap_file_path, page_no);
-    std::lock_guard<std::mutex> lk(g_mu);
-    const auto existing = g_index.find(key);
-    if (existing != g_index.end()) {
-        g_bytes -= existing->second->data.size();
-        g_lru.erase(existing->second);
-        g_index.erase(existing);
+    ensure_evictor_registered();
+    if (!memory_registry_try_admit(MemoryKind::PageCache, static_cast<std::uint64_t>(page_size))) {
+        std::lock_guard<std::mutex> lk(g_mu);
+        ++g_reject_oversized;
+        return;
     }
-    evict_until_under_unlocked(cap, page_size);
-    Entry ent;
-    ent.key = key;
-    ent.path = heap_file_path;
-    ent.page_no = page_no;
-    ent.data.assign(data, data + page_size);
-    g_lru.push_front(std::move(ent));
-    g_index[key] = g_lru.begin();
-    g_bytes += page_size;
+    const std::string key = make_key(heap_file_path, page_no);
+    std::uint64_t replaced_bytes = 0;
+    std::uint64_t evicted_bytes = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mu);
+        const auto existing = g_index.find(key);
+        if (existing != g_index.end()) {
+            const std::size_t old_sz = existing->second->data.size();
+            g_bytes -= old_sz;
+            g_lru.erase(existing->second);
+            g_index.erase(existing);
+            replaced_bytes = static_cast<std::uint64_t>(old_sz);
+        }
+        evicted_bytes = evict_until_under_unlocked(cap, page_size);
+        Entry ent;
+        ent.key = key;
+        ent.path = heap_file_path;
+        ent.page_no = page_no;
+        ent.data.assign(data, data + page_size);
+        g_lru.push_front(std::move(ent));
+        g_index[key] = g_lru.begin();
+        g_bytes += page_size;
+    }
+    if (replaced_bytes > 0) {
+        memory_registry_release(MemoryKind::PageCache, replaced_bytes);
+    }
+    if (evicted_bytes > 0) {
+        memory_registry_release(MemoryKind::PageCache, evicted_bytes);
+        memory_registry_record_eviction(MemoryKind::PageCache, evicted_bytes);
+    }
 }
 
 } // namespace newdb

@@ -85,7 +85,7 @@ database/                    # 仓库根
 |------|------|------------|
 | `tools/perf`、`concurrent_perf`、`smoke`、`report` | 压测、冒烟、**runtime_report** | 读引擎 + 写 JSON/控制台 |
 | `tests/*.cpp` | 单测、集成测、`gtest_c_api` | 内存堆、临时目录、断言 |
-| `rust_gui`（Vue + Tauri） | 通过 **DLL `libnewdb` + `newdb_demo` 子进程`** 驱动 | 命令字符串、分页参数、日志流；`sync_runtime_binaries.ps1` 同步 `src-tauri/bin` 与 `resources/scripts` |
+| `rust_gui`（Vue + Tauri） | 通过 **DLL `libnewdb` + `newdb_demo` 子进程`** 驱动 | 命令字符串、分页参数、日志流；表菜单 / 数据视图 **「确认重排 id」** 经确认对话框下发 **`CONFIRM_REORDER`**；`sync_runtime_binaries.ps1` 同步 `src-tauri/bin` 与 `resources/scripts` |
 | `scripts/ci|validate|soak|bench` | 门禁、统计 schema、趋势 rollup | `*.jsonl`、dashboard JSON |
 
 ### 2.4 文档与 intro
@@ -191,7 +191,15 @@ flowchart LR
 
 **读路径**：打开表 → `HeapTable` + 可选 **page_cache**（引擎）→ MVCC 快照过滤 → WHERE/sidecar 加速命中。
 
-**写路径**：命令经事务协调器 → `WalManager` 落盘 → 堆与索引/sidecar 更新 →（可选）`VACUUM`、**storage_health** 采样进入 runtime stats。
+**写路径**：命令经事务协调器 → `WalManager` 落盘 → 堆与索引/sidecar 更新 →（可选）**`VACUUM`**（`compact_heap_file`：合并逻辑行、去掉墓碑与旧版本，**不改变**幸存行的 `id`）、**`CONFIRM_REORDER`**（`reorder_heap_ids_dense`：用户确认删除行不需 WAL/时间点恢复后，将逻辑行 **`id` 压成连续 1..N**，仅当主键为 `id` 或未设置）、**storage_health** 采样进入 runtime stats。
+
+**WAL 恢复（v2 closed loop · P2 拆分）**：`WalManager::recover_replay_segments` 边读边喂给 [`WalRedoPlanner`](../../engine/include/newdb/wal/wal_redo_planner.h)；遇到 `COMMIT` 触发 `finalize() → RedoPlanSummary`，再交由 [`WalRedoApplier`](../../engine/include/newdb/wal/wal_redo_applier.h) 写入 `HeapTable`（`ApplyStats` 累计 `apply_count` / `redo_apply_ms`）。`WalRecordReader`（`wal/wal_recovery_pipeline.h`）继续作为只读边界供 fault 测试与摘要使用。`WalRedoPlanner::feed_record` 仅对 **`INSERT` / `UPDATE` / `DELETE`** 解码入 redo 计划；`SESSION_SNAPSHOT`、`SAVEPOINT_*`、`PITR_MARK` 等非 DML 不进入重做链；未知 `WalOp` 值走 `default` 分支忽略。
+
+**协调器 WAL 协调（`TxnCoordinator::recoverFromWAL`）**：[`recovery_service.cc`](../../cli/modules/txn/coordinator/recovery/recovery_service.cc) 在构建按事务的 redo/undo 列表时，同样**仅**将 **`INSERT` / `UPDATE` / `DELETE`** 且带行载荷的记录纳入堆补偿；其余 WAL 类型仍用于 `COMMIT`/`ROLLBACK`/checkpoint 等控制语义，但不写入 `txn_records` 的表数据链，与引擎侧 redo 语义对齐。
+
+**堆表 id 与墓碑（无 MVCC 快照）**：[`HeapTable::rebuild_indexes`](../../engine/src/heap/heap_table.cpp) 在 **`active_snapshot` 未设置** 时，对存储槽按文件顺序做 **last-writer-wins**：后出现同一 `id` 的 **`__deleted=1` 墓碑** 时从 `index_by_id` **擦除**该 id，避免删除（含「删中间行」）后 `find_by_id` / `sorted_indices` 仍指向旧物理行。存在快照时仍按「仅 `is_row_visible`」路径扫描，以保留 MVCC 单测语义。堆文件加载路径 [`merge_one_page_into_fingers`](../../engine/src/io/page/page_io.cpp) 已对墓碑执行 `latest.erase(row.id)`，与上式一致。
+
+**内存预算（v2 closed loop · P5 闭环）**：`page_cache` / equality `sidecar` / WHERE `query_temp` 三类调用 `MemoryRegistry::try_admit/release` 走统一全局 cap 与 per-kind cap；evictor 注册回调（`PageCache` / `EqSidecar` LRU 尾部释放）。新增 stats 字段族 `mem_*_{used_bytes,evictions,admit_rejects}` + `mem_global_*`，旧 `memory_budget_*` 字段保持兼容映射（详见 [`STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md`](../storage/STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md) §6）。
 
 ---
 
@@ -356,7 +364,7 @@ flowchart LR
 | 顺序 | Handler 入口（概念） | 常触达的 `cli/modules` / 服务 |
 |------|----------------------|-------------------------------|
 | 1 | `handle_txn_commands` | `txn/coordinator/*`（锁、WAL、恢复、vacuum、写冲突、**stats_impl**） |
-| 2 | `handle_workspace_admin_commands` | `common/*`、工作区路径解析 |
+| 2 | `handle_workspace_admin_commands` | `common/*`、工作区路径解析；**`VACUUM`** / **`CONFIRM_REORDER`** / `RESET` / `SCAN` / `SHOWLOG` 等对 `*.bin` 的维护（见 [`workspace_handler.cc`](../../cli/shell/dispatch/handlers/workspace/workspace_handler.cc)） |
 | 3 | `handle_import_defattr_commands` | `import_export`、磁盘 attr |
 | 4–6 | DDL / catalog 系列 | `catalog`、模式文件、引擎表创建 |
 | 7 | `handle_schema_show_commands` | 目录与表元数据展示 |
@@ -569,20 +577,22 @@ CLI **不得** include `engine/src/**`；合法流动为：
 |------|------|
 | `TxnState` | 无事务 / Active / Committed / RolledBack |
 | `TxnRecord` | 逻辑回滚日志项：表名、操作、键、新旧值、`wal_lsn`、`op_seq` |
-| `TxnRuntimeStats` | 大块扁平计数器：vacuum、WAL 恢复各阶段耗时、写冲突、文件锁、**LSM**、**page_cache / memory_budget** 镜像字段、`table_storage_health_*`、`write_*_p95_ms` 等 |
+| `TxnRuntimeStats` | 大块扁平计数器：vacuum、WAL 恢复各阶段耗时与 checkpoint 后扫描/redo 计划指标、写冲突、文件锁、扩展写意向锁键、**LSM**、**page_cache / memory_budget / MemoryRegistry** 镜像字段、`table_storage_health_*`、`write_*_p95_ms` 等 |
 | `WriteConflictPolicy` / `TxnIsolationLevel` | 写冲突与隔离级别策略（与 `docs/txn/TXN_ISOLATION_AND_LOCKING.md` 对齐） |
 | `WriteTimingStage` | 写路径分段采样标签（heap、hot_index、sidecar_invalidate、wal、lsm…） |
+| `LockKey` / `LockKeyKind` | 扩展写意向锁键：主键、range write intent、predicate write intent、二级索引等，供同一 reservation map 进行冲突检测与观测 |
 
 **子模块文件（概念映射）**：`core_impl`、`lock_service`、`wal_service`、`recovery_service`、`vacuum_service`、`write_conflict_service`、`stats_impl` 等实现类通过 `TxnCoordinator` 友元或内部指针协作（实现细节见各 `.cc`）。
 
 **算法要点（摘要）**：
 
-- **WAL 先行**：`writeWAL` / `flushWAL` 与引擎 `WalManager` 协同；`recoverFromWAL` 触发扫描与 undo/redo 统计进入 `TxnRuntimeStats`。
-- **写冲突**：`tryReserveWriteKey` + 策略 `Reject`/`Wait`；超时计入 `write_conflict_wait_timeout_count`。
+- **WAL 先行**：`writeWAL` / `flushWAL` 与引擎 `WalManager` 协同；`recoverFromWAL` 触发扫描与 undo/redo 统计进入 `TxnRuntimeStats`。P2 拆分后，checkpoint 后扫描、redo planning pending txn、apply conflict/skip 等也进入 `wal_recovery_*` 指标族。
+- **写冲突**：`tryReserveWriteKey` 处理传统表 + 主键行写意图；`tryReserveWriteLockKey` 复用同一全局 reservation map 承载 range/predicate/secondary-index 写意图。策略 `Reject`/`Wait` 控制立即失败或等待；超时计入 `write_conflict_wait_timeout_count`，range/predicate 成功预留计入 `lock_key_range_count` / `lock_key_predicate_count`。
 - **Vacuum**：队列 + 冷却 + 可选 `measure_table_storage_health` 加权 **debt**（`stats_impl` 中 tier 推导）。
 - **快照读**：`syncHeapReadSnapshotForQuery`（`HeapReadViewGuard`）与 `transaction_snapshot_lsn` / `statement_snapshot_lsn` 字段反映读视图刷新。
+- **内存观测闭环**：`stats_impl` 同时镜像旧 `memory_budget_*` 字段与新 `mem_*` per-kind / global 字段；后者来自 `MemoryRegistry` 对 page cache、eq sidecar、WHERE query temp 的 admit/release/evict 计数。
 
-**耦合**：`TxnCoordinator` **include** `<newdb/wal_manager.h>`；`table_storage_health.h` 用于 vacuum 决策采样；handler 与 **引擎堆** 通过 `Session` 间接耦合。
+**耦合**：`TxnCoordinator` **include** `<newdb/wal_manager.h>`；`table_storage_health.h` 用于 vacuum 决策采样；`lock_key.h` 定义扩展写意向键；handler 与 **引擎堆** 通过 `Session` 间接耦合。
 
 ### 12.4 WHERE 执行栈
 
@@ -593,10 +603,10 @@ CLI **不得** include `engine/src/**`；合法流动为：
 | 类型 | 作用 |
 |------|------|
 | `WhereCond` | 单谓词：`attr`、`CondOp`、`value`、`logic_with_prev`（与前一条件的逻辑连接） |
-| `WhereQueryContext` | **每 shell** 查询缓存：`unordered_map` + **LRU 列表**（`kMaxQueryCacheEntries = 128`）；大量 `atomic` 计数器（cache hit、plan 分类、扫描行数、sidecar 磁盘读等）；`WherePolicyState policy`；`const TableStats* query_stats_hint` |
-| `PlanCandidate` / `PlanCost` | `SHOW PLAN` / `EXPLAIN` 用的轻量候选路径与估计行数 |
-| `query_with_index` | 主入口：解析后多条件 → 选路（sidecar / PK / fallback scan）→ 返回行 slot 向量 |
-| `where_build_plan_candidates` | 按估计代价升序生成候选集合（与 `where_estimate_scan_rows` 门控一致） |
+| `WhereQueryContext` | **每 shell** 查询缓存：`unordered_map` + **LRU 列表**（`kMaxQueryCacheEntries = 128`）；大量 `atomic` 计数器（cache hit、plan 分类、扫描行数、sidecar 磁盘读、heap scan budget、query temp reservation 等）；`WherePolicyState policy`；`const TableStats* query_stats_hint` |
+| `PlanCandidate` / `PlanCost` | `SHOW PLAN` / `EXPLAIN` / C API 用的轻量候选路径、估计行数与 `rationale` 人类可读排序原因 |
+| `query_with_index` | 主入口：解析后多条件 → 选路（sidecar / PK / fallback scan）→ 通过 `MemoryKind::QueryTemp` 预留临时内存 → 返回行 slot 向量 |
+| `where_build_plan_candidates` | 按估计代价升序生成候选集合（与 `where_estimate_scan_rows` 门控一致），候选携带 `rationale` 便于计划解释 |
 
 **算法要点（摘要）**：
 
@@ -604,8 +614,9 @@ CLI **不得** include `engine/src/**`；合法流动为：
 - **统计提示**：`NEWDB_QUERY_USE_TABLE_STATS=1` 时 `TableStats` 参与 **选择性估计**（`eq_selectivity_from_stats` / `range_selectivity_from_stats`），影响剪枝与 `estimated_scan_rows_*`。
 - **策略门**：`policy_service` 可拒绝查询并写入 `WherePolicyState`（窗口计数等）。
 - **扫描上限**：环境变量如 `NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS` 与 `where_heap_scan_budget_binding_events` 观测绑定。
+- **查询临时内存**：`query_with_index` 对候选 slot / 条件解析等热路径估算 `query_temp_reserved_bytes`，并通过 `MemoryRegistry` 的 `QueryTemp` kind 进入 `mem_query_temp_*` 与 `mem_global_*` 观测。
 
-**耦合**：`where.h` **include** `heap_table.h`、`schema.h`、`table_stats.h`、`condition.h`；与 **sidecar** 通过 `plan_impl` 调用（编译期依赖 sidecar 目标）。
+**耦合**：`where.h` **include** `heap_table.h`、`schema.h`、`table_stats.h`、`condition.h`；与 **sidecar** 通过 `plan_impl` 调用（编译期依赖 sidecar 目标）；与 `MemoryRegistry` 通过 query temp 预留形成运行期弱耦合。
 
 ### 12.5 表级统计 `TableStats`
 
@@ -654,11 +665,12 @@ CLI **不得** include `engine/src/**`；合法流动为：
 |-------------|----------------|-------------|
 | `WalOp` / `WalRecordHeader` / `WalDecodedRecord` | `include/newdb/wal_manager.h` | 变长 payload、LSN 单调、CRC；恢复时解码流 |
 | `WalSyncMode` | 同上 | `Full` / `Normal` / `Off` 控制 fsync 频率与吞吐 |
-| `PageCacheGlobalStats` / `page_cache_try_get` / `page_cache_put` | `include/newdb/page_cache.h` | 进程级 LRU（按 heap 路径 + 页号）；**可选**环境变量启用 |
-| `MemoryBudgetSnapshot` | `include/newdb/memory_budget.h` | 与页缓存上限统一语义；拒绝与驱逐计数 |
+| `PageCacheGlobalStats` / `page_cache_try_get` / `page_cache_put` | `include/newdb/page_cache.h` | 进程级 LRU（按 heap 路径 + 页号）；**可选**环境变量启用；向 `MemoryRegistry` 报告 PageCache kind 的 admit / eviction / reject |
+| `MemoryBudgetSnapshot` | `include/newdb/memory_budget.h` | 旧兼容视角：与页缓存上限统一语义；拒绝与驱逐计数 |
+| `MemoryRegistry` / `MemoryKind` | `include/newdb/memory_registry.h` | v2 closed loop：统一 global cap 与 per-kind cap；kind 包括 `PageCache`、`EqSidecar`、`QueryTemp`；支持 evictor 回调与 `memory_registry_totals()` 汇总 |
 | `Session` / `HeapTable` | `include/newdb/session.h`、`heap_table.h` | MVCC 快照、lazy materialize、`logical_row_count` |
 
-**耦合**：`TxnRuntimeStats` 中 page_cache / memory_budget 字段由 **stats 采样** 从 `page_cache_global_stats()` / `memory_budget_snapshot()` 拉取，形成 **引擎全局单例统计 → CLI 协调器统计** 的镜像关系。
+**耦合**：`TxnRuntimeStats` 中旧 page_cache / memory_budget 字段由 **stats 采样** 从 `page_cache_global_stats()` / `memory_budget_snapshot()` 拉取；新 `mem_*` 字段由 `memory_registry_totals()` 拉取，形成 **引擎/CLI 共享内存治理单例 → CLI 协调器统计 → JSON/GUI/CI** 的镜像关系。
 
 ### 12.9 工具链、GUI、脚本
 
@@ -889,7 +901,7 @@ struct TxnRecord {
 
 `TxnRuntimeStats` 为扁平可观测字段大结构；以下为**与源码一致的全文节选**（便于检索字段名；完整以头文件为准）：
 
-```48:201:newdb/cli/modules/txn/coordinator/txn_manager.h
+```48:246:newdb/cli/modules/txn/coordinator/txn_manager.h
 struct TxnRuntimeStats {
     std::uint64_t vacuum_trigger_count{0};
     std::uint64_t vacuum_execute_count{0};
@@ -929,6 +941,14 @@ struct TxnRuntimeStats {
     std::uint64_t wal_recovery_checkpoint_begin_count{0};
     /// Count of CHECKPOINT_END records observed during the last `recoverFromWAL` scan pass.
     std::uint64_t wal_recovery_checkpoint_end_count{0};
+    /// WAL records with LSN after last complete checkpoint (CLI reconcile + `capture_recovery_scan_stats`).
+    std::uint64_t wal_recovery_records_after_checkpoint{0};
+    /// Indexed WAL segments from segment scan (`WalRecoveryStats::indexed_segments`).
+    std::uint64_t wal_recovery_segments_after_checkpoint{0};
+    /// Uncommitted txn count observed during redo planning (`dangling_by_txn.size()` in reconcile path).
+    std::uint64_t wal_recovery_redo_plan_pending_txn_count{0};
+    /// Idempotent redo skips / conflicts (`strict` mode duplicates or guard collisions).
+    std::uint64_t wal_recovery_apply_conflict_count{0};
     /// Last successful coordinator WAL reconcile policy tag (may include `|heap_policy=...` when engine stats exist).
     std::string wal_recovery_policy;
     std::uint64_t wal_group_commit_count{0};
@@ -1016,6 +1036,28 @@ struct TxnRuntimeStats {
     std::uint64_t memory_budget_bytes_evicted_total{0};
     /// Eq sidecar loads skipped when on-disk index size + page-cache bytes would exceed memory budget cap.
     std::uint64_t memory_budget_sidecar_load_skipped_total{0};
+    /// Per-kind page cache bytes admitted into MemoryRegistry (Phase 5 v2 closed loop).
+    std::uint64_t mem_page_cache_used_bytes{0};
+    /// Per-kind page cache LRU evictions reported back to the MemoryRegistry.
+    std::uint64_t mem_page_cache_evictions{0};
+    /// Per-kind page cache `try_admit` rejects (oversized page or cap exhausted).
+    std::uint64_t mem_page_cache_admit_rejects{0};
+    /// Per-kind equality sidecar bytes admitted (header + bucket slot estimate).
+    std::uint64_t mem_sidecar_used_bytes{0};
+    /// Per-kind equality sidecar LRU evictions returned by registered evictor.
+    std::uint64_t mem_sidecar_evictions{0};
+    /// Per-kind equality sidecar `try_admit` rejects (entry too large or cap exhausted).
+    std::uint64_t mem_sidecar_admit_rejects{0};
+    /// Per-kind WHERE query temp bytes admitted (rough `logical_rows*sizeof(size_t)+conds*256` estimate).
+    std::uint64_t mem_query_temp_used_bytes{0};
+    /// Per-kind WHERE query temp evictions (placeholder; reserved for future eviction hooks).
+    std::uint64_t mem_query_temp_evictions{0};
+    /// Per-kind WHERE query temp `try_admit` rejects (caller fell back to no-op result).
+    std::uint64_t mem_query_temp_admit_rejects{0};
+    /// Aggregate of per-kind used bytes (`page_cache + sidecar + query_temp`).
+    std::uint64_t mem_global_used_bytes{0};
+    /// Sum of per-kind admit rejects (cross-kind global view of memory pressure).
+    std::uint64_t mem_global_admit_rejects{0};
     /// `BEGIN` snapshot / ReadCommitted statement refresh diagnostics (see `syncHeapReadSnapshotForQuery`).
     std::uint64_t txn_snapshot_refresh_count{0};
     std::uint64_t txn_snapshot_pinned_count{0};
@@ -1025,6 +1067,10 @@ struct TxnRuntimeStats {
     std::uint64_t transaction_snapshot_lsn{0};
     /// Last LSN used for statement-level read view refresh (ReadCommitted or Snapshot without txn pin).
     std::uint64_t statement_snapshot_lsn{0};
+    /// Successful first-time reservations of `LockKeyKind::RangeWriteIntent` keys (see `tryReserveWriteLockKey`).
+    std::uint64_t lock_key_range_count{0};
+    /// Successful first-time reservations of `LockKeyKind::PredicateWriteIntent` keys.
+    std::uint64_t lock_key_predicate_count{0};
 
     // Write-path staged timing (p95/max of sampled operations).
     std::uint64_t write_heap_append_p95_ms{0};
@@ -1046,7 +1092,7 @@ struct TxnRuntimeStats {
 };
 ```
 
-```203:223:newdb/cli/modules/txn/coordinator/txn_manager.h
+```248:270:newdb/cli/modules/txn/coordinator/txn_manager.h
 enum class WriteConflictPolicy {
     Reject,
     Wait,
@@ -1071,7 +1117,7 @@ enum class WriteTimingStage : std::uint8_t {
 
 `TxnCoordinator` 类声明较长；以下为 **`public` 段开头至隔离级别 API**（其后还有 VACUUM、统计 getter 等，见同文件）：
 
-```226:271:newdb/cli/modules/txn/coordinator/txn_manager.h
+```273:318:newdb/cli/modules/txn/coordinator/txn_manager.h
 class TxnCoordinator {
 public:
     TxnCoordinator();
@@ -1112,6 +1158,8 @@ public:
     void recordOperation(const std::string& operation, const std::string& table,
                          const std::string& key, const std::string& old_val, const std::string& new_val);
     bool tryReserveWriteKey(const std::string& table_name, int id, std::string* reason = nullptr);
+    /// Extended write-intent reservation (range / predicate / secondary index). Uses the same global map as row PK.
+    bool tryReserveWriteLockKey(const LockKey& lk, std::string* reason = nullptr);
     void setWriteConflictPolicy(WriteConflictPolicy policy);
     WriteConflictPolicy writeConflictPolicy() const;
     void setWriteConflictWaitTimeoutMs(std::uint64_t ms);
@@ -1122,7 +1170,8 @@ public:
 
 #### WHERE：计划候选、查询上下文、主入口声明
 
-```18:116:newdb/cli/modules/where/executor/where.h
+```17:123:newdb/cli/modules/where/executor/where.h
+/// Lightweight cost bundle for `PlanCandidate` (extensible toward full optimizer).
 struct PlanCost {
     double estimated_rows{0.0};
 };
@@ -1131,6 +1180,8 @@ struct PlanCandidate {
     std::string id;
     double estimated_cost{0.0};
     PlanCost cost;
+    /// Human-readable ranking hint for SHOW PLAN / C API (`where_plan_json`).
+    std::string rationale;
 };
 
 struct WhereCond {
@@ -1138,6 +1189,13 @@ struct WhereCond {
     CondOp op{CondOp::Unknown};
     std::string value;
     std::string logic_with_prev;
+};
+
+struct WherePolicyState {
+    bool blocked{false};
+    std::string message;
+    std::uint64_t window_sec{0};
+    std::size_t window_count{0};
 };
 
 struct WhereQueryContext {
@@ -1165,7 +1223,7 @@ struct WhereQueryContext {
     const TableStats* query_stats_hint{nullptr};
     std::atomic<std::uint64_t> estimated_scan_rows_total{0};
     std::atomic<std::uint64_t> estimated_scan_rows_samples{0};
-    /// Last completed `query_with_index`: bounded count of index/scan shapes evaluated (cap 8).
+    /// Last completed `query_with_index`: count of index/scan shapes evaluated (observable truth).
     std::atomic<std::uint32_t> last_plan_candidates_considered{1};
     /// Equality sidecar: bytes read from disk when loading `.eqidx` (not memory-cache hits).
     std::atomic<std::uint64_t> where_eq_sidecar_disk_bytes_read_total{0};
@@ -1176,6 +1234,8 @@ struct WhereQueryContext {
     WherePolicyState policy{};
     /// Last completed `query_with_index` plan label (e.g. `fallback_scan`, `id_lookup`).
     std::string last_plan_id;
+    /// Bytes last reserved via `MemoryKind::QueryTemp` for the in-flight `query_with_index` call (observability).
+    std::atomic<std::uint64_t> query_temp_reserved_bytes{0};
     mutable std::mutex mu;
 };
 
@@ -1383,7 +1443,7 @@ struct PageCacheGlobalStats {
 /// Returns cumulative counters since process start (thread-safe).
 [[nodiscard]] PageCacheGlobalStats page_cache_global_stats();
 
-/// Test hook: zero hit/miss/eviction counters (does not clear cache entries).
+/// Test hook: clear LRU entries, release PageCache bytes via MemoryRegistry, reset evictor-register flag, zero stats.
 void page_cache_reset_stats_for_test();
 
 /// When `NEWDB_PAGE_CACHE_MAX_BYTES` > 0, try to copy a cached page into `buf` (length `page_size`).
@@ -1686,6 +1746,10 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `wal_recovery_redo_ms` | 已提交路径 redo 重放阶段 wall 时间。 |
 | `wal_recovery_checkpoint_begin_count` | 最后一次扫描中 `CHECKPOINT_BEGIN` 条数。 |
 | `wal_recovery_checkpoint_end_count` | 最后一次扫描中 `CHECKPOINT_END` 条数。 |
+| `wal_recovery_records_after_checkpoint` | 最后一次恢复扫描中，LSN 严格位于最后完整 checkpoint 边界之后的记录条数。 |
+| `wal_recovery_segments_after_checkpoint` | 从 segment 扫描视角，checkpoint 之后被索引/访问的段数。 |
+| `wal_recovery_redo_plan_pending_txn_count` | redo planning 阶段看到的未提交 / dangling 事务数。 |
+| `wal_recovery_apply_conflict_count` | redo apply 中因幂等重复、保护条件冲突等而跳过/记冲突的次数。 |
 | `wal_recovery_policy` | 协调器与堆策略对账后得到的策略标签串。 |
 | `wal_group_commit_count` | 组提交批处理轮次次数。 |
 | `wal_group_commit_batch_commits` | 各批中累计提交事务数（或统计口径内累加，见实现）。 |
@@ -1759,12 +1823,25 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `memory_budget_reject_count` | 单页过大等原因拒绝 `put` 的次数。 |
 | `memory_budget_bytes_evicted_total` | LRU 驱逐的累计字节。 |
 | `memory_budget_sidecar_load_skipped_total` | 因预算将 sidecar 整文件加载跳过次数。 |
+| `mem_page_cache_used_bytes` | `MemoryRegistry` 中 `PageCache` kind 当前使用字节。 |
+| `mem_page_cache_evictions` | `PageCache` kind 报告给 MemoryRegistry 的驱逐次数。 |
+| `mem_page_cache_admit_rejects` | `PageCache` kind 的 `try_admit` 拒绝次数。 |
+| `mem_sidecar_used_bytes` | `EqSidecar` kind 当前驻留字节。 |
+| `mem_sidecar_evictions` | equality sidecar evictor 向 MemoryRegistry 回报的驱逐次数。 |
+| `mem_sidecar_admit_rejects` | `EqSidecar` kind 的 `try_admit` 拒绝次数。 |
+| `mem_query_temp_used_bytes` | `QueryTemp` kind 当前预留字节。 |
+| `mem_query_temp_evictions` | `QueryTemp` kind 的驱逐计数预留位；当前多用于未来扩展/占位观测。 |
+| `mem_query_temp_admit_rejects` | WHERE 查询临时内存申请被拒绝次数。 |
+| `mem_global_used_bytes` | 各 kind 当前使用量聚合值。 |
+| `mem_global_admit_rejects` | 各 kind `try_admit` 拒绝总数。 |
 | `txn_snapshot_refresh_count` | 读视图刷新次数（ReadCommitted 语句边界等）。 |
 | `txn_snapshot_pinned_count` | 快照长期钉扎次数（Snapshot 隔离）。 |
 | `txn_readpath_disabled_count` | 读路径被禁用/短路次数（诊断）。 |
 | `last_snapshot_source` | 上次快照来源标签（如 `none` 或实现定义枚举串）。 |
 | `transaction_snapshot_lsn` | Snapshot 隔离下事务级钉扎 LSN；无时为 0。 |
 | `statement_snapshot_lsn` | 语句级读视图 LSN。 |
+| `lock_key_range_count` | 成功首次预留 `LockKeyKind::RangeWriteIntent` 的次数。 |
+| `lock_key_predicate_count` | 成功首次预留 `LockKeyKind::PredicateWriteIntent` 的次数。 |
 | `write_heap_append_p95_ms` | 写路径堆追加阶段延迟 p95。 |
 | `write_heap_append_max_ms` | 堆追加阶段延迟最大样本。 |
 | `write_hot_index_p95_ms` | 热索引更新 p95。 |
@@ -1809,6 +1886,7 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `PlanCandidate.id` | 计划标签（如 `fallback_scan`）。 |
 | `estimated_cost` | 用于排序的总代价标量。 |
 | `cost` | 嵌套代价包，可扩展。 |
+| `rationale` | 人类可读排序/选路原因，供 `SHOW PLAN` / C API `where_plan_json` 展示。 |
 
 | `WhereQueryContext` 要点 | 含义 |
 |---------------------------|------|
@@ -1828,6 +1906,7 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `where_eq_sidecar_disk_*` | 等值侧车磁盘读字节与加载次数。 |
 | `where_heap_scan_budget_binding_events` | 堆扫描预算收紧事件（与环境变量绑定）。 |
 | `last_plan_id` | 上次完成的计划 id 字符串。 |
+| `query_temp_reserved_bytes` | 上次 / 当前 in-flight `query_with_index` 通过 `MemoryKind::QueryTemp` 预留的字节数，用于观测查询临时内存。 |
 | `mu` | 保护非原子字段（如 `last_plan_id`、LRU 结构）的互斥量。 |
 
 **常用函数形参**

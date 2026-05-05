@@ -1,6 +1,7 @@
 # ---- CMake / native build outputs ----
 /build/
 /build_*/
+/build-*/
 /cmake-build-*/
 /CMakeFiles/
 /CMakeCache.txt
@@ -8,6 +9,12 @@
 /cmake_install.cmake
 /install_manifest.txt
 /compile_commands.json
+*.obj
+*.pdb
+*.lib
+*.dll
+*.ilk
+*.exp
 
 # ---- Test/coverage artifacts ----
 *.gcda
@@ -19,6 +26,9 @@
 *.info
 *.xml
 
+# ---- Local baseline capture (see scripts/ci/capture_baseline.py --emit-baseline-dir) ----
+/baseline/
+
 # ---- Runtime and benchmark generated files ----
 /qa_*.bin
 /qa_*.bin.*
@@ -27,6 +37,20 @@
 __pycache__/
 *.log
 *.tmp
+
+# ---- WAL / sidecar runtime artifacts ----
+*.wal
+*.wal_lsn
+*.walsync.conf
+*.lock
+*.eqidx
+*.eqbloom
+*.covidx
+*.vischk
+*.tablestats
+*.eqidx.tmp
+*.eqbloom.tmp
+*.tablestats.tmp
 
 # ---- Rust/Vite/Tauri generated files ----
 /rust_gui/node_modules/

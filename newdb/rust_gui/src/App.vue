@@ -5,7 +5,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { RUNTIME_TUNING_DIAGNOSTIC_GROUPS, shouldStopAndSkipHistory } from "./commandPolicy";
 import { shouldApplyPageResult } from "./pagePolicy";
-import { buildReindexInsertArgs } from "./reindexPolicy";
 import { buildDefattrAppendCommand } from "./attrPolicy";
 import {
   FolderOpened,
@@ -146,6 +145,16 @@ type TableTabState = {
 };
 type UiSettings = {
   accent: string;
+  /** Primary body / title text (hex). */
+  textMain: string;
+  /** Secondary labels (hex). */
+  textRegular: string;
+  /** Muted hints / captions (hex). */
+  textSoft: string;
+  /** App / body base tone (hex); layered gradients mix from this. */
+  pageBg: string;
+  /** Main data grid surface (hex); el-table + .data-table-wrap. */
+  tableBg: string;
   bgMode: "gradient" | "image";
   bgImageUrl: string;
   bgImageOpacity: number;
@@ -252,7 +261,9 @@ type MenuAction =
       template: string;
       fields: { key: string; label: string; value: string }[];
       reversible?: boolean;
-    };
+    }
+  | { kind: "confirmReorder" }
+  | { kind: "applyPreset"; presetKey: string };
 type MenuNode = {
   label: string;
   /** Non-clickable group title inside dropdown (classification). */
@@ -312,6 +323,8 @@ const stackUndoPage = ref(1);
 const stackRedoPage = ref(1);
 const stackPageSize = 8;
 const stackPreviewUnit = ref<UndoUnit | null>(null);
+/** After a real CONFIRM_REORDER (not `[REORDER] noop`), stacks are cleared and the panel is sealed until new undo history is recorded. */
+const stackPanelLockedAfterReorder = ref(false);
 const selectedStackKey = ref("");
 const showHelp = ref(false);
 const showDllModal = ref(false);
@@ -522,11 +535,16 @@ const createAutoUse = ref(true);
 const createAlsoSetPk = ref(true);
 const defaultSettings: UiSettings = {
   accent: "#3b82f6",
+  textMain: "#dbe7ff",
+  textRegular: "#c7d2fe",
+  textSoft: "#93c5fd",
+  pageBg: "#080d18",
+  tableBg: "#08121f",
   bgMode: "gradient",
   bgImageUrl: "",
   bgImageOpacity: 0.22,
   panelOpacity: 0.9,
-  tableViewOpacity: 0.96,
+  tableViewOpacity: 0.74,
   logPanelOpacity: 0.92,
   fontScale: 1,
   denseMode: false,
@@ -544,24 +562,246 @@ const settingsPresets: SettingsPreset[] = [
   {
     key: "default",
     label: "默认",
-    settings: { accent: "#3b82f6", bgMode: "gradient", panelOpacity: 0.9, tableViewOpacity: 0.96, logPanelOpacity: 0.92, fontScale: 1, denseMode: false, animations: true, cornerScale: 1, shadowScale: 1, logFontScale: 1, logLineHeight: 1.5, borderContrast: 1, panelBrightness: 1, logHighlightIntensity: 1 }
+    settings: {
+      accent: "#3b82f6",
+      textMain: "#e8f0ff",
+      textRegular: "#c7d2fe",
+      textSoft: "#93c5fd",
+      pageBg: "#080d18",
+      tableBg: "#08121f",
+      bgMode: "gradient",
+      panelOpacity: 0.9,
+      tableViewOpacity: 0.74,
+      logPanelOpacity: 0.92,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1,
+      shadowScale: 1,
+      logFontScale: 1,
+      logLineHeight: 1.5,
+      borderContrast: 1,
+      panelBrightness: 1,
+      logHighlightIntensity: 1
+    }
   },
   {
     key: "midnight",
     label: "午夜蓝",
-    settings: { accent: "#60a5fa", bgMode: "gradient", panelOpacity: 0.92, tableViewOpacity: 0.94, logPanelOpacity: 0.9, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.05, shadowScale: 1.15, logFontScale: 1, logLineHeight: 1.55, borderContrast: 1.08, panelBrightness: 0.96, logHighlightIntensity: 1.1 }
+    settings: {
+      accent: "#60a5fa",
+      textMain: "#e8ecff",
+      textRegular: "#a5b4fc",
+      textSoft: "#818cf8",
+      pageBg: "#050914",
+      tableBg: "#071424",
+      bgMode: "gradient",
+      panelOpacity: 0.92,
+      tableViewOpacity: 0.72,
+      logPanelOpacity: 0.9,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.05,
+      shadowScale: 1.15,
+      logFontScale: 1,
+      logLineHeight: 1.55,
+      borderContrast: 1.08,
+      panelBrightness: 0.96,
+      logHighlightIntensity: 1.1
+    }
   },
   {
     key: "mint",
     label: "薄荷绿",
-    settings: { accent: "#34d399", bgMode: "gradient", panelOpacity: 0.88, tableViewOpacity: 0.9, logPanelOpacity: 0.86, fontScale: 1, denseMode: false, animations: true, cornerScale: 1.1, shadowScale: 0.9, logFontScale: 1.02, logLineHeight: 1.55, borderContrast: 0.95, panelBrightness: 1.05, logHighlightIntensity: 0.95 }
+    settings: {
+      accent: "#34d399",
+      textMain: "#ecfdf5",
+      textRegular: "#a7f3d0",
+      textSoft: "#6ee7b7",
+      pageBg: "#02140e",
+      tableBg: "#031c14",
+      bgMode: "gradient",
+      panelOpacity: 0.88,
+      tableViewOpacity: 0.68,
+      logPanelOpacity: 0.86,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.1,
+      shadowScale: 0.9,
+      logFontScale: 1.02,
+      logLineHeight: 1.55,
+      borderContrast: 0.95,
+      panelBrightness: 1.05,
+      logHighlightIntensity: 0.95
+    }
   },
   {
     key: "compact",
     label: "高密度",
-    settings: { accent: "#818cf8", bgMode: "gradient", panelOpacity: 0.95, tableViewOpacity: 0.98, logPanelOpacity: 0.96, fontScale: 0.96, denseMode: true, animations: false, sidebarWidth: 240, cornerScale: 0.9, shadowScale: 0.75, logFontScale: 0.94, logLineHeight: 1.4, borderContrast: 1.2, panelBrightness: 0.92, logHighlightIntensity: 1.2 }
+    settings: {
+      accent: "#818cf8",
+      textMain: "#f1f5f9",
+      textRegular: "#cbd5e1",
+      textSoft: "#94a3b8",
+      pageBg: "#090b10",
+      tableBg: "#0c1018",
+      bgMode: "gradient",
+      panelOpacity: 0.95,
+      tableViewOpacity: 0.78,
+      logPanelOpacity: 0.96,
+      fontScale: 0.96,
+      denseMode: true,
+      animations: false,
+      sidebarWidth: 240,
+      cornerScale: 0.9,
+      shadowScale: 0.75,
+      logFontScale: 0.94,
+      logLineHeight: 1.4,
+      borderContrast: 1.2,
+      panelBrightness: 0.92,
+      logHighlightIntensity: 1.2
+    }
+  },
+  {
+    key: "sunset",
+    label: "日落橙",
+    settings: {
+      accent: "#f97316",
+      textMain: "#fff7ed",
+      textRegular: "#fed7aa",
+      textSoft: "#fdba74",
+      pageBg: "#140805",
+      tableBg: "#1c0c08",
+      bgMode: "gradient",
+      panelOpacity: 0.9,
+      tableViewOpacity: 0.73,
+      logPanelOpacity: 0.9,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.05,
+      shadowScale: 1.05,
+      logFontScale: 1,
+      logLineHeight: 1.52,
+      borderContrast: 1.02,
+      panelBrightness: 1,
+      logHighlightIntensity: 1.05
+    }
+  },
+  {
+    key: "violet",
+    label: "紫罗兰",
+    settings: {
+      accent: "#a78bfa",
+      textMain: "#faf5ff",
+      textRegular: "#ddd6fe",
+      textSoft: "#c4b5fd",
+      pageBg: "#0c0618",
+      tableBg: "#110b22",
+      bgMode: "gradient",
+      panelOpacity: 0.91,
+      tableViewOpacity: 0.73,
+      logPanelOpacity: 0.92,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.08,
+      shadowScale: 1.1,
+      logFontScale: 1,
+      logLineHeight: 1.52,
+      borderContrast: 1.04,
+      panelBrightness: 0.98,
+      logHighlightIntensity: 1.08
+    }
+  },
+  {
+    key: "rose",
+    label: "玫瑰粉",
+    settings: {
+      accent: "#fb7185",
+      textMain: "#fff1f2",
+      textRegular: "#fecdd3",
+      textSoft: "#fda4af",
+      pageBg: "#13060c",
+      tableBg: "#1a0a12",
+      bgMode: "gradient",
+      panelOpacity: 0.9,
+      tableViewOpacity: 0.73,
+      logPanelOpacity: 0.9,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.06,
+      shadowScale: 1.02,
+      logFontScale: 1,
+      logLineHeight: 1.52,
+      borderContrast: 1,
+      panelBrightness: 1,
+      logHighlightIntensity: 1.02
+    }
+  },
+  {
+    key: "cyber",
+    label: "电青",
+    settings: {
+      accent: "#22d3ee",
+      textMain: "#ecfeff",
+      textRegular: "#a5f3fc",
+      textSoft: "#67e8f9",
+      pageBg: "#031218",
+      tableBg: "#051a24",
+      bgMode: "gradient",
+      panelOpacity: 0.88,
+      tableViewOpacity: 0.72,
+      logPanelOpacity: 0.88,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 1.02,
+      shadowScale: 1.12,
+      logFontScale: 1.02,
+      logLineHeight: 1.55,
+      borderContrast: 1.06,
+      panelBrightness: 0.97,
+      logHighlightIntensity: 1.12
+    }
+  },
+  {
+    key: "mono",
+    label: "冷灰",
+    settings: {
+      accent: "#94a3b8",
+      textMain: "#f8fafc",
+      textRegular: "#e2e8f0",
+      textSoft: "#cbd5e1",
+      pageBg: "#08090b",
+      tableBg: "#0b0d11",
+      bgMode: "gradient",
+      panelOpacity: 0.92,
+      tableViewOpacity: 0.76,
+      logPanelOpacity: 0.93,
+      fontScale: 1,
+      denseMode: false,
+      animations: true,
+      cornerScale: 0.98,
+      shadowScale: 0.92,
+      logFontScale: 1,
+      logLineHeight: 1.48,
+      borderContrast: 1.12,
+      panelBrightness: 0.96,
+      logHighlightIntensity: 1.05
+    }
   }
 ];
+
+/** 主菜单「主题预设」二级项（视图菜单与工具菜单共用同一份静态结构）。 */
+const THEME_PRESET_MENU_CHILDREN: MenuNode[] = settingsPresets.map((p) => ({
+  label: p.label,
+  action: { kind: "applyPreset", presetKey: p.key } as MenuAction
+}));
+
 const settings = ref<UiSettings>({ ...defaultSettings });
 let settingsPersistTimer: number | null = null;
 const settingsDirty = ref(false);
@@ -573,8 +813,34 @@ let sidebarDragStartX = 0;
 let sidebarDragStartWidth = 260;
 const settingsSummary = computed(
   () =>
-    `accent=${settings.value.accent} | panel=${settings.value.panelOpacity.toFixed(2)} | font=${settings.value.fontScale.toFixed(2)} | border=${settings.value.borderContrast.toFixed(2)} | bright=${settings.value.panelBrightness.toFixed(2)} | logFx=${settings.value.logHighlightIntensity.toFixed(2)}`
+    `accent=${settings.value.accent} | text=${settings.value.textMain}/${settings.value.textSoft} | bg=${settings.value.pageBg}/${settings.value.tableBg} | panel=${settings.value.panelOpacity.toFixed(2)} | font=${settings.value.fontScale.toFixed(2)} | border=${settings.value.borderContrast.toFixed(2)} | bright=${settings.value.panelBrightness.toFixed(2)} | logFx=${settings.value.logHighlightIntensity.toFixed(2)}`
 );
+
+function normalizeHexColor(raw: string, fallback: string): string {
+  const t = String(raw ?? "").trim();
+  if (/^#[0-9a-f]{6}$/i.test(t)) return t.toLowerCase();
+  if (/^#[0-9a-f]{3}$/i.test(t)) {
+    const h = t.slice(1);
+    return `#${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`.toLowerCase();
+  }
+  return fallback;
+}
+
+function previewPresetColors(preset: SettingsPreset): string[] {
+  const u = sanitizeSettings({ ...defaultSettings, ...preset.settings });
+  return [u.accent, u.textMain, u.textSoft];
+}
+
+function resetThemeTextColors() {
+  settings.value.textMain = defaultSettings.textMain;
+  settings.value.textRegular = defaultSettings.textRegular;
+  settings.value.textSoft = defaultSettings.textSoft;
+}
+
+function resetCanvasBgColors() {
+  settings.value.pageBg = defaultSettings.pageBg;
+  settings.value.tableBg = defaultSettings.tableBg;
+}
 
 function openUiMessage(
   kind: UiMessageKind,
@@ -905,15 +1171,30 @@ watch(
   },
   { deep: false }
 );
+function buildLayoutGradient(page: string, accent: string): string {
+  const p = page.trim() || defaultSettings.pageBg;
+  const a = accent.trim() || defaultSettings.accent;
+  return [
+    `radial-gradient(ellipse 118% 88% at 50% -24%, color-mix(in srgb, ${a} 26%, ${p}) 0%, transparent 57%)`,
+    `radial-gradient(ellipse 70% 52% at 100% 34%, color-mix(in srgb, ${a} 13%, ${p}) 0%, transparent 51%)`,
+    `radial-gradient(ellipse 58% 44% at 0% 76%, color-mix(in srgb, ${a} 9%, ${p}) 0%, transparent 47%)`,
+    `linear-gradient(188deg, color-mix(in srgb, ${p} 95%, #000) 0%, ${p} 40%, color-mix(in srgb, ${p} 97%, #030712) 100%)`
+  ].join(", ");
+}
+
 const layoutStyle = computed(() => {
   const s = settings.value;
-  const gradient = "radial-gradient(circle at 15% 15%, #1e3a8a 0%, #0f172a 40%, #030712 100%)";
   const bg =
     s.bgMode === "image" && s.bgImageUrl.trim()
       ? `linear-gradient(rgba(3,7,18,${1 - s.bgImageOpacity}), rgba(3,7,18,${1 - s.bgImageOpacity})), url("${s.bgImageUrl}")`
-      : gradient;
+      : buildLayoutGradient(s.pageBg, s.accent);
   return {
     "--accent": s.accent,
+    "--text-main": s.textMain,
+    "--text-regular": s.textRegular,
+    "--text-soft": s.textSoft,
+    "--page-bg": s.pageBg,
+    "--table-surface-bg": s.tableBg,
     "--panel-opacity": String(s.panelOpacity),
     "--table-view-opacity": String(s.tableViewOpacity),
     "--log-panel-opacity": String(s.logPanelOpacity),
@@ -935,6 +1216,11 @@ function syncThemeVarsToRoot() {
   const s = settings.value;
   const root = document.documentElement;
   root.style.setProperty("--accent", s.accent);
+  root.style.setProperty("--text-main", s.textMain);
+  root.style.setProperty("--text-regular", s.textRegular);
+  root.style.setProperty("--text-soft", s.textSoft);
+  root.style.setProperty("--page-bg", s.pageBg);
+  root.style.setProperty("--table-surface-bg", s.tableBg);
   root.style.setProperty("--panel-opacity", String(s.panelOpacity));
   root.style.setProperty("--table-view-opacity", String(s.tableViewOpacity));
   root.style.setProperty("--log-panel-opacity", String(s.logPanelOpacity));
@@ -1042,7 +1328,7 @@ const helpEntries: Array<{
   { category: "架构", command: "SET PRIMARY KEY", syntax: "SET PRIMARY KEY(key)", overloads: ["SET PRIMARY KEY(id)", "SET PRIMARY KEY(emp_id)"], example: "SET PRIMARY KEY(id)", desc: "指定主键字段", detail: "主键要求唯一。设置到非唯一列会失败。建议先通过 WHERE/FIND 检查重复再设置；失败时 UI 日志会显示具体冲突。" },
   { category: "数据", command: "INSERT / BULKINSERT / BULKINSERTFAST", syntax: "INSERT(id,v1,v2,...) / BULKINSERT(start_id,count[,dept]) / BULKINSERTFAST(start_id,count[,dept])", overloads: ["INSERT(1)", "INSERT(1,Alice,ENG,29)", "BULKINSERT(100000,5000)", "BULKINSERTFAST(200000,10000)", "BULKINSERTFAST(300000,50000,ENG)"], example: "BULKINSERTFAST(100000,5000)", desc: "单条与高吞吐批量插入", detail: "INSERT 适合交互编辑；BULKINSERT 适合通用批量导入；BULKINSERTFAST 在可保证 ID 新鲜不冲突时跳过逐条重复检查，速度更高。批量插入后建议执行 SHOW TUNING 确认写入策略。" },
   { category: "数据", command: "UPDATE", syntax: "UPDATE(id,v1,v2,...)", overloads: ["UPDATE(1,Alice,ENG,30)", "UPDATE(2,Bob,FIN,33)"], example: "UPDATE(1,Alice,ENG,30,22000)", desc: "按 id 覆盖更新整行值", detail: "参数顺序与 DEFATTR 一致。前端单元格失焦自动保存最终也会转成 UPDATE 命令。若缺少 id 或字段数不匹配会报错。" },
-  { category: "数据", command: "DELETE / DELETEPK / FIND / FINDPK", syntax: "DELETE(id) / DELETEPK(key) / FIND(id) / FINDPK(key)", overloads: ["DELETE(1)", "DELETEPK(1001)", "FIND(2)", "FINDPK(1001)"], example: "DELETE(3)", desc: "删除与定位记录", detail: "DELETE 按 id 删除；DELETEPK 按主键删除。FIND/FINDPK 用于定位验证。删除后若启用自动重排，UI 会触发 id 重新编号。" },
+  { category: "数据", command: "DELETE / DELETEPK / FIND / FINDPK", syntax: "DELETE(id) / DELETEPK(key) / FIND(id) / FINDPK(key)", overloads: ["DELETE(1)", "DELETEPK(1001)", "FIND(2)", "FINDPK(1001)"], example: "DELETE(3)", desc: "删除与定位记录", detail: "DELETE 按 id 删除；DELETEPK 按主键删除。FIND/FINDPK 用于定位验证。若确认删除行不需要 WAL 恢复，可在「表」菜单或数据视图工具条使用「确认重排 id」将 id 压成连续 1..N（主键须为 id）。" },
   { category: "查询", command: "WHERE", syntax: "WHERE(attr,op,val[,AND|OR,...])", overloads: ["WHERE(age,>=,18)", "WHERE(dept,=,ENG,AND,salary,>,20000)"], example: "WHERE(dept,=,ENG,AND,age,>=,30)", desc: "条件筛选查询", detail: "常用操作符：= != > < >= <= contains。复杂条件建议在 MDB 脚本中多行维护，便于复用与调试。" },
   { category: "查询", command: "WHEREP", syntax: "WHEREP(proj_attr,WHERE,key_attr,=,key_value)", overloads: ["WHEREP(name,WHERE,dept,=,ENG)", "WHEREP(salary,WHERE,dept,=,FIN)"], example: "WHEREP(name,WHERE,dept,=,ENG)", desc: "等值过滤 + 单列投影（只读快速命中）", detail: "适用于“WHERE(单列=) + 只看某一列”的读路径优化。该路径会优先命中 covering projection sidecar，最多输出前 50 行。key_attr 需为非 id 的等值条件；若要按 id 定位请用 FIND。" },
   { category: "查询", command: "PAGE", syntax: "PAGE(page,size,order,asc|desc[,after=id])", overloads: ["PAGE(1,12,id,asc)", "PAGE(2,50,salary,desc)", "PAGE(1,20,id,desc,after=1000)"], example: "PAGE(1,25,join_date,desc)", desc: "分页+排序输出", detail: "UI 的分页器、排序框最终都会映射到该语义。order 为空时默认 id。可选第 5 参数 after=<id> 在 order=id 时启用 keyset 游标分页。页码越界返回空页，不会导致崩溃。" },
@@ -1050,7 +1336,7 @@ const helpEntries: Array<{
   { category: "查询", command: "COUNT / SUM / AVG / MIN / MAX", syntax: "COUNT() / SUM(attr) / AVG(attr) / MIN(attr) / MAX(attr)", overloads: ["COUNT()", "SUM(salary)", "AVG(age)", "MIN(join_date)", "MAX(salary)"], example: "SUM(salary)", desc: "聚合统计", detail: "仅可聚合字段（通常为数值/可比较类型）有效。可先 WHERE 过滤后再统计；结果输出在日志区，可复制用于报表。" },
   { category: "导入导出", command: "IMPORTDIR / EXPORT", syntax: "IMPORTDIR(path) / EXPORT CSV file / EXPORT JSON file", overloads: ["IMPORTDIR(C:/tmp/newdb_import)", "EXPORT CSV out.csv", "EXPORT JSON out.json"], example: "EXPORT CSV hr_employees.csv", desc: "批量导入与导出", detail: "IMPORTDIR 扫描目录加载表文件；EXPORT 默认针对当前 USE 表。导出前建议确认分页排序键，避免误导出其他表。" },
   { category: "事务", command: "BEGIN / COMMIT / ROLLBACK", syntax: "BEGIN [table] / COMMIT / ROLLBACK", overloads: ["BEGIN", "BEGIN hr.employees", "COMMIT", "ROLLBACK"], example: "BEGIN", desc: "事务控制与回滚", detail: "BEGIN 后进行多条写操作，COMMIT 提交，ROLLBACK 回退。当前 GUI 通过 DLL 会话保持事务状态，exe 仅用于分页读取，不影响回滚可用性。" },
-  { category: "维护", command: "VACUUM / SCAN / RESET / SHOWLOG", syntax: "VACUUM / SCAN / RESET / SHOWLOG", overloads: ["VACUUM", "SCAN", "RESET", "SHOWLOG"], example: "VACUUM", desc: "诊断、整理、重置维护", detail: "VACUUM 整理碎片并压缩存储；SCAN 扫描底层结构；RESET 清空表（危险）；SHOWLOG 查看日志。" },
+  { category: "维护", command: "VACUUM / CONFIRM_REORDER / SCAN / RESET / SHOWLOG", syntax: "VACUUM | CONFIRM_REORDER | SCAN | RESET | SHOWLOG", overloads: ["VACUUM", "CONFIRM_REORDER", "SCAN", "RESET", "SHOWLOG"], example: "VACUUM", desc: "诊断、整理、重置维护", detail: "VACUUM 整理碎片并压缩存储；CONFIRM_REORDER 在确认删除行不需要 WAL 恢复后，将当前逻辑行 id 重排为连续 1..N（仅主键为 id）；SCAN 扫描底层结构；RESET 清空表（危险）；SHOWLOG 查看日志。" },
   { category: "维护", command: "AUTOVACUUM / WALSYNC / SHOW TUNING", syntax: "AUTOVACUUM [0|1|on|off] | WALSYNC [full|normal [interval_ms]|off] | SHOW TUNING", overloads: ["AUTOVACUUM", "AUTOVACUUM on", "AUTOVACUUM off", "WALSYNC normal 20", "SHOW TUNING"], example: "SHOW TUNING", desc: "写入路径调优与状态查看", detail: "AUTOVACUUM 支持 on/off 开关；WALSYNC 支持 full/normal/off 并可配置 normal interval；SHOW TUNING 统一输出 WAL 与自动 VACUUM 当前状态，便于压测前后校验。百万级压测建议先从 100k 单档开始，确认耗时后再放大规模。" },
   { category: "维护", command: "SHOW TUNING JSON / SHOW STORAGE", syntax: "SHOW TUNING JSON | SHOW STORAGE", overloads: ["SHOW TUNING JSON", "SHOW STATUS JSON", "SHOW STORAGE"], example: "SHOW TUNING JSON", desc: "运行时统计 JSON 与工作区磁盘摘要", detail: "SHOW TUNING JSON（同 SHOW STATUS JSON）输出与 `RUNTIME_STATS_SCHEMA` 对齐的键值，含 page cache、WAL 恢复、WHERE 计数与 table_storage_health_* 等。SHOW STORAGE 汇总 demodb.wal 大小、wal_lsn 与 workspace 下全部 *.bin 占用。" }
 ];
@@ -1079,6 +1365,19 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     ]
   },
   {
+    label: "视图(View)",
+    key: "view",
+    items: [
+      { section: true, label: "界面与外观" },
+      { label: "界面设置…", action: { kind: "settings" } },
+      { label: "主题预设", children: THEME_PRESET_MENU_CHILDREN },
+      { divider: true, label: "-" },
+      { section: true, label: "独立窗口" },
+      { label: "日志窗口", action: { kind: "logWindow" } },
+      { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } }
+    ]
+  },
+  {
     label: "表(Table)",
     key: "table",
     items: [
@@ -1099,6 +1398,7 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { section: true, label: "表级维护" },
       { label: "清空表数据", action: { kind: "command", command: "RESET", opType: "generic", title: "清空表数据" } },
       { label: "整理表碎片", action: { kind: "command", command: "VACUUM", opType: "generic", title: "整理表碎片" } },
+      { label: "确认重排 id…", action: { kind: "confirmReorder" } },
       { label: "扫描原始数据", action: { kind: "command", command: "SCAN", opType: "generic", title: "扫描原始数据" } }
     ]
   },
@@ -1145,11 +1445,6 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     label: "工具与观测",
     key: "tools",
     items: [
-      { section: true, label: "界面与日志" },
-      { label: "设置(Settings)", action: { kind: "settings" } },
-      { label: "日志窗口", action: { kind: "logWindow" } },
-      { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } },
-      { divider: true, label: "-" },
       { section: true, label: "压测与跑批" },
       { label: "百万级性能压测(可执行)...", action: { kind: "perfBench" } },
       { label: "Concurrent Pressure 压测...", action: { kind: "pressureBench" } },
@@ -1247,7 +1542,13 @@ watch(
 );
 
 function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
-  const safeAccent = /^#[0-9a-f]{6}$/i.test(String(input.accent ?? "")) ? String(input.accent) : defaultSettings.accent;
+  const rawAccent = String(input.accent ?? "").trim();
+  const safeAccent = normalizeHexColor(rawAccent, defaultSettings.accent);
+  const safeTextMain = normalizeHexColor(String(input.textMain ?? "").trim(), defaultSettings.textMain);
+  const safeTextRegular = normalizeHexColor(String(input.textRegular ?? "").trim(), defaultSettings.textRegular);
+  const safeTextSoft = normalizeHexColor(String(input.textSoft ?? "").trim(), defaultSettings.textSoft);
+  const safePageBg = normalizeHexColor(String(input.pageBg ?? "").trim(), defaultSettings.pageBg);
+  const safeTableBg = normalizeHexColor(String(input.tableBg ?? "").trim(), defaultSettings.tableBg);
   const bgMode = input.bgMode === "image" ? "image" : "gradient";
   const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
   const num = (v: unknown, fallback: number) => {
@@ -1256,11 +1557,16 @@ function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
   };
   return {
     accent: safeAccent,
+    textMain: safeTextMain,
+    textRegular: safeTextRegular,
+    textSoft: safeTextSoft,
+    pageBg: safePageBg,
+    tableBg: safeTableBg,
     bgMode,
     bgImageUrl: String(input.bgImageUrl ?? ""),
     bgImageOpacity: clamp(num(input.bgImageOpacity, defaultSettings.bgImageOpacity), 0.05, 0.8),
     panelOpacity: clamp(num(input.panelOpacity, defaultSettings.panelOpacity), 0.6, 1),
-    tableViewOpacity: clamp(num(input.tableViewOpacity, defaultSettings.tableViewOpacity), 0.35, 1),
+    tableViewOpacity: clamp(num(input.tableViewOpacity, defaultSettings.tableViewOpacity), 0.15, 1),
     logPanelOpacity: clamp(num(input.logPanelOpacity, defaultSettings.logPanelOpacity), 0.35, 1),
     fontScale: clamp(num(input.fontScale, defaultSettings.fontScale), 0.9, 1.2),
     denseMode: Boolean(input.denseMode),
@@ -1271,7 +1577,7 @@ function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
     logFontScale: clamp(num(input.logFontScale, defaultSettings.logFontScale), 0.88, 1.25),
     logLineHeight: clamp(num(input.logLineHeight, defaultSettings.logLineHeight), 1.3, 1.9),
     borderContrast: clamp(num(input.borderContrast, defaultSettings.borderContrast), 0.75, 1.4),
-    panelBrightness: clamp(num(input.panelBrightness, defaultSettings.panelBrightness), 0.85, 1.2),
+    panelBrightness: clamp(num(input.panelBrightness, defaultSettings.panelBrightness), 0.5, 1.2),
     logHighlightIntensity: clamp(num(input.logHighlightIntensity, defaultSettings.logHighlightIntensity), 0.75, 1.4)
   };
 }
@@ -1279,6 +1585,11 @@ function sanitizeSettings(input: Partial<UiSettings>): UiSettings {
 function sameSettings(a: UiSettings, b: UiSettings) {
   return (
     a.accent === b.accent &&
+    a.textMain === b.textMain &&
+    a.textRegular === b.textRegular &&
+    a.textSoft === b.textSoft &&
+    a.pageBg === b.pageBg &&
+    a.tableBg === b.tableBg &&
     a.bgMode === b.bgMode &&
     a.bgImageUrl === b.bgImageUrl &&
     a.bgImageOpacity === b.bgImageOpacity &&
@@ -1400,6 +1711,7 @@ function isReversible(item: UndoUnit) {
 }
 
 async function viewOperationLog(item: UndoUnit) {
+  if (stackPanelLockedAfterReorder.value) return;
   const all = logs.value.join("\n");
   const lines = all.split(/\r?\n/);
   const firstForward = item.ops[0]?.forward || "";
@@ -1445,6 +1757,7 @@ async function viewOperationLog(item: UndoUnit) {
 }
 
 async function selectStackItem(item: UndoUnit) {
+  if (stackPanelLockedAfterReorder.value) return;
   selectedStackKey.value = stackKey(item);
   stackPreviewUnit.value = item;
 }
@@ -1814,40 +2127,6 @@ async function deleteRow(row: string[]) {
   const ok = await openUiMessage("confirm", "确认删除", `确认删除行 id=${id} ?`);
   if (!ok) return;
   await runCommand(`DELETE(${id})`, { opType: "data_delete", title: `删除行 id=${id}` });
-  await reindexIds();
-}
-
-async function reindexIds() {
-  if (!state.value.currentTable.trim()) return;
-  // Fetch all rows by paging with stable order.
-  const allRows: string[][] = [];
-  const headers = tableViewData.value.headers;
-  const pageSize = 500;
-  for (let p = 1; p <= 2000; p += 1) {
-    const pr = await invoke<PageResult>("query_page", {
-      pageNo: p,
-      pageSize,
-      orderKey: "id",
-      descending: false
-    });
-    const tv = pr.headers.length === 1 && pr.headers[0] === "raw" ? tableViewData.value : pr;
-    const rows = (tv.rows ?? []).filter((r) => Array.isArray(r) && r.length >= 2);
-    if (!rows.length) break;
-    allRows.push(...rows);
-    if (rows.length < pageSize) break;
-  }
-
-  // Rebuild table with consecutive ids.
-  const cmds: string[] = [];
-  cmds.push("RESET");
-  for (let i = 0; i < allRows.length; i += 1) {
-    const r = allRows[i];
-    const newId = String(i + 1);
-    const args = buildReindexInsertArgs(headers, r, newId);
-    cmds.push(`INSERT(${args})`);
-  }
-  await runScriptText(cmds.join("\n"));
-  await refreshPage();
 }
 
 async function computeNextRowId(): Promise<string> {
@@ -2110,6 +2389,9 @@ function buildUndoUnit(
 }
 
 function pushHistoryUnit(unit: UndoUnit) {
+  if (stackPanelLockedAfterReorder.value) {
+    stackPanelLockedAfterReorder.value = false;
+  }
   undoStack.value.push(unit);
   if (undoStack.value.length > 1000) undoStack.value.shift();
   redoStack.value = [];
@@ -2136,6 +2418,7 @@ async function loadStackState() {
     for (const w of warnings) {
       logLine(`[STACK][WARN] ${w}`);
     }
+    stackPanelLockedAfterReorder.value = false;
   } catch (e) {
     logLine(`[STACK][WARN] load failed: ${String(e)}`);
   }
@@ -2179,6 +2462,59 @@ function trackTxnCommand(op: UndoOp) {
     return;
   }
   txnRecorder.value.pendingOps.push(op);
+}
+
+async function confirmReorderIdsFromToolbar() {
+  if (!state.value.currentTable?.trim()) {
+    await openUiMessage("alert", "未选择表", "请先在左侧选择并打开当前表。");
+    return;
+  }
+  const ok = await openUiMessage(
+    "confirm",
+    "确认重排 id",
+    "请确认：已删除的行不需要通过 WAL / 时间点恢复。\n\n执行后当前表所有逻辑行将按旧 id 升序重编号为 1..N；主键必须为 id。此操作不可逆。"
+  );
+  if (!ok) return;
+  await runConfirmReorderCommand();
+}
+
+/** CONFIRM_REORDER: on real rewrite, clear undo/redo + txn recorder and seal the stack panel; on `[REORDER] noop` leave stacks unchanged. */
+async function runConfirmReorderCommand() {
+  busy.value = true;
+  try {
+    const exec = await invoke<CommandExecResult>("execute_command_ex", { command: "CONFIRM_REORDER" });
+    const result = exec.output ?? "";
+    logLine("> CONFIRM_REORDER");
+    logLine(result);
+    const failed = shouldStopAndSkipHistory("CONFIRM_REORDER", result, exec.errorCode ?? null);
+    if (!failed) {
+      applyStateSideEffects("CONFIRM_REORDER");
+      const noop = /\[REORDER\]\s+noop\b/i.test(result);
+      if (!noop) {
+        undoStack.value = [];
+        redoStack.value = [];
+        stackExecTraceByUnitId.value = {};
+        txnRecorder.value = {
+          active: false,
+          txnId: "",
+          currentSavepoint: "__autosave__",
+          pendingOps: []
+        };
+        selectedStackKey.value = "";
+        stackPreviewUnit.value = null;
+        stackUndoPage.value = 1;
+        stackRedoPage.value = 1;
+        stackPanelLockedAfterReorder.value = true;
+        await persistStackState();
+      }
+    } else {
+      await openUiMessage("alert", "重排 id 失败", (result || "").trim().slice(0, 900) || "命令执行失败。");
+    }
+    await refreshTables();
+    await refreshPage();
+  } finally {
+    busy.value = false;
+  }
 }
 
 async function runCommand(
@@ -2463,6 +2799,7 @@ function redoGlobalIndexFromPaged(idx: number): number {
 }
 
 async function undoToIndex(targetIndex: number) {
+  if (stackPanelLockedAfterReorder.value) return;
   if (busy.value) return;
   if (targetIndex < 0 || targetIndex >= undoStack.value.length) return;
   const steps = undoStack.value.length - targetIndex;
@@ -2512,6 +2849,7 @@ async function undoToIndex(targetIndex: number) {
 }
 
 async function redoToIndex(targetIndex: number, editable: boolean) {
+  if (stackPanelLockedAfterReorder.value) return;
   if (busy.value) return;
   if (targetIndex < 0 || targetIndex >= redoStack.value.length) return;
   const steps = redoStack.value.length - targetIndex;
@@ -2557,6 +2895,7 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
 }
 
 async function undo() {
+  if (stackPanelLockedAfterReorder.value) return;
   const item = undoStack.value[undoStack.value.length - 1];
   if (!item) return;
   stackPreviewUnit.value = item;
@@ -2599,6 +2938,7 @@ async function undo() {
 }
 
 async function redo() {
+  if (stackPanelLockedAfterReorder.value) return;
   if (!canRedo.value) return;
   const last = redoStack.value[redoStack.value.length - 1];
   if (!last) return;
@@ -2630,6 +2970,7 @@ async function redo() {
 }
 
 async function redoFromStack(stackIndex: number, editable: boolean) {
+  if (stackPanelLockedAfterReorder.value) return;
   const item = redoStack.value[stackIndex];
   if (!item) return;
   if (busy.value) return;
@@ -2697,6 +3038,7 @@ async function setWorkspace() {
   await invoke("set_workspace", { dataDir: dir });
   const newState = await invoke<State>("get_state");
   state.value = newState;
+  stackPanelLockedAfterReorder.value = false;
   checkWorkspacePathOrWarn(state.value.dataDir);
   page.value = 1;
   await refreshTables();
@@ -2907,6 +3249,13 @@ async function runMenuAction(action: MenuAction) {
     showSettingsModal.value = true;
     return;
   }
+  if (action.kind === "applyPreset") {
+    const preset = settingsPresets.find((p) => p.key === action.presetKey);
+    if (preset) {
+      applySettingsPreset(preset);
+    }
+    return;
+  }
   if (action.kind === "createTableWizard") {
     openCreateTableWizard();
     return;
@@ -3011,6 +3360,16 @@ async function runMenuAction(action: MenuAction) {
   }
   if (action.kind === "exportBundle") {
     showExportModal.value = true;
+    return;
+  }
+  if (action.kind === "confirmReorder") {
+    const ok = await openUiMessage(
+      "confirm",
+      "确认重排 id",
+      "请确认：已删除的行不需要通过 WAL / 时间点恢复。\n\n执行后当前表所有逻辑行将按旧 id 升序重编号为 1..N；主键必须为 id。此操作不可逆。"
+    );
+    if (!ok) return;
+    await runConfirmReorderCommand();
     return;
   }
   if (action.kind === "dialog") {
@@ -3178,20 +3537,22 @@ onUnmounted(() => {
 
 <template>
   <div v-if="viewMode === 'log'" class="log-only">
-    <h2>独立日志窗口</h2>
-    <div class="log-tools">
-      <el-select v-model="logFilterKind" size="small" style="width: 120px">
-        <el-option label="全部" value="all" />
-        <el-option label="命令" value="cmd" />
-        <el-option label="错误" value="error" />
-        <el-option label="成功" value="success" />
-        <el-option label="状态" value="meta" />
-      </el-select>
-      <el-input v-model="logKeyword" size="small" clearable placeholder="筛选关键词" />
-      <el-button size="small" :type="logAutoFollow ? 'primary' : undefined" @click="toggleLogAutoFollow">
-        {{ logAutoFollow ? "跟随中" : "已暂停" }}
-      </el-button>
-    </div>
+    <header class="log-only-header">
+      <h2 class="log-only-title">独立日志窗口</h2>
+      <div class="log-tools">
+        <el-select v-model="logFilterKind" size="small" style="width: 120px">
+          <el-option label="全部" value="all" />
+          <el-option label="命令" value="cmd" />
+          <el-option label="错误" value="error" />
+          <el-option label="成功" value="success" />
+          <el-option label="状态" value="meta" />
+        </el-select>
+        <el-input v-model="logKeyword" size="small" clearable placeholder="筛选关键词" />
+        <el-button size="small" :type="logAutoFollow ? 'primary' : undefined" @click="toggleLogAutoFollow">
+          {{ logAutoFollow ? "跟随中" : "已暂停" }}
+        </el-button>
+      </div>
+    </header>
     <div ref="logScrollPaneEl" class="logs command-output-box" @scroll="onLogScroll">
       <div
         v-for="(ln, idx) in visibleLogs"
@@ -3205,7 +3566,9 @@ onUnmounted(() => {
   </div>
 
   <div v-else-if="viewMode === 'cli'" class="cli-only">
-    <h2>newdb 交互式 CLI（独立进程持久会话）</h2>
+    <header class="cli-only-header">
+      <h2 class="cli-only-title">newdb 交互式 CLI（独立进程持久会话）</h2>
+    </header>
     <div class="cli-toolbar">
       <el-button type="primary" @click="remountCliTerminal">重新连接</el-button>
       <el-button @click="teardownCliTerminal">断开会话</el-button>
@@ -3227,6 +3590,10 @@ onUnmounted(() => {
     :style="layoutStyle"
   >
     <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="sidebar-brand-mark">newdb</span>
+        <span class="sidebar-brand-sub">控制台</span>
+      </div>
       <div class="sidebar-section">
         <div class="sidebar-header">
           <div class="sidebar-title">架构 / 表</div>
@@ -3239,7 +3606,7 @@ onUnmounted(() => {
           <span class="mono">workspace:</span>
           <span class="sidebar-subtitle-path">{{ state.dataDir || "(未设置)" }}</span>
         </div>
-        <div style="height: 8px" />
+        <div class="v-spacer-8" />
         <el-input
           v-model="tableSearch"
           size="small"
@@ -3341,7 +3708,7 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
-      <div class="stack-panel">
+      <div class="stack-panel" :class="{ 'stack-panel--sealed': stackPanelLockedAfterReorder }">
         <div class="stack-header">
           <div class="stack-title">事务栈</div>
           <div class="stack-counts">
@@ -3349,13 +3716,15 @@ onUnmounted(() => {
             <span class="stack-chip">R {{ redoStack.length }}</span>
           </div>
         </div>
+        <div class="stack-panel-interactive" :inert="stackPanelLockedAfterReorder">
         <div class="stack-actions">
-          <button class="secondary" :disabled="!canUndo || busy" @click="undo">撤销</button>
-          <button class="secondary" :disabled="!canRedo || busy" @click="redo">重做</button>
+          <button class="secondary" :disabled="!canUndo || busy || stackPanelLockedAfterReorder" @click="undo">撤销</button>
+          <button class="secondary" :disabled="!canRedo || busy || stackPanelLockedAfterReorder" @click="redo">重做</button>
         </div>
         <div class="stack-list">
           <div v-if="undoStack.length === 0 && redoStack.length === 0" class="stack-empty">
-            暂无可撤销/重做操作
+            <template v-if="stackPanelLockedAfterReorder">已重排 id：撤销/重做历史已清空。产生新的可撤销操作后将恢复事务栈。</template>
+            <template v-else>暂无可撤销/重做操作</template>
           </div>
           <div
             v-for="(item, idx) in undoStackPaged"
@@ -3429,6 +3798,7 @@ onUnmounted(() => {
         <div v-if="stackPreviewUnit" class="stack-empty" style="margin-top:8px;">
           预览：{{ stackPreviewUnit.savepointName }} | tables={{ stackPreviewUnit.tablesTouched.join(',') || 'n/a' }} | status={{ stackPreviewUnit.status }}
         </div>
+        </div>
       </div>
     </aside>
     <div
@@ -3441,23 +3811,53 @@ onUnmounted(() => {
 
     <section class="content" :class="{ 'console-collapsed': logCollapsed }">
       <div class="menu-bar">
+        <div class="menu-bar-brand" aria-hidden="true">
+          <span class="menu-bar-brand-mark">newdb</span>
+        </div>
+        <div class="menu-bar-menus">
         <el-dropdown v-for="menu in topMenus" :key="menu.key" trigger="click">
           <el-button class="menu-title" text>{{ menu.label }}</el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item
-                v-for="(item, menuIdx) in menu.items"
-                :key="`${menu.key}-${menuIdx}`"
-                :divided="!!item.divider"
-                :disabled="!!item.section"
-                :class="{ 'menu-dropdown-section': item.section }"
-                @click="!item.section && item.action && runMenuAction(item.action)"
-              >
-                <span v-if="!item.divider">{{ item.label }}</span>
-              </el-dropdown-item>
+              <template v-for="(item, menuIdx) in menu.items" :key="`${menu.key}-${menuIdx}`">
+                <el-dropdown-item
+                  v-if="item.children?.length"
+                  class="menu-dropdown-submenu-host"
+                  :divided="!!item.divider"
+                  @click.stop
+                >
+                  <el-dropdown trigger="click" placement="right-start" :teleported="true">
+                    <span class="menu-dropdown-submenu-title">
+                      {{ item.label }}
+                      <span class="menu-dropdown-submenu-chevron" aria-hidden="true">›</span>
+                    </span>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item
+                          v-for="(sub, subIdx) in item.children"
+                          :key="`${menu.key}-${menuIdx}-sub-${subIdx}`"
+                          @click="sub.action && runMenuAction(sub.action)"
+                        >
+                          {{ sub.label }}
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                </el-dropdown-item>
+                <el-dropdown-item
+                  v-else
+                  :divided="!!item.divider"
+                  :disabled="!!item.section"
+                  :class="{ 'menu-dropdown-section': item.section }"
+                  @click="!item.section && item.action && runMenuAction(item.action)"
+                >
+                  <span v-if="!item.divider">{{ item.label }}</span>
+                </el-dropdown-item>
+              </template>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        </div>
       </div>
 
       <div class="toolbar">
@@ -3502,7 +3902,10 @@ onUnmounted(() => {
                 @click="activeTableKey = t.key"
               >
                 {{ t.table }}
-                <span style="margin-left:6px; opacity:0.8;" @click.stop="closeTableTab(t.key)">×</span>
+                <span class="tab-pill-close" title="关闭标签" @click.stop="closeTableTab(t.key)">×</span>
+              </el-button>
+              <el-button size="small" type="warning" plain :disabled="busy" @click="confirmReorderIdsFromToolbar">
+                确认重排 id
               </el-button>
             </div>
             <div class="open-table-tabs-right" v-else>
@@ -3581,9 +3984,11 @@ onUnmounted(() => {
         </template>
 
         <template v-else>
-          <textarea v-model="scriptText" />
-          <div style="height: 8px" />
-          <el-button type="primary" :icon="VideoPlay" @click="runScript" :disabled="busy">执行脚本</el-button>
+          <div class="mdb-editor-panel">
+            <textarea v-model="scriptText" class="mdb-textarea" placeholder="在此输入 MDB 脚本…" />
+            <div class="v-spacer-8" />
+            <el-button type="primary" :icon="VideoPlay" @click="runScript" :disabled="busy">执行脚本</el-button>
+          </div>
         </template>
       </div>
 
@@ -4133,15 +4538,26 @@ onUnmounted(() => {
       </template>
       <div class="settings-preset-row">
         <span class="settings-preset-label">预设</span>
-        <el-button
-          v-for="preset in settingsPresets"
-          :key="preset.key"
-          size="small"
-          plain
-          @click="applySettingsPreset(preset)"
-        >
-          {{ preset.label }}
-        </el-button>
+        <div class="settings-preset-grid">
+          <el-button
+            v-for="preset in settingsPresets"
+            :key="preset.key"
+            size="small"
+            plain
+            class="settings-preset-btn"
+            @click="applySettingsPreset(preset)"
+          >
+            <span class="preset-swatch-strip" aria-hidden="true">
+              <span
+                v-for="(c, si) in previewPresetColors(preset)"
+                :key="`${preset.key}-${si}`"
+                class="ps"
+                :style="{ background: c }"
+              />
+            </span>
+            {{ preset.label }}
+          </el-button>
+        </div>
       </div>
       <div class="settings-tools-row">
         <el-button size="small" @click="openSettingsImport">导入 JSON</el-button>
@@ -4175,9 +4591,60 @@ onUnmounted(() => {
           <div class="settings-card-title">主题与背景</div>
           <el-form label-width="120px">
             <el-form-item label="主题色">
-              <div style="display:flex; gap:8px; align-items:center; width:100%;">
-                <input type="color" v-model="settings.accent" />
+              <div class="settings-color-row">
+                <input type="color" v-model="settings.accent" aria-label="主题色" />
                 <el-input v-model="settings.accent" placeholder="#3b82f6" />
+              </div>
+            </el-form-item>
+            <el-form-item label="界面文字">
+              <div class="settings-color-grid">
+                <div class="settings-color-field">
+                  <label>主文字</label>
+                  <div class="settings-color-row">
+                    <input type="color" v-model="settings.textMain" aria-label="主文字色" />
+                    <el-input v-model="settings.textMain" placeholder="#dbe7ff" />
+                  </div>
+                </div>
+                <div class="settings-color-field">
+                  <label>次要文字</label>
+                  <div class="settings-color-row">
+                    <input type="color" v-model="settings.textRegular" aria-label="次要文字色" />
+                    <el-input v-model="settings.textRegular" placeholder="#c7d2fe" />
+                  </div>
+                </div>
+                <div class="settings-color-field">
+                  <label>弱化 / 提示</label>
+                  <div class="settings-color-row">
+                    <input type="color" v-model="settings.textSoft" aria-label="弱化文字色" />
+                    <el-input v-model="settings.textSoft" placeholder="#93c5fd" />
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top: 10px;">
+                <el-button size="small" plain @click="resetThemeTextColors">文字色恢复默认</el-button>
+                <span class="mini-tip" style="margin-left: 8px;">支持 #RGB / #RRGGBB；与主题色可任意组合</span>
+              </div>
+            </el-form-item>
+            <el-form-item label="整体背景">
+              <div class="settings-color-grid">
+                <div class="settings-color-field" style="grid-column: 1 / -1">
+                  <label>页面基色（侧栏外区域、body 叠层渐变锚点）</label>
+                  <div class="settings-color-row">
+                    <input type="color" v-model="settings.pageBg" aria-label="整体背景色" />
+                    <el-input v-model="settings.pageBg" placeholder="#080d18" />
+                  </div>
+                </div>
+                <div class="settings-color-field" style="grid-column: 1 / -1">
+                  <label>主表格区底色（数据表 / Element 表格）</label>
+                  <div class="settings-color-row">
+                    <input type="color" v-model="settings.tableBg" aria-label="主表格背景色" />
+                    <el-input v-model="settings.tableBg" placeholder="#08121f" />
+                  </div>
+                </div>
+              </div>
+              <div style="margin-top: 10px;">
+                <el-button size="small" plain @click="resetCanvasBgColors">背景与表格恢复默认</el-button>
+                <span class="mini-tip" style="margin-left: 8px;">「渐变背景」下主内容区叠层会随基色与主题色混合；透明度在「布局」里可调</span>
               </div>
             </el-form-item>
             <el-form-item label="背景模式">
@@ -4192,7 +4659,7 @@ onUnmounted(() => {
             <el-form-item label="本地图片">
               <div style="display:flex; gap:8px; align-items:center;">
                 <el-button @click="pickBackgroundFile">选择图片文件</el-button>
-                <span style="font-size:12px; color:#93c5fd;">已自动转为本地内嵌背景</span>
+                <span class="mini-tip">已自动转为本地内嵌背景</span>
                 <input
                   ref="bgFileInput"
                   type="file"
@@ -4233,17 +4700,20 @@ onUnmounted(() => {
                 <span class="settings-slider-value mono">{{ settings.panelOpacity.toFixed(2) }}</span>
               </div>
             </el-form-item>
-            <el-form-item label="表格视图透明度">
+            <el-form-item label="表格区不透明度">
               <div class="settings-slider-row">
                 <el-slider
                   v-model="settings.tableViewOpacity"
-                  :min="0.35"
+                  :min="0.15"
                   :max="1"
                   :step="0.01"
                   @input="onSettingsSliderInput"
                   @change="onSettingsSliderChange"
                 />
                 <span class="settings-slider-value mono">{{ settings.tableViewOpacity.toFixed(2) }}</span>
+              </div>
+              <div class="mini-tip" style="margin-top: 6px; line-height: 1.4">
+                数值越低表格越「透」，底下渐变或壁纸越明显；默认已略调低便于看背景。
               </div>
             </el-form-item>
             <el-form-item label="日志面板透明度">
@@ -4365,7 +4835,7 @@ onUnmounted(() => {
               <div class="settings-slider-row">
                 <el-slider
                   v-model="settings.panelBrightness"
-                  :min="0.85"
+                  :min="0.5"
                   :max="1.2"
                   :step="0.01"
                   @input="onSettingsSliderInput"

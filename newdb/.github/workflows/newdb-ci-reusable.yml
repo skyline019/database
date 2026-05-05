@@ -1,0 +1,497 @@
+name: newdb-ci
+
+on:
+  workflow_call:
+
+jobs:
+  c-api-abi-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate C API ABI and symbol surface
+        run: python3 newdb/scripts/validate/check_c_api_abi.py --expected-abi 1
+
+  observability-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate perf summary schema contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("newdb/scripts/results/ci_sample_perf_summary.json")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          p.write_text(
+              json.dumps(
+                  {
+                      "schema_version": "newdb.perf_summary.v1",
+                      "timestamp": "2026-04-24T00:00:00Z",
+                      "data_dir": "ci://sample",
+                      "table": "qa_regression",
+                      "perf": {
+                          "txn_normal_avg_ms": 1.0,
+                          "query_avg_ms_max": 2.0,
+                          "where_policy_rejects": 0,
+                          "where_policy_fallbacks": 0,
+                      },
+                  }
+              ),
+              encoding="utf-8",
+          )
+          PY
+          python3 newdb/scripts/validate/validate_perf_summary.py newdb/scripts/results/ci_sample_perf_summary.json
+
+  telemetry-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate telemetry JSONL contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("newdb/scripts/results/ci_sample_telemetry.jsonl")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          events = [
+              {
+                  "schema_version": "newdb.telemetry.v1",
+                  "timestamp": "2026-04-24T00:00:00Z",
+                  "run_id": "testloop_20260424_000000",
+                  "source": "test_loop",
+                  "env": "ci",
+                  "build": "build-ci",
+                  "profile": "gate",
+                  "phase": "prep",
+                  "metrics": {"bench_prep_rows": 1000, "bench_prep_chunk_size": 500},
+              },
+              {
+                  "schema_version": "newdb.telemetry.v1",
+                  "timestamp": "2026-04-24T00:00:01Z",
+                  "run_id": "testloop_20260424_000000",
+                  "source": "test_loop",
+                  "env": "ci",
+                  "build": "build-ci",
+                  "profile": "gate",
+                  "phase": "summary",
+                  "metrics": {"summary_path": "scripts/results/test_loop_summary.json"},
+              },
+          ]
+          p.write_text("\n".join(json.dumps(x) for x in events) + "\n", encoding="utf-8")
+          PY
+          python3 newdb/scripts/validate/validate_telemetry_event.py newdb/scripts/results/ci_sample_telemetry.jsonl
+
+  runtime-stats-schema-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate runtime stats JSONL contract
+        run: |
+          python3 - <<'PY'
+          import json
+          import pathlib
+          p = pathlib.Path("newdb/scripts/results/ci_sample_runtime_stats.jsonl")
+          p.parent.mkdir(parents=True, exist_ok=True)
+          rows = [
+              {
+                  "schema_version": "newdb.runtime_stats.v1",
+                  "ts_ms": 1,
+                  "run_id": "pressure_ci_001",
+                  "label": "pressure_before",
+                  "stats": {
+                      "walsync": "normal",
+                      "normal_interval_ms": 20,
+                      "autovacuum": True,
+                      "vacuum_ops_threshold": 25,
+                      "vacuum_min_interval_sec": 0,
+                      "vacuum_trigger_count": 0,
+                      "vacuum_execute_count": 0,
+                      "vacuum_cooldown_skip_count": 0,
+                      "vacuum_compact_success_count": 0,
+                      "vacuum_compact_failure_count": 0,
+                      "vacuum_compact_bytes_reclaimed": 0,
+                      "vacuum_compact_last_elapsed_ms": 0,
+                      "vacuum_queue_depth": 0,
+                      "vacuum_queue_depth_peak": 0,
+                      "write_conflicts": 0,
+                      "lock_wait_ms_total": 0,
+                      "lock_wait_max_ms": 0,
+                      "lock_deadlock_detect_count": 0,
+                      "lock_deadlock_victim_count": 0,
+                      "txn_begin_lock_conflicts": 0,
+                      "wal_compact_count": 0,
+                      "wal_recovery_runs": 0,
+                      "wal_recovery_undo_ops": 0,
+                      "wal_recovery_last_elapsed_ms": 0,
+                      "wal_recovery_analyze_ms": 0,
+                      "wal_recovery_undo_ms": 0,
+                      "wal_recovery_finalize_ms": 0,
+                      "wal_recovery_records_scanned": 0,
+                      "wal_recovery_dangling_txns": 0,
+                      "wal_group_commit_count": 0,
+                      "wal_group_commit_batch_commits": 0,
+                      "wal_group_commit_pending_commits": 0,
+                      "txn_commit_count": 0,
+                      "txn_commit_p95_ms": 0,
+                      "txn_commit_max_ms": 0,
+                      "wal_bytes_since_start": 0,
+                      "wal_bytes_per_commit_avg": 0,
+                      "lock_wait_p95_ms": 0,
+                      "scheduler_throttle_count": 0,
+                      "hot_index_enabled": True,
+                      "segment_target_bytes": 0,
+                      "lsm_memtable_flush_count": 0,
+                      "lsm_compaction_count": 0,
+                      "lsm_segment_count": 0,
+                      "lsm_memtable_bytes": 0,
+                      "lsm_read_segments_scanned": 0,
+                      "lsm_read_segments_scanned_p95": 0,
+                      "lsm_compaction_bytes_in": 0,
+                      "lsm_compaction_bytes_out": 0,
+                      "wal_adaptive_enabled": False,
+                      "group_commit_window_ms": 0,
+                      "group_commit_max_batch_commits": 1,
+                  },
+              },
+              {
+                  "schema_version": "newdb.runtime_stats.v1",
+                  "ts_ms": 2,
+                  "run_id": "pressure_ci_001",
+                  "label": "pressure_after",
+                  "stats": {
+                      "walsync": "normal",
+                      "normal_interval_ms": 20,
+                      "autovacuum": True,
+                      "vacuum_ops_threshold": 25,
+                      "vacuum_min_interval_sec": 0,
+                      "vacuum_trigger_count": 2,
+                      "vacuum_execute_count": 2,
+                      "vacuum_cooldown_skip_count": 0,
+                      "vacuum_compact_success_count": 2,
+                      "vacuum_compact_failure_count": 0,
+                      "vacuum_compact_bytes_reclaimed": 4096,
+                      "vacuum_compact_last_elapsed_ms": 8,
+                      "vacuum_queue_depth": 0,
+                      "vacuum_queue_depth_peak": 2,
+                      "write_conflicts": 0,
+                      "lock_wait_ms_total": 0,
+                      "lock_wait_max_ms": 0,
+                      "lock_deadlock_detect_count": 0,
+                      "lock_deadlock_victim_count": 0,
+                      "txn_begin_lock_conflicts": 0,
+                      "wal_compact_count": 0,
+                      "wal_recovery_runs": 1,
+                      "wal_recovery_undo_ops": 0,
+                      "wal_recovery_last_elapsed_ms": 3,
+                      "wal_recovery_analyze_ms": 1,
+                      "wal_recovery_undo_ms": 1,
+                      "wal_recovery_finalize_ms": 1,
+                      "wal_recovery_records_scanned": 10,
+                      "wal_recovery_dangling_txns": 0,
+                      "wal_group_commit_count": 1,
+                      "wal_group_commit_batch_commits": 2,
+                      "wal_group_commit_pending_commits": 0,
+                      "txn_commit_count": 1,
+                      "txn_commit_p95_ms": 1,
+                      "txn_commit_max_ms": 1,
+                      "wal_bytes_since_start": 0,
+                      "wal_bytes_per_commit_avg": 0,
+                      "lock_wait_p95_ms": 0,
+                      "scheduler_throttle_count": 0,
+                      "hot_index_enabled": True,
+                      "segment_target_bytes": 0,
+                      "lsm_memtable_flush_count": 1,
+                      "lsm_compaction_count": 0,
+                      "lsm_segment_count": 1,
+                      "lsm_memtable_bytes": 0,
+                      "lsm_read_segments_scanned": 1,
+                      "lsm_read_segments_scanned_p95": 1,
+                      "lsm_compaction_bytes_in": 1024,
+                      "lsm_compaction_bytes_out": 900,
+                      "wal_adaptive_enabled": False,
+                      "group_commit_window_ms": 0,
+                      "group_commit_max_batch_commits": 1,
+                  },
+              },
+          ]
+          p.write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
+          PY
+          python3 newdb/scripts/validate/validate_runtime_stats.py newdb/scripts/results/ci_sample_runtime_stats.jsonl
+
+  linux-gcc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S newdb -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Runtime report compact gate regression
+        run: >
+          python3 newdb/scripts/validate/test_runtime_report_compact_gates.py
+          build/newdb_runtime_report
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build
+          --profile pr
+          --gate-fail-json-out newdb/scripts/results/linux_gcc_gate_fail.json
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+      - name: Validate runtime stats fixture (contract)
+        run: >
+          python3 newdb/scripts/validate/validate_runtime_stats.py
+          newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+
+  # Release-oriented gate: same contract as PR linux-gcc but Release build + `ctest -L newdb` subset.
+  linux-release-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (Release)
+        run: cmake -S newdb -B build-rel-gate -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-rel-gate --parallel
+
+      - name: Runtime report compact gate regression
+        run: >
+          python3 newdb/scripts/validate/test_runtime_report_compact_gates.py
+          build-rel-gate/newdb_runtime_report
+
+      - name: Test (newdb label)
+        run: ctest --test-dir build-rel-gate -L newdb --output-on-failure
+
+      - name: Download cross-host baseline manifests (best-effort)
+        uses: actions/download-artifact@v4
+        with:
+          name: newdb-runtime-archive-manifest
+          path: newdb/scripts/results/baselines
+        continue-on-error: true
+
+      - name: Bench gate (release profile + runtime JSONL contract + release-grade thresholds)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build-rel-gate
+          --profile release
+          --runtime-jsonl newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          --runtime-last-n 2
+          --gate-fail-json-out newdb/scripts/results/linux_release_gate_fail.json
+          --baseline-host-index newdb/scripts/results/baselines/host_index.json
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+          --max-compact-debt-bytes-peak 100000000000
+          --min-page-cache-hit-ratio 0.0
+          --max-memory-budget-reject-delta 1000000000
+          --max-table-storage-health-fragmentation-ratio 0.95
+
+  # Second-line gate: JSONL contract + storage/WAL recovery ceilings (see docs/ci/PERF_AND_CI_BUDGETS.md §3 / §4).
+  linux-bench-gate-runtime-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S newdb -B newdb/build-rtc -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build newdb/build-rtc --parallel
+
+      - name: Write v2 baseline archive manifest
+        run: >
+          python3 newdb/scripts/ci/capture_baseline.py
+          --write-archive-manifest newdb/scripts/results/ci_baseline_manifest.json
+          --build-dir newdb/build-rtc
+
+      - name: Upload baseline manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-runtime-archive-manifest
+          path: newdb/scripts/results/ci_baseline_manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Download cross-host baseline manifests (best-effort)
+        uses: actions/download-artifact@v4
+        with:
+          name: newdb-runtime-archive-manifest
+          path: newdb/scripts/results/baselines
+        continue-on-error: true
+
+      - name: Bench gate contract JSONL (storage + WAL recovery ceilings)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py newdb/build-rtc
+          --profile pr
+          --runtime-jsonl newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          --runtime-last-n 2
+          --gate-fail-json-out newdb/scripts/results/runtime_gate_fail.json
+          --baseline-host-index newdb/scripts/results/baselines/host_index.json
+          --max-table-storage-health-fragmentation-ratio 0.95
+          --max-table-storage-health-dead-bytes 1000000000
+          --max-compact-debt-bytes-peak 100000000000
+          --max-vacuum-health-bonus-last 100000000000
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+      - name: Emit runtime report JSON (contract fixture)
+        run: >
+          newdb/build-rtc/newdb_runtime_report
+          --input newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          --last-n 2
+          --output newdb/scripts/results/ci_runtime_report_contract.json
+
+      - name: Upload runtime contract artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-runtime-contract-bundle
+          path: |
+            newdb/scripts/results/ci_baseline_manifest.json
+            newdb/scripts/results/ci_runtime_report_contract.json
+            newdb/scripts/results/runtime_gate_fail.json
+            newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
+
+  linux-nightly-soak:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+      - name: Configure
+        run: cmake -S newdb -B build-nightly -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+      - name: Build
+        run: cmake --build build-nightly --parallel
+      - name: CTest (optional heavy soak)
+        env:
+          NEWDB_STORAGE_SOAK_HEAVY: "1"
+        run: ctest --test-dir build-nightly -L newdb --output-on-failure --timeout 900
+
+  linux-index-catalog-enforce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev python3
+
+      - name: Configure (clean build dir)
+        run: cmake -S newdb -B build-ice -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build-ice --parallel
+
+      - name: Test subset with NEWDB_INDEX_CATALOG_ENFORCE=1
+        env:
+          NEWDB_INDEX_CATALOG_ENFORCE: "1"
+        run: >
+          ctest --test-dir build-ice --output-on-failure
+          -R "IndexCatalog|Where|CiMicrobench|DispatchRouting|TxnIsolationVisibility"
+
+  linux-clang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang pkg-config libcrc32c-dev python3
+
+      - name: Configure
+        env:
+          CXX: clang++
+        run: cmake -S newdb -B build-clang -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build and test
+        run: |
+          cmake --build build-clang --parallel
+          ctest --test-dir build-clang --output-on-failure
+
+      - name: Bench gate (smoke + microbench)
+        run: >
+          python3 newdb/scripts/ci/ci_bench_gate.py build-clang
+          --profile pr
+          --gate-fail-json-out newdb/scripts/results/linux_clang_gate_fail.json
+          --max-vacuum-compact-failure-delta 0
+          --max-vacuum-queue-depth-peak 8
+          --max-wal-recovery-last-elapsed-ms 2000
+          --max-lock-deadlock-detect-delta 0
+          --max-lock-deadlock-victim-delta 0
+          --max-lock-wait-max-ms-delta 5000
+          --max-lsm-segment-count 8
+          --min-lsm-memtable-flush-delta 0
+          --max-lsm-read-segments-scanned-p95 8
+          --min-lsm-compaction-bytes-amp-efficiency 0.2
+
+  windows-clean-room:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify clean-room configure/build/test
+        shell: pwsh
+        run: >
+          .\newdb\scripts\ci\verify_clean_reconfigure.ps1
+          -BuildDir build_ci_windows
+          -Generator "Visual Studio 17 2022"
+          -BuildConfig RelWithDebInfo
+
+      - name: Hybrid CLI/DLL e2e gate (pressure + runtime summary)
+        shell: pwsh
+        run: >
+          pwsh -ExecutionPolicy Bypass -File .\newdb\scripts\ci\hybrid_e2e_gate.ps1
+          -BuildDir build_ci_windows
+          -SkipPressure

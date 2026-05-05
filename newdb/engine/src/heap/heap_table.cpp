@@ -35,6 +35,41 @@ void strip_mvcc_internal_attrs(Row& row) {
     row.attrs.erase("__mvcc_txn_id");
 }
 
+/// Append-order last writer wins per logical row id: a later tombstone removes that id from the map.
+/// Used when no MVCC snapshot is active so DELETE (__deleted) suppresses earlier physical rows.
+void heap_winners_map_no_snapshot(const HeapTable& t, std::unordered_map<int, std::size_t>& out_winners) {
+    out_winners.clear();
+    Row r;
+    for (std::size_t i = 0; i < t.heap_fingers_.size(); ++i) {
+        if (!t.decode_heap_slot(i, r)) {
+            continue;
+        }
+        if (is_tombstone_row(r)) {
+            out_winners.erase(r.id);
+            continue;
+        }
+        if (!t.is_row_visible(i, r)) {
+            continue;
+        }
+        out_winners[r.id] = i;
+    }
+}
+
+void in_memory_winners_map_no_snapshot(const HeapTable& t, std::unordered_map<int, std::size_t>& out_winners) {
+    out_winners.clear();
+    for (std::size_t i = 0; i < t.rows.size(); ++i) {
+        const Row& row = t.rows[i];
+        if (is_tombstone_row(row)) {
+            out_winners.erase(row.id);
+            continue;
+        }
+        if (!t.is_row_visible(i, row)) {
+            continue;
+        }
+        out_winners[row.id] = i;
+    }
+}
+
 } // namespace
 
 void HeapTable::discard_lazy_storage_without_rebuild() {
@@ -203,27 +238,43 @@ void HeapTable::rebuild_indexes(const TableSchema& schema) {
     if (is_heap_storage_backed()) {
         const bool build_pk = (!schema.primary_key.empty() && schema.primary_key != "id");
         Row r;
-        for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
-            if (!decode_heap_slot(i, r)) {
-                continue;
+        if (!active_snapshot.has_value()) {
+            heap_winners_map_no_snapshot(*this, index_by_id);
+        } else {
+            for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
+                if (!decode_heap_slot(i, r)) {
+                    continue;
+                }
+                if (!is_row_visible(i, r)) {
+                    continue;
+                }
+                index_by_id[r.id] = i;
             }
-            if (!is_row_visible(i, r)) {
-                continue;
-            }
-            index_by_id[r.id] = i;
-            if (build_pk) {
+        }
+        if (build_pk) {
+            index_by_pk_value.clear();
+            for (const auto& kv : index_by_id) {
+                const std::size_t slot = kv.second;
+                Row pr;
+                if (!decode_heap_slot(slot, pr)) {
+                    continue;
+                }
                 std::string pkv;
-                if (row_get_pk_value(r, schema.primary_key, pkv)) {
-                    index_by_pk_value[pkv] = i;
+                if (row_get_pk_value(pr, schema.primary_key, pkv)) {
+                    index_by_pk_value[pkv] = slot;
                 }
             }
         }
     } else {
-        for (std::size_t i = 0; i < rows.size(); ++i) {
-            if (!is_row_visible(i, rows[i])) {
-                continue;
+        if (!active_snapshot.has_value()) {
+            in_memory_winners_map_no_snapshot(*this, index_by_id);
+        } else {
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                if (!is_row_visible(i, rows[i])) {
+                    continue;
+                }
+                index_by_id[rows[i].id] = i;
             }
-            index_by_id[rows[i].id] = i;
         }
     }
 
@@ -263,6 +314,11 @@ const Row* HeapTable::find_by_id(const int id) const {
     const auto it = index_by_id.find(id);
     if (it == index_by_id.end()) {
         if (is_heap_storage_backed()) {
+            return nullptr;
+        }
+        // If indexes were built, `id` missing means deleted (e.g. tombstone won) or absent — do not scan
+        // older physical duplicates.
+        if (!index_by_id.empty()) {
             return nullptr;
         }
         for (std::size_t i = 0; i < rows.size(); ++i) {
@@ -399,16 +455,25 @@ const std::vector<std::size_t>& HeapTable::sorted_indices(const TableSchema& sch
 
     if (is_heap_storage_backed() && order_key != "id") {
         std::vector<std::size_t> indices;
-        indices.reserve(heap_fingers_.size());
         Row probe;
-        for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
-            if (!decode_heap_slot(i, probe)) {
-                continue;
+        if (!active_snapshot.has_value()) {
+            std::unordered_map<int, std::size_t> winners;
+            heap_winners_map_no_snapshot(*this, winners);
+            indices.reserve(winners.size());
+            for (const auto& kv : winners) {
+                indices.push_back(kv.second);
             }
-            if (!is_row_visible(i, probe)) {
-                continue;
+        } else {
+            indices.reserve(heap_fingers_.size());
+            for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
+                if (!decode_heap_slot(i, probe)) {
+                    continue;
+                }
+                if (!is_row_visible(i, probe)) {
+                    continue;
+                }
+                indices.push_back(i);
             }
-            indices.push_back(i);
         }
         // Decode once per candidate slot, then sort by cached key to avoid O(n log n) repeated decode.
         std::unordered_map<std::size_t, std::string> sort_keys;
@@ -440,16 +505,25 @@ const std::vector<std::size_t>& HeapTable::sorted_indices(const TableSchema& sch
 
     if (is_heap_storage_backed() && order_key == "id") {
         std::vector<std::size_t> indices;
-        indices.reserve(heap_fingers_.size());
         Row probe;
-        for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
-            if (!decode_heap_slot(i, probe)) {
-                continue;
+        if (!active_snapshot.has_value()) {
+            std::unordered_map<int, std::size_t> winners;
+            heap_winners_map_no_snapshot(*this, winners);
+            indices.reserve(winners.size());
+            for (const auto& kv : winners) {
+                indices.push_back(kv.second);
             }
-            if (!is_row_visible(i, probe)) {
-                continue;
+        } else {
+            indices.reserve(heap_fingers_.size());
+            for (std::size_t i = 0; i < heap_fingers_.size(); ++i) {
+                if (!decode_heap_slot(i, probe)) {
+                    continue;
+                }
+                if (!is_row_visible(i, probe)) {
+                    continue;
+                }
+                indices.push_back(i);
             }
-            indices.push_back(i);
         }
         std::unordered_map<std::size_t, int> sort_ids;
         sort_ids.reserve(indices.size());
@@ -480,12 +554,21 @@ const std::vector<std::size_t>& HeapTable::sorted_indices(const TableSchema& sch
     }
 
     std::vector<std::size_t> indices;
-    indices.reserve(rows.size());
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-        if (!is_row_visible(i, rows[i])) {
-            continue;
+    if (!active_snapshot.has_value()) {
+        std::unordered_map<int, std::size_t> winners;
+        in_memory_winners_map_no_snapshot(*this, winners);
+        indices.reserve(winners.size());
+        for (const auto& kv : winners) {
+            indices.push_back(kv.second);
         }
-        indices.push_back(i);
+    } else {
+        indices.reserve(rows.size());
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (!is_row_visible(i, rows[i])) {
+                continue;
+            }
+            indices.push_back(i);
+        }
     }
     std::sort(indices.begin(), indices.end(), [&](const std::size_t ia, const std::size_t ib) {
         const Row& a = rows[ia];

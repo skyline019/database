@@ -1,4 +1,5 @@
 #include <newdb/memory_budget.h>
+#include <newdb/memory_registry.h>
 #include <newdb/page_cache.h>
 
 #include <algorithm>
@@ -45,10 +46,11 @@ std::uint64_t memory_budget_max_bytes_env() {
 
 MemoryBudgetSnapshot memory_budget_snapshot() {
     const PageCacheGlobalStats pc = page_cache_global_stats();
+    const MemoryRegistryTotals rt = memory_registry_totals();
     MemoryBudgetSnapshot s{};
     s.max_bytes = memory_budget_max_bytes_env();
-    s.used_bytes = pc.bytes_in_cache;
-    s.reject_count = pc.reject_oversized_page;
+    s.used_bytes = rt.global_used_bytes;
+    s.reject_count = rt.global_admit_rejects;
     s.eviction_events = pc.evictions;
     s.bytes_evicted_total = pc.bytes_evicted_total;
     return s;

@@ -228,3 +228,32 @@ TEST(LockKey, RowPkWriteIntentMatchesLegacyStorageKey) {
     EXPECT_EQ(LockKey::row_pk_write_intent("users", 7).to_storage_key(), "users#7");
 }
 
+TEST(LockKey, ExtendedSerializersAreStable) {
+    const auto r = LockKey::range_write_intent("users", "age", "1", "9");
+    EXPECT_EQ(r.to_storage_key(), "v2|range|users|age|1|9");
+    const auto p = LockKey::predicate_write_intent("users", "age", "x>5");
+    EXPECT_EQ(p.to_storage_key(), "v2|pred|users|age|x>5");
+    const auto ix = LockKey::index_eq_write_intent("users", "email_idx", "a@b");
+    EXPECT_EQ(ix.to_storage_key(), "v2|idx|users|email_idx|a@b");
+}
+
+TEST(TxnWriteConflict, RangeAndPredicateLockCountsFirstReserveOnly) {
+    namespace fs = std::filesystem;
+    const fs::path ws = unique_temp_subdir("txn_lock_ext");
+    TxnCoordinator c;
+    c.set_workspace_root(ws.string());
+    ASSERT_TRUE(c.begin("users").isOk());
+    std::string reason;
+    const auto rk = LockKey::range_write_intent("users", "age", "1", "10");
+    ASSERT_TRUE(c.tryReserveWriteLockKey(rk, &reason)) << reason;
+    EXPECT_EQ(c.runtimeStats().lock_key_range_count, 1u);
+    ASSERT_TRUE(c.tryReserveWriteLockKey(rk, &reason));
+    EXPECT_EQ(c.runtimeStats().lock_key_range_count, 1u);
+    const auto pk = LockKey::predicate_write_intent("users", "age", "expr1");
+    ASSERT_TRUE(c.tryReserveWriteLockKey(pk, &reason));
+    EXPECT_EQ(c.runtimeStats().lock_key_predicate_count, 1u);
+    ASSERT_TRUE(c.commit().isOk());
+    std::error_code ec;
+    fs::remove_all(ws, ec);
+}
+

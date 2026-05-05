@@ -42,7 +42,8 @@ CLI 可通过事务相关命令切换隔离标签（见 [`txn_handler.cc`](../..
 
 实现见 [`write_conflict_service.cc`](../../cli/modules/txn/coordinator/write_conflict/write_conflict_service.cc)：
 
-- **`tryReserveWriteKey(table_name, id)`**：在事务 **Active** 时，以 `table#id` 为键登记全局写意图（`g_write_intent_owner`）。
+- **`tryReserveWriteKey(table_name, id)`**：在事务 **Active** 时，以 `table#id` 为键登记全局写意图（`g_write_intent_owner`）。等价于 **`tryReserveWriteLockKey(LockKey::row_pk_write_intent(...))`**。
+- **`LockKey` / `tryReserveWriteLockKey`**（[`lock_key.h`](../../cli/modules/txn/coordinator/write_conflict/lock_key.h)）：结构化键，除主键行意图外预留 **索引等值 / 范围 / 谓词** 序列化（`to_storage_key()` 使用 `v2|idx|…`、`v2|range|…`、`v2|pred|…` 前缀，不与遗留 `table#id` 冲突）。当前 DML 仍以主键路径为主；扩展键可用于后续二级索引写协调。**Runtime**：`lock_key_range_count` / `lock_key_predicate_count` 统计各事务对范围 / 谓词键的**首次**成功预约（与 `m_reserved_write_keys` 插入一致，重复预约同一存储键不重复计数）。
 - **冲突**：若键已被其他活跃事务占用：
   - **`Reject`** 或超时为 0：立即失败并返回原因字符串。
   - **`Wait`**：短间隔轮询等待；超时计入 `write_conflict_wait_timeout_count`。

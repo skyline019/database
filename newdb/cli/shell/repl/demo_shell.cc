@@ -178,6 +178,7 @@ void interactive_shell(ShellState& st, const char* data_file, const char* table_
     log_and_print(log_file, "  SHOWLOG          # dump session log (plain text or legacy XOR)\n");
     log_and_print(log_file, "  RESET            # recreate empty table\n");
     log_and_print(log_file, "  VACUUM           # rewrite compacted table file (remove old versions/tombstones)\n");
+    log_and_print(log_file, "  CONFIRM_REORDER  # after confirming deletes need no WAL recovery: renumber ids to 1..N (pk=id only)\n");
     log_and_print(log_file, "  SCAN             # scan all pages and print raw tuples\n");
     log_and_print(log_file, "  EXPORT CSV [file]             # dump current table to CSV\n");
     log_and_print(log_file, "  EXPORT JSON [file]            # dump current table to JSON\n");

@@ -134,7 +134,7 @@ bool save_table_stats_file(const std::string& data_file,
     if (!out) {
         return false;
     }
-    out << "NEWDB_TABLESTATS_V2\n";
+    out << "NEWDB_TABLESTATS_V3\n";
     out << "fp=" << table_stats_schema_fingerprint(schema) << "\n";
     const auto now = std::chrono::system_clock::now();
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -151,6 +151,34 @@ bool save_table_stats_file(const std::string& data_file,
         const std::string top_s =
             (it == stats.columns.end()) ? "-" : join_top_k_field(it->second.top_k);
         out << am.name << ";" << nn << ";" << d << ";" << min_s << ";" << max_s << ";" << top_s << "\n";
+    }
+    bool any_hist = false;
+    for (const auto& am : schema.attrs) {
+        const auto it = stats.columns.find(am.name);
+        if (it == stats.columns.end()) {
+            continue;
+        }
+        if (it->second.histogram_buckets.size() == 8) {
+            any_hist = true;
+            break;
+        }
+    }
+    if (any_hist) {
+        out << "__column_histograms__\n";
+        for (const auto& am : schema.attrs) {
+            const auto it = stats.columns.find(am.name);
+            if (it == stats.columns.end() || it->second.histogram_buckets.size() != 8) {
+                continue;
+            }
+            out << am.name << ":";
+            for (std::size_t i = 0; i < 8; ++i) {
+                if (i > 0) {
+                    out << ',';
+                }
+                out << it->second.histogram_buckets[i];
+            }
+            out << "\n";
+        }
     }
     out.flush();
     out.close();
@@ -181,9 +209,10 @@ bool load_table_stats_file(const std::string& data_file,
     if (!std::getline(in, line)) {
         return false;
     }
+    const bool file_v3 = (line == "NEWDB_TABLESTATS_V3");
     const bool file_v2 = (line == "NEWDB_TABLESTATS_V2");
     const bool file_v1 = (line == "NEWDB_TABLESTATS_V1");
-    if (!file_v1 && !file_v2) {
+    if (!file_v1 && !file_v2 && !file_v3) {
         return false;
     }
     if (!std::getline(in, line) || line.rfind("fp=", 0) != 0) {
@@ -242,11 +271,48 @@ bool load_table_stats_file(const std::string& data_file,
     for (const auto& am : schema.attrs) {
         out->columns[am.name] = ColumnStats{};
     }
+    bool hist_section = false;
     while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
         if (line.empty()) {
             continue;
         }
-        if (file_v2) {
+        if (!hist_section && line == "__column_histograms__") {
+            hist_section = true;
+            continue;
+        }
+        if (hist_section) {
+            const auto colon = line.find(':');
+            if (colon == std::string::npos) {
+                return false;
+            }
+            const std::string hname = line.substr(0, colon);
+            const std::string buckets_csv = line.substr(colon + 1);
+            if (out->columns.count(hname) == 0) {
+                return false;
+            }
+            ColumnStats& hcs = out->columns[hname];
+            hcs.histogram_buckets.clear();
+            std::stringstream hbss(buckets_csv);
+            std::string bitem;
+            while (std::getline(hbss, bitem, ',')) {
+                std::uint64_t bv = 0;
+                const char* pb = bitem.c_str();
+                const char* eb = pb + bitem.size();
+                const auto br = std::from_chars(pb, eb, bv);
+                if (br.ec != std::errc{} || br.ptr != eb) {
+                    return false;
+                }
+                hcs.histogram_buckets.push_back(bv);
+            }
+            if (hcs.histogram_buckets.size() != 8) {
+                return false;
+            }
+            continue;
+        }
+        if (file_v2 || file_v3) {
             std::string f[6];
             if (!split_fixed6(line, f)) {
                 return false;
@@ -367,6 +433,30 @@ bool build_table_stats_from_heap(const newdb::HeapTable& tbl,
             });
             for (std::size_t i = 0; i < fv.size() && cs.top_k.size() < 3; ++i) {
                 cs.top_k.push_back(fv[i].first);
+            }
+        }
+        std::vector<std::string> vals;
+        vals.reserve(cs.non_null_count);
+        for (std::size_t slot = 0; slot < n; ++slot) {
+            if (!row_slot_decode(tbl, slot, r)) {
+                continue;
+            }
+            auto itv = r.attrs.find(am.name);
+            if (itv == r.attrs.end() || itv->second.empty()) {
+                continue;
+            }
+            vals.push_back(itv->second);
+        }
+        if (!vals.empty()) {
+            std::sort(vals.begin(), vals.end());
+            constexpr std::size_t nb = 8;
+            cs.histogram_buckets.assign(nb, 0);
+            for (std::size_t i = 0; i < vals.size(); ++i) {
+                std::size_t b = (i * nb) / vals.size();
+                if (b >= nb) {
+                    b = nb - 1;
+                }
+                cs.histogram_buckets[b] += 1;
             }
         }
     }

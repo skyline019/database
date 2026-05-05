@@ -28,25 +28,39 @@
 #include <thread>
 #include <algorithm>
 
+void TxnCoordinator::recordWriteConflictSampleLockKey(const LockKey& lk,
+                                                        const std::uint64_t holder_txn,
+                                                        const char* tag) {
+    std::ostringstream oss;
+    oss << "table=" << lk.table << ";lock=" << lk.to_storage_key() << ";holder=" << holder_txn
+        << ";tag=" << (tag ? tag : "");
+    std::lock_guard<std::mutex> lk_mu(m_write_conflict_sample_mu);
+    m_write_conflict_last_sample = oss.str();
+}
+
 void TxnCoordinator::recordWriteConflictSample(const std::string& table_name,
                                                const int row_id,
                                                const std::uint64_t holder_txn,
                                                const char* tag) {
-    std::ostringstream oss;
-    oss << "table=" << table_name << ";row=" << row_id << ";holder=" << holder_txn << ";tag=" << (tag ? tag : "");
-    std::lock_guard<std::mutex> lk(m_write_conflict_sample_mu);
-    m_write_conflict_last_sample = oss.str();
+    recordWriteConflictSampleLockKey(LockKey::row_pk_write_intent(table_name, row_id), holder_txn, tag);
 }
 
 bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int id, std::string* reason) {
-    if (m_state.load() != TxnState::Active) {
-        return true;
-    }
     if (table_name.empty()) {
         return true;
     }
+    return tryReserveWriteLockKey(LockKey::row_pk_write_intent(table_name, id), reason);
+}
+
+bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reason) {
+    if (m_state.load() != TxnState::Active) {
+        return true;
+    }
+    if (lk.table.empty()) {
+        return true;
+    }
     const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
-    const std::string key = LockKey::row_pk_write_intent(table_name, id).to_storage_key();
+    const std::string key = lk.to_storage_key();
     const WriteConflictPolicy policy = m_write_conflict_policy.load(std::memory_order_relaxed);
     const std::uint64_t wait_timeout_ms = m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
     const auto wait_start = std::chrono::steady_clock::now();
@@ -55,12 +69,19 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
 
     for (;;) {
         {
-            std::lock_guard<std::mutex> lk(g_write_intent_mu);
+            std::lock_guard<std::mutex> lk_mu(g_write_intent_mu);
             const auto it = g_write_intent_owner.find(key);
             if (it == g_write_intent_owner.end() || it->second == txn) {
                 g_write_intent_owner[key] = txn;
                 g_txn_wait_for_owner.erase(txn);
-                m_reserved_write_keys.insert(key);
+                const auto ins = m_reserved_write_keys.insert(key);
+                if (ins.second) {
+                    if (lk.kind == LockKeyKind::RangeWriteIntent) {
+                        m_lock_key_range_count.fetch_add(1, std::memory_order_relaxed);
+                    } else if (lk.kind == LockKeyKind::PredicateWriteIntent) {
+                        m_lock_key_predicate_count.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
                 const auto waited_ms = static_cast<std::uint64_t>(
                     std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - wait_start)
@@ -68,7 +89,7 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
                 if (waited_ms > 0) {
                     m_lock_wait_ms_total.fetch_add(waited_ms, std::memory_order_relaxed);
                     {
-                        std::lock_guard<std::mutex> lk(m_samples_mu);
+                        std::lock_guard<std::mutex> lk_samples(m_samples_mu);
                         m_lock_wait_ms_samples.push_back(waited_ms);
                         if (m_lock_wait_ms_samples.size() > 256) {
                             m_lock_wait_ms_samples.erase(m_lock_wait_ms_samples.begin(),
@@ -91,7 +112,7 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
                     m_lock_deadlock_victim_count.fetch_add(1, std::memory_order_relaxed);
                     deadlock_reported = true;
                     m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
-                    recordWriteConflictSample(table_name, id, cycle_owner, "deadlock_victim");
+                    recordWriteConflictSampleLockKey(lk, cycle_owner, "deadlock_victim");
                     g_txn_wait_for_owner.erase(txn);
                     if (reason != nullptr) {
                         *reason = "deadlock detected on " + key + ", current txn chosen as victim";
@@ -104,14 +125,14 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
             m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
             std::uint64_t holder = 0;
             {
-                std::lock_guard<std::mutex> lk(g_write_intent_mu);
+                std::lock_guard<std::mutex> lk_mu(g_write_intent_mu);
                 const auto hi = g_write_intent_owner.find(key);
                 if (hi != g_write_intent_owner.end()) {
                     holder = hi->second;
                 }
                 g_txn_wait_for_owner.erase(txn);
             }
-            recordWriteConflictSample(table_name, id, holder, "reject");
+            recordWriteConflictSampleLockKey(lk, holder, "reject");
             if (reason != nullptr) {
                 *reason = "write conflict on " + key + " (held by another active transaction)";
             }
@@ -125,7 +146,7 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
             m_lock_wait_ms_total.fetch_add(static_cast<std::uint64_t>(elapsed.count()), std::memory_order_relaxed);
             std::uint64_t wait_ms = static_cast<std::uint64_t>(elapsed.count());
             {
-                std::lock_guard<std::mutex> lk(m_samples_mu);
+                std::lock_guard<std::mutex> lk_samples(m_samples_mu);
                 m_lock_wait_ms_samples.push_back(wait_ms);
                 if (m_lock_wait_ms_samples.size() > 256) {
                     m_lock_wait_ms_samples.erase(m_lock_wait_ms_samples.begin(),
@@ -139,14 +160,14 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
             }
             std::uint64_t holder = 0;
             {
-                std::lock_guard<std::mutex> lk(g_write_intent_mu);
+                std::lock_guard<std::mutex> lk_mu(g_write_intent_mu);
                 const auto hi = g_write_intent_owner.find(key);
                 if (hi != g_write_intent_owner.end()) {
                     holder = hi->second;
                 }
                 g_txn_wait_for_owner.erase(txn);
             }
-            recordWriteConflictSample(table_name, id, holder, "wait_timeout");
+            recordWriteConflictSampleLockKey(lk, holder, "wait_timeout");
             if (reason != nullptr) {
                 *reason = "write conflict wait timeout on " + key;
             }

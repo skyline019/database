@@ -24,6 +24,8 @@ struct PlanCandidate {
     std::string id;
     double estimated_cost{0.0};
     PlanCost cost;
+    /// Human-readable ranking hint for SHOW PLAN / C API (`where_plan_json`).
+    std::string rationale;
 };
 
 struct WhereCond {
@@ -65,7 +67,7 @@ struct WhereQueryContext {
     const TableStats* query_stats_hint{nullptr};
     std::atomic<std::uint64_t> estimated_scan_rows_total{0};
     std::atomic<std::uint64_t> estimated_scan_rows_samples{0};
-    /// Last completed `query_with_index`: bounded count of index/scan shapes evaluated (cap 8).
+    /// Last completed `query_with_index`: count of index/scan shapes evaluated (observable truth).
     std::atomic<std::uint32_t> last_plan_candidates_considered{1};
     /// Equality sidecar: bytes read from disk when loading `.eqidx` (not memory-cache hits).
     std::atomic<std::uint64_t> where_eq_sidecar_disk_bytes_read_total{0};
@@ -76,6 +78,8 @@ struct WhereQueryContext {
     WherePolicyState policy{};
     /// Last completed `query_with_index` plan label (e.g. `fallback_scan`, `id_lookup`).
     std::string last_plan_id;
+    /// Bytes last reserved via `MemoryKind::QueryTemp` for the in-flight `query_with_index` call (observability).
+    std::atomic<std::uint64_t> query_temp_reserved_bytes{0};
     mutable std::mutex mu;
 };
 

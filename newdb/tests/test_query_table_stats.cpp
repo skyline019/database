@@ -16,6 +16,26 @@ using newdb::HeapTable;
 using newdb::Row;
 using newdb::TableSchema;
 
+TEST(QueryTableStats, HistogramEquiDepthEightBuckets) {
+    TableSchema schema;
+    schema.attrs = {AttrMeta{"n", AttrType::String}};
+    HeapTable tbl;
+    for (unsigned i = 0; i < 16; ++i) {
+        const int rid = static_cast<int>(i) + 1;
+        tbl.rows.push_back(Row{rid, {{"n", std::to_string(static_cast<int>(i))}}});
+    }
+    tbl.rebuild_indexes(schema);
+    TableStats st{};
+    ASSERT_TRUE(build_table_stats_from_heap(tbl, schema, &st));
+    const ColumnStats& cs = st.columns.at("n");
+    ASSERT_EQ(cs.histogram_buckets.size(), 8u);
+    std::uint64_t sum = 0;
+    for (auto v : cs.histogram_buckets) {
+        sum += v;
+    }
+    EXPECT_EQ(sum, cs.non_null_count);
+}
+
 TEST(QueryTableStats, BuildTracksMinMaxTopK) {
     TableSchema schema;
     schema.attrs = {AttrMeta{"color", AttrType::String}};
@@ -137,7 +157,7 @@ TEST(QueryTableStats, PersistSaveLoadRoundTrip) {
         if (!hdr.empty() && hdr.back() == '\r') {
             hdr.pop_back();
         }
-        EXPECT_EQ(hdr, "NEWDB_TABLESTATS_V2");
+        EXPECT_EQ(hdr, "NEWDB_TABLESTATS_V3");
     }
     TableStats loaded{};
     ASSERT_TRUE(load_table_stats_file(data_file, schema, &loaded));

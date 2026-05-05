@@ -8,11 +8,18 @@ prints the recommended matrix so pipelines stay explicit.
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
 
 
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--json", action="store_true", help="Emit one JSON line for log parsers")
+    p.add_argument(
+        "--write-recommended-pr",
+        metavar="PATH",
+        help="Write ci_bench_gate.py --profile pr companion thresholds JSON (for baseline archives)",
+    )
     args = p.parse_args()
     matrix = [
         "WalRecoveryIndexed / WalRecovery*",
@@ -29,9 +36,22 @@ def main() -> int:
         "(runtime JSONL fixture + ci_bench_gate storage/WAL recovery ceilings; see scripts/ci/fixtures/README.md)",
         "sidecar rebuild interrupted (crash simulation) + NEWDB_INDEX_CATALOG_ENFORCE=1",
     ]
-    if args.json:
-        import json
+    recommended_thresholds_pr = {
+        "profile": "pr",
+        "max_wal_recovery_last_elapsed_ms": 2000.0,
+        "max_compact_debt_bytes_peak": 1.0e11,
+        "max_table_storage_health_fragmentation_ratio": 1.0,
+        "max_vacuum_health_bonus_last": 1.0e15,
+        "notes": "Aligned with ci_bench_gate._apply_profile_defaults(profile=pr); tune per machine.",
+    }
 
+    if args.write_recommended_pr:
+        out = Path(args.write_recommended_pr)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(recommended_thresholds_pr, indent=2), encoding="utf-8")
+        print(f"[nightly_soak_hints] wrote {out}")
+
+    if args.json:
         # Recommended starting bands for Nightly gates (host-dependent; tune with fixtures).
         threshold_hints = {
             "max_wal_recovery_last_elapsed_ms_start": 2000,
@@ -40,6 +60,7 @@ def main() -> int:
             "max_compact_debt_bytes_peak_verify_script": "1e11 placeholder in verify script",
             "max_vacuum_health_bonus_last_verify_script": "1e11 placeholder in verify script",
             "notes": "See STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md section 4 and PERF_AND_CI_BUDGETS.md sections 3-4.",
+            "recommended_thresholds_pr": recommended_thresholds_pr,
         }
         print(
             json.dumps(

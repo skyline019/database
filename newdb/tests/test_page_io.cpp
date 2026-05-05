@@ -6,7 +6,9 @@
 
 #include "test_util.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -182,6 +184,95 @@ TEST(PageIo, TombstoneDeletesRow) {
     HeapTable tbl;
     ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "tomb", minimal_schema(), tbl).ok);
     EXPECT_TRUE(tbl.rows.empty());
+}
+
+TEST(PageIo, ReorderHeapIdsDenseAfterGaps) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_reorder_dense");
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "reorder.bin").string();
+    ASSERT_TRUE(newdb::io::create_heap_file(path.c_str(),
+                                            {
+                                                Row{10, {{"n", "a"}}, {}},
+                                                Row{5, {{"n", "b"}}, {}},
+                                                Row{7, {{"n", "c"}}, {}},
+                                            })
+                    .ok);
+    std::size_t rows_after = 0;
+    ASSERT_TRUE(newdb::io::reorder_heap_ids_dense(path.c_str(), "reorder", minimal_schema(), &rows_after).ok);
+    EXPECT_EQ(rows_after, 3u);
+
+    newdb::HeapTable tbl;
+    ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "reorder", minimal_schema(), tbl).ok);
+    ASSERT_EQ(tbl.rows.size(), 3u);
+    std::vector<int> ids;
+    for (const auto& r : tbl.rows) {
+        ids.push_back(r.id);
+    }
+    std::sort(ids.begin(), ids.end());
+    EXPECT_EQ(ids, (std::vector<int>{1, 2, 3}));
+}
+
+TEST(PageIo, ReorderHeapIdsDenseNoopWhenAlreadyDense) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_reorder_noop");
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "dense.bin").string();
+    ASSERT_TRUE(newdb::io::create_heap_file(path.c_str(),
+                                            {
+                                                Row{1, {{"n", "a"}}, {}},
+                                                Row{2, {{"n", "b"}}, {}},
+                                                Row{3, {{"n", "c"}}, {}},
+                                            })
+                    .ok);
+    std::size_t rows_after = 0;
+    bool file_changed = true;
+    ASSERT_TRUE(newdb::io::reorder_heap_ids_dense(path.c_str(), "dense", minimal_schema(), &rows_after, &file_changed).ok);
+    EXPECT_EQ(rows_after, 3u);
+    EXPECT_FALSE(file_changed);
+}
+
+TEST(PageIo, CompactHeapFilePreservesIdsAfterMiddleRowDelete) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_compact_mid");
+    std::filesystem::create_directories(dir);
+    const std::string path = (dir / "mid.bin").string();
+    ASSERT_TRUE(newdb::io::create_heap_file(path.c_str(),
+                                            {
+                                                Row{1, {{"n", "a"}}, {}},
+                                                Row{2, {{"n", "b"}}, {}},
+                                                Row{3, {{"n", "c"}}, {}},
+                                            })
+                    .ok);
+    ASSERT_TRUE(newdb::io::append_row(path.c_str(), Row{2, {{"__deleted", "1"}, {"n", "b"}}, {}}).ok);
+
+    std::size_t rows_after = 0;
+    ASSERT_TRUE(newdb::io::compact_heap_file(path.c_str(), "mid", minimal_schema(), &rows_after).ok);
+    EXPECT_EQ(rows_after, 2u);
+
+    const TableSchema schema = minimal_schema();
+    HeapTable tbl;
+    ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "mid", schema, tbl).ok);
+    ASSERT_EQ(tbl.rows.size(), 2u);
+    std::vector<int> ids;
+    ids.reserve(tbl.rows.size());
+    for (const auto& r : tbl.rows) {
+        ids.push_back(r.id);
+    }
+    std::sort(ids.begin(), ids.end());
+    EXPECT_EQ(ids, (std::vector<int>{1, 3}));
+
+    tbl.rebuild_indexes(schema);
+    EXPECT_EQ(tbl.find_by_id(2), nullptr);
+    ASSERT_NE(tbl.find_by_id(1), nullptr);
+    ASSERT_NE(tbl.find_by_id(3), nullptr);
+
+    newdb::HeapLoadOptions lazy{};
+    lazy.lazy_decode = true;
+    HeapTable lazy_tbl;
+    ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "mid", schema, lazy_tbl, lazy).ok);
+    ASSERT_TRUE(lazy_tbl.is_heap_storage_backed());
+    lazy_tbl.rebuild_indexes(schema);
+    EXPECT_EQ(lazy_tbl.find_by_id(2), nullptr);
+    ASSERT_NE(lazy_tbl.find_by_id(1), nullptr);
+    ASSERT_NE(lazy_tbl.find_by_id(3), nullptr);
 }
 
 TEST(PageIo, CompactHeapFileKeepsOnlyLatestLogicalRows) {

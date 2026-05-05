@@ -15,12 +15,16 @@
 #include <system_error>
 
 #include <newdb/memory_budget.h>
+#include <newdb/memory_registry.h>
 #include <newdb/schema_io.h>
 #include "cli/modules/sidecar/common/index_catalog.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
 #include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
 #include "cli/modules/sidecar/eq/eq_bloom.h"
 #include "cli/modules/where/executor/where.h"
+
+#include <list>
+#include <mutex>
 
 namespace fs = std::filesystem;
 
@@ -39,6 +43,131 @@ struct EqSidecarCacheEntry {
 };
 
 std::unordered_map<std::string, EqSidecarCacheEntry> g_eq_sidecar_cache;
+
+std::recursive_mutex g_eq_sidecar_mu;
+std::list<std::string> g_eq_sidecar_lru;
+std::unordered_map<std::string, std::list<std::string>::iterator> g_eq_sidecar_lru_pos;
+std::unordered_map<std::string, std::uint64_t> g_eq_sidecar_bytes;
+std::atomic<bool> g_eq_sidecar_evictor_registered{false};
+
+std::uint64_t estimate_eq_entry_bytes(const EqSidecarCacheEntry& e) {
+    std::uint64_t sz = static_cast<std::uint64_t>(e.header_line.size()) + 64u;
+    for (const auto& kv : e.buckets) {
+        sz += static_cast<std::uint64_t>(kv.first.size()) + 64u +
+              static_cast<std::uint64_t>(kv.second.size()) * sizeof(std::size_t);
+    }
+    return sz;
+}
+
+void eq_sidecar_lru_remove_locked(const std::string& path) {
+    const auto pit = g_eq_sidecar_lru_pos.find(path);
+    if (pit != g_eq_sidecar_lru_pos.end()) {
+        g_eq_sidecar_lru.erase(pit->second);
+        g_eq_sidecar_lru_pos.erase(pit);
+    }
+}
+
+void eq_sidecar_lru_touch_front_locked(const std::string& path) {
+    eq_sidecar_lru_remove_locked(path);
+    g_eq_sidecar_lru.push_front(path);
+    g_eq_sidecar_lru_pos[path] = g_eq_sidecar_lru.begin();
+}
+
+std::uint64_t eq_sidecar_release_path_locked(const std::string& path) {
+    const auto bit = g_eq_sidecar_bytes.find(path);
+    if (bit == g_eq_sidecar_bytes.end()) {
+        return 0;
+    }
+    const std::uint64_t bytes = bit->second;
+    g_eq_sidecar_bytes.erase(bit);
+    eq_sidecar_lru_remove_locked(path);
+    return bytes;
+}
+
+void eq_sidecar_cache_erase(const std::string& path) {
+    std::uint64_t bytes_to_release = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_eq_sidecar_mu);
+        const auto cit = g_eq_sidecar_cache.find(path);
+        if (cit != g_eq_sidecar_cache.end()) {
+            g_eq_sidecar_cache.erase(cit);
+        }
+        bytes_to_release = eq_sidecar_release_path_locked(path);
+    }
+    if (bytes_to_release > 0) {
+        newdb::memory_registry_release(newdb::MemoryKind::EqSidecar, bytes_to_release);
+    }
+}
+
+std::uint64_t eq_sidecar_evict_tail_locked(std::uint64_t target_free,
+                                           std::vector<std::string>& evicted_paths) {
+    std::uint64_t freed = 0;
+    while (freed < target_free && !g_eq_sidecar_lru.empty()) {
+        const std::string victim = g_eq_sidecar_lru.back();
+        const auto bit = g_eq_sidecar_bytes.find(victim);
+        const std::uint64_t bytes = (bit != g_eq_sidecar_bytes.end()) ? bit->second : 0;
+        g_eq_sidecar_lru.pop_back();
+        g_eq_sidecar_lru_pos.erase(victim);
+        if (bit != g_eq_sidecar_bytes.end()) {
+            g_eq_sidecar_bytes.erase(bit);
+        }
+        const auto cit = g_eq_sidecar_cache.find(victim);
+        if (cit != g_eq_sidecar_cache.end()) {
+            g_eq_sidecar_cache.erase(cit);
+        }
+        evicted_paths.push_back(victim);
+        freed += bytes;
+    }
+    return freed;
+}
+
+std::uint64_t eq_sidecar_evictor_callback(std::uint64_t target_free) {
+    std::vector<std::string> evicted_paths;
+    std::uint64_t freed = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_eq_sidecar_mu);
+        freed = eq_sidecar_evict_tail_locked(target_free, evicted_paths);
+    }
+    if (freed > 0) {
+        newdb::memory_registry_release(newdb::MemoryKind::EqSidecar, freed);
+        newdb::memory_registry_record_eviction(newdb::MemoryKind::EqSidecar, freed);
+    }
+    return freed;
+}
+
+void ensure_eq_sidecar_evictor_registered() {
+    bool expected = false;
+    if (g_eq_sidecar_evictor_registered.compare_exchange_strong(expected, true)) {
+        newdb::memory_registry_register_evictor(newdb::MemoryKind::EqSidecar,
+                                                &eq_sidecar_evictor_callback);
+    }
+}
+
+bool eq_sidecar_cache_install(const std::string& path, EqSidecarCacheEntry entry) {
+    ensure_eq_sidecar_evictor_registered();
+    const std::uint64_t est = estimate_eq_entry_bytes(entry);
+    std::uint64_t prior_bytes = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lk(g_eq_sidecar_mu);
+        prior_bytes = eq_sidecar_release_path_locked(path);
+        const auto cit = g_eq_sidecar_cache.find(path);
+        if (cit != g_eq_sidecar_cache.end()) {
+            g_eq_sidecar_cache.erase(cit);
+        }
+    }
+    if (prior_bytes > 0) {
+        newdb::memory_registry_release(newdb::MemoryKind::EqSidecar, prior_bytes);
+    }
+    if (!newdb::memory_registry_try_admit(newdb::MemoryKind::EqSidecar, est)) {
+        g_eq_sidecar_memory_budget_skips.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+    std::lock_guard<std::recursive_mutex> lk(g_eq_sidecar_mu);
+    g_eq_sidecar_cache[path] = std::move(entry);
+    g_eq_sidecar_bytes[path] = est;
+    eq_sidecar_lru_touch_front_locked(path);
+    return true;
+}
 
 bool row_at_slot_read_eq(const newdb::HeapTable& tbl, const std::size_t i, newdb::Row& r) {
     if (tbl.is_heap_storage_backed()) {
@@ -255,71 +384,75 @@ bool try_lookup_sidecar(const std::string& path,
             return true;
         }
     }
-    const auto cache_it = g_eq_sidecar_cache.find(path);
-    if (cache_it != g_eq_sidecar_cache.end() &&
-        cache_it->second.wal_lsn == wal_lsn &&
-        cache_it->second.data_sig == data_sig &&
-        cache_it->second.attr_sig == attr_sig) {
-        const IndexCatalogParsedTail& ct = cache_it->second.catalog_tail;
-        {
-            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
-            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
-            if (enforce && ct.catalog_build_state == 1) {
-                g_eq_sidecar_cache.erase(path);
-                std::error_code ec;
-                fs::remove(path, ec);
-                fs::remove(bloom_path_for(req), ec);
-                return false;
+    {
+        std::lock_guard<std::recursive_mutex> slk(g_eq_sidecar_mu);
+        const auto cache_it = g_eq_sidecar_cache.find(path);
+        if (cache_it != g_eq_sidecar_cache.end() &&
+            cache_it->second.wal_lsn == wal_lsn &&
+            cache_it->second.data_sig == data_sig &&
+            cache_it->second.attr_sig == attr_sig) {
+            const IndexCatalogParsedTail& ct = cache_it->second.catalog_tail;
+            {
+                const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+                const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+                if (enforce && ct.catalog_build_state == 1) {
+                    eq_sidecar_cache_erase(path);
+                    std::error_code ec;
+                    fs::remove(path, ec);
+                    fs::remove(bloom_path_for(req), ec);
+                    return false;
+                }
             }
-        }
-        const std::string exp_tbl = eq_expected_table_plain(req);
-        const bool id_ok =
-            cache_it->second.header_line.empty()
-                ? index_catalog_tail_identity_matches(ct, req.data_file, req.attr_name)
-                : index_catalog_header_identity_ok(cache_it->second.header_line, ct, req.data_file, req.attr_name,
-                                                   exp_tbl, req.attr_name, IndexKind::Eq);
-        if (!id_ok) {
-            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
-            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
-            if (enforce) {
-                g_eq_sidecar_cache.erase(path);
-                std::error_code ec;
-                fs::remove(path, ec);
-                fs::remove(bloom_path_for(req), ec);
-                return false;
+            const std::string exp_tbl = eq_expected_table_plain(req);
+            const bool id_ok =
+                cache_it->second.header_line.empty()
+                    ? index_catalog_tail_identity_matches(ct, req.data_file, req.attr_name)
+                    : index_catalog_header_identity_ok(cache_it->second.header_line, ct, req.data_file, req.attr_name,
+                                                       exp_tbl, req.attr_name, IndexKind::Eq);
+            if (!id_ok) {
+                const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+                const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+                if (enforce) {
+                    eq_sidecar_cache_erase(path);
+                    std::error_code ec;
+                    fs::remove(path, ec);
+                    fs::remove(bloom_path_for(req), ec);
+                    return false;
+                }
+                std::fprintf(stderr,
+                             "[NEWDB_INDEX_CATALOG] eq cache hit identity mismatch (enforce off) attr=%s data=%s\n",
+                             req.attr_name.c_str(), req.data_file.c_str());
             }
-            std::fprintf(stderr,
-                         "[NEWDB_INDEX_CATALOG] eq cache hit identity mismatch (enforce off) attr=%s data=%s\n",
-                         req.attr_name.c_str(), req.data_file.c_str());
-        }
-        IndexDescriptor d{};
-        d.index_name = req.attr_name;
-        d.kind = IndexKind::Eq;
-        d.data_lsn = ct.idx_dl != 0 ? ct.idx_dl : cache_it->second.wal_lsn;
-        d.schema_version = ct.idx_sv != 0 ? ct.idx_sv : cache_it->second.attr_sig;
-        d.built_at_ms = ct.built_ms;
-        d.valid = true;
-        if (!index_descriptor_matches_runtime(d, attr_sig, wal_lsn)) {
-            const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
-            const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
-            if (enforce) {
-                g_eq_sidecar_cache.erase(path);
-                std::error_code ec;
-                fs::remove(path, ec);
-                fs::remove(bloom_path_for(req), ec);
-                return false;
+            IndexDescriptor d{};
+            d.index_name = req.attr_name;
+            d.kind = IndexKind::Eq;
+            d.data_lsn = ct.idx_dl != 0 ? ct.idx_dl : cache_it->second.wal_lsn;
+            d.schema_version = ct.idx_sv != 0 ? ct.idx_sv : cache_it->second.attr_sig;
+            d.built_at_ms = ct.built_ms;
+            d.valid = true;
+            if (!index_descriptor_matches_runtime(d, attr_sig, wal_lsn)) {
+                const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
+                const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
+                if (enforce) {
+                    eq_sidecar_cache_erase(path);
+                    std::error_code ec;
+                    fs::remove(path, ec);
+                    fs::remove(bloom_path_for(req), ec);
+                    return false;
+                }
+                std::fprintf(stderr,
+                             "[NEWDB_INDEX_CATALOG] eq cache hit catalog mismatch (enforce off) attr=%s data=%s\n",
+                             req.attr_name.c_str(), req.data_file.c_str());
             }
-            std::fprintf(stderr,
-                         "[NEWDB_INDEX_CATALOG] eq cache hit catalog mismatch (enforce off) attr=%s data=%s\n",
-                         req.attr_name.c_str(), req.data_file.c_str());
+            const auto it = cache_it->second.buckets.find(value);
+            if (it == cache_it->second.buckets.end()) {
+                out.clear();
+            } else {
+                out = it->second;
+            }
+            eq_sidecar_lru_touch_front_locked(path);
+            return true;
         }
-        const auto it = cache_it->second.buckets.find(value);
-        if (it == cache_it->second.buckets.end()) {
-            out.clear();
-        } else {
-            out = it->second;
-        }
-        return true;
     }
 
     std::uint64_t disk_bytes_for_budget = 0;
@@ -403,7 +536,7 @@ bool try_lookup_sidecar(const std::string& path,
             const char* enf = std::getenv("NEWDB_INDEX_CATALOG_ENFORCE");
             const bool enforce = (enf != nullptr && std::strcmp(enf, "1") == 0);
             if (enforce) {
-                g_eq_sidecar_cache.erase(path);
+                eq_sidecar_cache_erase(path);
                 std::error_code ec;
                 fs::remove(path, ec);
                 fs::remove(bloom_path_for(req), ec);
@@ -464,13 +597,13 @@ bool try_lookup_sidecar(const std::string& path,
         parsed.buckets.emplace(std::move(key), std::move(slots));
     }
 
-    g_eq_sidecar_cache[path] = std::move(parsed);
-    const auto fresh_it = g_eq_sidecar_cache[path].buckets.find(value);
-    if (fresh_it == g_eq_sidecar_cache[path].buckets.end()) {
+    const auto out_it = parsed.buckets.find(value);
+    if (out_it == parsed.buckets.end()) {
         out.clear();
     } else {
-        out = fresh_it->second;
+        out = out_it->second;
     }
+    (void)eq_sidecar_cache_install(path, std::move(parsed));
     return true;
 }
 
@@ -555,8 +688,8 @@ EqLookupResult lookup_or_build_eq_index_sidecar(const EqIndexRequest& req,
     const auto built_it = buckets.find(value);
     std::vector<std::size_t> built_slots =
         (built_it != buckets.end()) ? built_it->second : std::vector<std::size_t>{};
-    g_eq_sidecar_cache[sidecar] =
-        EqSidecarCacheEntry{data_sig, attr_sig, wal_lsn, std::move(lh_store), wt, std::move(buckets)};
+    (void)eq_sidecar_cache_install(
+        sidecar, EqSidecarCacheEntry{data_sig, attr_sig, wal_lsn, std::move(lh_store), wt, std::move(buckets)});
     EqLookupResult out;
     out.used_index = true;
     out.slots = std::move(built_slots);
@@ -575,12 +708,18 @@ void invalidate_eq_index_sidecars_for_data_file(const std::string& data_file) {
     if (data_file.empty()) {
         return;
     }
-    for (auto it = g_eq_sidecar_cache.begin(); it != g_eq_sidecar_cache.end();) {
-        if (it->first.rfind(data_file + ".eqidx.", 0) == 0) {
-            it = g_eq_sidecar_cache.erase(it);
-        } else {
-            ++it;
+    std::vector<std::string> drop_paths;
+    {
+        std::lock_guard<std::recursive_mutex> slk(g_eq_sidecar_mu);
+        const std::string prefix = data_file + ".eqidx.";
+        for (const auto& kv : g_eq_sidecar_cache) {
+            if (kv.first.rfind(prefix, 0) == 0) {
+                drop_paths.push_back(kv.first);
+            }
         }
+    }
+    for (const std::string& p : drop_paths) {
+        eq_sidecar_cache_erase(p);
     }
 
     std::error_code ec;
@@ -622,7 +761,7 @@ void invalidate_eq_index_sidecars_for_attrs(const std::string& data_file,
         }
         const std::string sidecar = data_file + ".eqidx." + attr;
         const std::string bloom = data_file + ".eqbloom." + attr;
-        g_eq_sidecar_cache.erase(sidecar);
+        eq_sidecar_cache_erase(sidecar);
         std::error_code ec;
         fs::remove(sidecar, ec);
         if (ec && ec != std::errc::no_such_file_or_directory) {

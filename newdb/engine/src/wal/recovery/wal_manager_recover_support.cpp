@@ -3,6 +3,8 @@
 
 #include <newdb/wal_manager.h>
 #include <newdb/wal_codec.h>
+#include <newdb/wal/wal_redo_applier.h>
+#include <newdb/wal/wal_redo_planner.h>
 #include <newdb/wal/wal_segment_scanner.h>
 
 #include <algorithm>
@@ -187,12 +189,13 @@ Status WalManager::recover_replay_segments(HeapTable* out_table,
                                            WalRecoveryStats* out_stats,
                                            const bool enable_offset_seek,
                                            const std::uint64_t replay_start_lsn) {
-    struct PendingTxnOps {
-        std::unordered_map<int, std::pair<WalOp, Row>> by_row_id;
-    };
-    std::unordered_map<uint64_t, PendingTxnOps> txn_ops;
-
+    wal_recovery::WalRedoPlanner planner(schema, out_table->name);
     const std::uint64_t cp_lsn = out_stats->last_complete_checkpoint_lsn;
+    bool decode_failed = false;
+    std::string decode_error;
+    std::uint64_t commit_apply_ms = 0;
+    std::uint64_t commit_apply_count = 0;
+    std::uint64_t commit_apply_skipped = 0;
 
     for (const auto& ent : seg_index) {
         ++out_stats->scanned_segments;
@@ -242,162 +245,85 @@ Status WalManager::recover_replay_segments(HeapTable* out_table,
                 return Status::Fail("WAL record checksum mismatch at LSN " + std::to_string(hdr.lsn));
             }
 
+            const std::uint64_t prev_decode_failures = planner.decode_failures();
             const auto rec_start = monotonic_ms();
-            bool counted_commit_split = false;
-
-            switch (static_cast<WalOp>(hdr.type)) {
-            case WalOp::INSERT:
-            case WalOp::UPDATE:
-            case WalOp::DELETE: {
-                const uint8_t* p = payload.data();
-                const uint8_t* end = payload.data() + payload.size();
-                std::string table_name;
-                Row row;
-                if (walcodec::is_v1_payload(payload.data(), payload.size())) {
-                    walcodec::DecodedPayloadV1 decv1{};
-                    Status dec = walcodec::decode_payload_v1(payload.data(), payload.size(), decv1);
-                    if (!dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode v1 payload from WAL: " + dec.message);
-                    }
-                    table_name = decv1.table;
-                    const bool need_before = static_cast<WalOp>(hdr.type) == WalOp::DELETE;
-                    if ((need_before && !decv1.has_before) || (!need_before && !decv1.has_after)) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("missing required image in v1 WAL payload");
-                    }
-                    const uint8_t* row_payload_ptr = need_before ? decv1.before_row_payload : decv1.after_row_payload;
-                    const uint32_t row_payload_len =
-                        need_before ? decv1.before_row_payload_len : decv1.after_row_payload_len;
-                    Status row_dec = decode_row_payload(row_payload_ptr, row_payload_len, row, schema);
-                    if (!row_dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row from v1 WAL payload");
-                    }
-                } else {
-                    Status dec_table = walcodec::decode_table_name(p, end, table_name);
-                    if (!dec_table.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode table name from WAL: " + dec_table.message);
-                    }
-                    uint32_t row_id = 0;
-                    const uint8_t* row_payload_ptr = nullptr;
-                    uint32_t row_payload_len = 0;
-                    Status dec_row = walcodec::decode_row_fields(p, end, row_id, row_payload_ptr, row_payload_len);
-                    if (!dec_row.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row fields from WAL: " + dec_row.message);
-                    }
-                    Status dec = decode_row_payload(row_payload_ptr, row_payload_len, row, schema);
-                    if (!dec.ok) {
-                        ++out_stats->decode_failures;
-                        out_stats->end_ms = wall_clock_ms();
-                        last_recovery_stats_ = *out_stats;
-                        return Status::Fail("failed to decode row from WAL");
-                    }
-                }
-                if (table_name != out_table->name) {
-                    break;
-                }
-                PendingTxnOps& pending = txn_ops[hdr.txn_id];
-                pending.by_row_id[row.id] = std::make_pair(static_cast<WalOp>(hdr.type), std::move(row));
+            const WalOp op = static_cast<WalOp>(hdr.type);
+            const bool is_commit = (op == WalOp::COMMIT);
+            const std::size_t commits_before =
+                is_commit ? planner.records_seen() /* placeholder; we read committed_ops via probe below */
+                          : 0;
+            (void)commits_before;
+            // Plan-side feed (no heap writes inside planner).
+            std::size_t pending_committed_before = 0;
+            if (is_commit) {
+                // Snapshot committed_ops size by using `finalize_view` style probe: not exposed; instead
+                // we look at txn_ops after feed. To keep apply scoped per-COMMIT, pull the staged ops by
+                // calling a scratch finalize *only when a COMMIT is fed*. We cannot pre-know how many ops
+                // belong to this COMMIT without coupling to internal state, so we apply per-segment below.
+                pending_committed_before = 0;
+            }
+            planner.feed_record(hdr, payload);
+            const std::uint64_t this_decode_failures = planner.decode_failures() - prev_decode_failures;
+            if (this_decode_failures > 0) {
+                std::fclose(rf);
+                out_stats->decode_failures += this_decode_failures;
+                out_stats->end_ms = wall_clock_ms();
+                last_recovery_stats_ = *out_stats;
+                decode_failed = true;
+                decode_error = "failed to decode WAL payload";
                 break;
             }
+            switch (op) {
             case WalOp::COMMIT: {
                 out_stats->redo_plan_ms += monotonic_ms() - rec_start;
-                counted_commit_split = true;
                 const auto apply_start = monotonic_ms();
-                auto it = txn_ops.find(hdr.txn_id);
-                if (it != txn_ops.end()) {
-                    for (auto& [row_id, op_row] : it->second.by_row_id) {
-                        (void)row_id;
-                        WalOp op = op_row.first;
-                        Row& row = op_row.second;
-                        switch (op) {
-                        case WalOp::INSERT: {
-                            const auto idx = out_table->index_by_id.find(row.id);
-                            if (idx != out_table->index_by_id.end()) {
-                                out_table->rows[static_cast<std::size_t>(idx->second)] = row;
-                            } else {
-                                out_table->rows.push_back(std::move(row));
-                            }
-                            ++out_stats->apply_count;
-                            break;
-                        }
-                        case WalOp::UPDATE: {
-                            const auto idx = out_table->index_by_id.find(row.id);
-                            if (idx != out_table->index_by_id.end()) {
-                                out_table->rows[static_cast<std::size_t>(idx->second)] = row;
-                            } else {
-                                out_table->rows.push_back(std::move(row));
-                            }
-                            ++out_stats->apply_count;
-                            break;
-                        }
-                        case WalOp::DELETE: {
-                            const Row* target = out_table->find_by_id(row.id);
-                            if (target) {
-                                Row tombstone;
-                                tombstone.id = row.id;
-                                tombstone.attrs["__deleted"] = "1";
-                                out_table->rows.push_back(std::move(tombstone));
-                                ++out_stats->apply_count;
-                            }
-                            break;
-                        }
-                        default:
-                            break;
-                        }
-                    }
-                    txn_ops.erase(it);
-                }
-                out_stats->redo_apply_ms += monotonic_ms() - apply_start;
+                wal_recovery::RedoPlanSummary mid = planner.finalize();
+                const wal_recovery::WalRedoApplier applier(*out_table);
+                const wal_recovery::ApplyStats apply_stats = applier.apply(mid);
+                commit_apply_count += apply_stats.records_applied;
+                commit_apply_skipped += apply_stats.skipped;
+                out_stats->apply_count += apply_stats.records_applied;
+                commit_apply_ms += monotonic_ms() - apply_start;
                 break;
             }
-            case WalOp::ROLLBACK:
-                txn_ops.erase(hdr.txn_id);
-                break;
             case WalOp::CHECKPOINT:
             case WalOp::CHECKPOINT_BEGIN:
                 ++out_stats->checkpoint_begin_count;
+                out_stats->redo_plan_ms += monotonic_ms() - rec_start;
                 break;
             case WalOp::CHECKPOINT_END:
                 ++out_stats->checkpoint_end_count;
-                break;
-            case WalOp::SESSION_SNAPSHOT:
-            case WalOp::TXN_PREPARE:
-            case WalOp::SAVEPOINT_SET:
-            case WalOp::SAVEPOINT_ROLLBACK:
-            case WalOp::TXN_ABORT_PARTIAL:
-            case WalOp::PITR_MARK:
-                break;
-            }
-            if (!counted_commit_split) {
                 out_stats->redo_plan_ms += monotonic_ms() - rec_start;
+                break;
+            default:
+                out_stats->redo_plan_ms += monotonic_ms() - rec_start;
+                break;
             }
             current_lsn_ = std::max(current_lsn_, hdr.lsn);
         }
         std::fclose(rf);
-    }
-
-    for (const auto& [tid, pending] : txn_ops) {
-        (void)tid;
-        if (!pending.by_row_id.empty()) {
-            ++out_stats->uncommitted_txn_discarded_count;
-            ++out_stats->recovery_uncommitted_records_ignored;
+        if (decode_failed) {
+            return Status::Fail(decode_error);
         }
     }
 
+    wal_recovery::RedoPlanSummary tail = planner.finalize();
+    out_stats->uncommitted_txn_discarded_count += tail.uncommitted_txn_discarded_count;
+    out_stats->recovery_uncommitted_records_ignored +=
+        tail.recovery_uncommitted_records_ignored;
+    out_stats->redo_apply_ms += commit_apply_ms;
+    (void)commit_apply_skipped;
+    return Status::Ok();
+}
+
+Status WalManager::capture_recovery_scan_stats(WalRecoveryStats* out) {
+    if (!out) {
+        return Status::Fail("capture_recovery_scan_stats: null stats");
+    }
+    WalRecoveryStats partial{};
+    std::vector<RecoverSegmentEntry> seg_index;
+    recover_build_segment_index(seg_index, &partial);
+    *out = partial;
     return Status::Ok();
 }
 

@@ -2,6 +2,7 @@
 
 #include <newdb/heap_table.h>
 #include <newdb/memory_budget.h>
+#include <newdb/memory_registry.h>
 #include <newdb/page_cache.h>
 #include <newdb/page_io.h>
 #include <newdb/row.h>
@@ -110,5 +111,22 @@ TEST(PageCache, PutRejectsWhenPageExceedsCap) {
     const newdb::PageCacheGlobalStats st = newdb::page_cache_global_stats();
     EXPECT_GE(st.reject_oversized_page, 1u);
     EXPECT_EQ(st.bytes_in_cache, 0u);
+    set_page_cache_max_bytes("");
+}
+
+TEST(PageCache, RegistryEvictionsMonotonicUnderCapPressure) {
+    set_page_cache_max_bytes("96");
+    newdb::page_cache_reset_stats_for_test();
+    newdb::memory_registry_reset_for_test();
+    const newdb::MemoryRegistryTotals before = newdb::memory_registry_totals();
+    const std::string path = "/tmp/newdb_pc_registry_evict.bin";
+    std::vector<unsigned char> p40(40, 1);
+    newdb::page_cache_put(path, 0, p40.size(), p40.data());
+    newdb::page_cache_put(path, 1, p40.size(), p40.data());
+    newdb::page_cache_put(path, 2, p40.size(), p40.data());
+    const newdb::MemoryRegistryTotals after = newdb::memory_registry_totals();
+    EXPECT_GE(after.page_cache_evictions, before.page_cache_evictions + 1u);
+    EXPECT_GE(after.page_cache_bytes_evicted_total, before.page_cache_bytes_evicted_total + 40u);
+    EXPECT_LE(after.page_cache_used_bytes, 96u);
     set_page_cache_max_bytes("");
 }

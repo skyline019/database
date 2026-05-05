@@ -22,6 +22,7 @@ class HeapTable;
 #include "cli/modules/common/util/result.h"
 #include "cli/modules/common/util/constants.h"
 #include "cli/modules/storage/table_storage_health.h"
+#include "cli/modules/txn/coordinator/write_conflict/lock_key.h"
 
 // 事务状态
 enum class TxnState {
@@ -84,6 +85,14 @@ struct TxnRuntimeStats {
     std::uint64_t wal_recovery_checkpoint_begin_count{0};
     /// Count of CHECKPOINT_END records observed during the last `recoverFromWAL` scan pass.
     std::uint64_t wal_recovery_checkpoint_end_count{0};
+    /// WAL records with LSN after last complete checkpoint (CLI reconcile + `capture_recovery_scan_stats`).
+    std::uint64_t wal_recovery_records_after_checkpoint{0};
+    /// Indexed WAL segments from segment scan (`WalRecoveryStats::indexed_segments`).
+    std::uint64_t wal_recovery_segments_after_checkpoint{0};
+    /// Uncommitted txn count observed during redo planning (`dangling_by_txn.size()` in reconcile path).
+    std::uint64_t wal_recovery_redo_plan_pending_txn_count{0};
+    /// Idempotent redo skips / conflicts (`strict` mode duplicates or guard collisions).
+    std::uint64_t wal_recovery_apply_conflict_count{0};
     /// Last successful coordinator WAL reconcile policy tag (may include `|heap_policy=...` when engine stats exist).
     std::string wal_recovery_policy;
     std::uint64_t wal_group_commit_count{0};
@@ -171,6 +180,28 @@ struct TxnRuntimeStats {
     std::uint64_t memory_budget_bytes_evicted_total{0};
     /// Eq sidecar loads skipped when on-disk index size + page-cache bytes would exceed memory budget cap.
     std::uint64_t memory_budget_sidecar_load_skipped_total{0};
+    /// Per-kind page cache bytes admitted into MemoryRegistry (Phase 5 v2 closed loop).
+    std::uint64_t mem_page_cache_used_bytes{0};
+    /// Per-kind page cache LRU evictions reported back to the MemoryRegistry.
+    std::uint64_t mem_page_cache_evictions{0};
+    /// Per-kind page cache `try_admit` rejects (oversized page or cap exhausted).
+    std::uint64_t mem_page_cache_admit_rejects{0};
+    /// Per-kind equality sidecar bytes admitted (header + bucket slot estimate).
+    std::uint64_t mem_sidecar_used_bytes{0};
+    /// Per-kind equality sidecar LRU evictions returned by registered evictor.
+    std::uint64_t mem_sidecar_evictions{0};
+    /// Per-kind equality sidecar `try_admit` rejects (entry too large or cap exhausted).
+    std::uint64_t mem_sidecar_admit_rejects{0};
+    /// Per-kind WHERE query temp bytes admitted (rough `logical_rows*sizeof(size_t)+conds*256` estimate).
+    std::uint64_t mem_query_temp_used_bytes{0};
+    /// Per-kind WHERE query temp evictions (placeholder; reserved for future eviction hooks).
+    std::uint64_t mem_query_temp_evictions{0};
+    /// Per-kind WHERE query temp `try_admit` rejects (caller fell back to no-op result).
+    std::uint64_t mem_query_temp_admit_rejects{0};
+    /// Aggregate of per-kind used bytes (`page_cache + sidecar + query_temp`).
+    std::uint64_t mem_global_used_bytes{0};
+    /// Sum of per-kind admit rejects (cross-kind global view of memory pressure).
+    std::uint64_t mem_global_admit_rejects{0};
     /// `BEGIN` snapshot / ReadCommitted statement refresh diagnostics (see `syncHeapReadSnapshotForQuery`).
     std::uint64_t txn_snapshot_refresh_count{0};
     std::uint64_t txn_snapshot_pinned_count{0};
@@ -180,6 +211,10 @@ struct TxnRuntimeStats {
     std::uint64_t transaction_snapshot_lsn{0};
     /// Last LSN used for statement-level read view refresh (ReadCommitted or Snapshot without txn pin).
     std::uint64_t statement_snapshot_lsn{0};
+    /// Successful first-time reservations of `LockKeyKind::RangeWriteIntent` keys (see `tryReserveWriteLockKey`).
+    std::uint64_t lock_key_range_count{0};
+    /// Successful first-time reservations of `LockKeyKind::PredicateWriteIntent` keys.
+    std::uint64_t lock_key_predicate_count{0};
 
     // Write-path staged timing (p95/max of sampled operations).
     std::uint64_t write_heap_append_p95_ms{0};
@@ -263,6 +298,8 @@ public:
     void recordOperation(const std::string& operation, const std::string& table,
                          const std::string& key, const std::string& old_val, const std::string& new_val);
     bool tryReserveWriteKey(const std::string& table_name, int id, std::string* reason = nullptr);
+    /// Extended write-intent reservation (range / predicate / secondary index). Uses the same global map as row PK.
+    bool tryReserveWriteLockKey(const LockKey& lk, std::string* reason = nullptr);
     void setWriteConflictPolicy(WriteConflictPolicy policy);
     WriteConflictPolicy writeConflictPolicy() const;
     void setWriteConflictWaitTimeoutMs(std::uint64_t ms);
@@ -377,6 +414,7 @@ private:
     void persistWalsnHighWaterUnlocked(newdb::WalManager* wm);
     void clearWriteIntents();
     void recordWriteConflictSample(const std::string& table_name, int row_id, std::uint64_t holder_txn, const char* tag);
+    void recordWriteConflictSampleLockKey(const LockKey& lk, std::uint64_t holder_txn, const char* tag);
     std::uint64_t wal_compact_max_bytes{4ull * 1024ull * 1024ull};
     
     // 事务状态
@@ -463,6 +501,10 @@ private:
     std::atomic<std::uint64_t> m_wal_recovery_redo_ms{0};
     std::atomic<std::uint64_t> m_wal_recovery_checkpoint_begin_count{0};
     std::atomic<std::uint64_t> m_wal_recovery_checkpoint_end_count{0};
+    std::atomic<std::uint64_t> m_wal_recovery_records_after_checkpoint{0};
+    std::atomic<std::uint64_t> m_wal_recovery_segments_after_checkpoint{0};
+    std::atomic<std::uint64_t> m_wal_recovery_redo_plan_pending_txn_count{0};
+    std::atomic<std::uint64_t> m_wal_recovery_apply_conflict_count{0};
     mutable std::mutex m_wal_recovery_policy_mu;
     std::string m_wal_recovery_policy;
     std::atomic<std::uint64_t> m_wal_group_commit_count{0};
@@ -545,4 +587,6 @@ private:
     std::atomic<std::uint8_t> m_last_snapshot_source_code{0};
     std::atomic<std::uint64_t> m_last_transaction_snapshot_lsn{0};
     std::atomic<std::uint64_t> m_last_statement_snapshot_lsn{0};
+    std::atomic<std::uint64_t> m_lock_key_range_count{0};
+    std::atomic<std::uint64_t> m_lock_key_predicate_count{0};
 };

@@ -49,6 +49,7 @@ add_library(newdb_core STATIC
     engine/src/heap/heap_file_read_view.cpp
     engine/src/cache/page_cache.cpp
     engine/src/cache/memory_budget.cpp
+    engine/src/memory/memory_registry.cpp
     engine/src/codec/tuple_codec.cpp
     engine/src/heap/heap_page_waterfall.cpp
     engine/src/io/page/page_io.cpp
@@ -57,6 +58,8 @@ add_library(newdb_core STATIC
     engine/src/catalog/catalog.cpp
     engine/src/wal/writer/wal_manager.cpp
     engine/src/wal/recovery/wal_manager_recover_support.cpp
+    engine/src/wal/recovery/wal_redo_planner.cpp
+    engine/src/wal/recovery/wal_redo_applier.cpp
     engine/src/wal/recovery/wal_segment_scanner.cpp
     engine/src/wal/codec/wal_codec.cpp
     engine/src/mvcc/snapshot/mvcc.cpp
@@ -328,6 +331,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_txn_shell_multi_entry_snapshot.cpp
         tests/test_show_plan_table_stats_stale_shell.cpp
         tests/test_where_heap_scan_budget_binding.cpp
+        tests/test_where_query_temp_cap.cpp
         tests/test_txn_autovacuum.cpp
         tests/test_txn_write_conflict.cpp
         tests/test_sidecar_wal_lsn_stress.cpp
@@ -335,6 +339,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_covering_index_sidecar.cpp
         tests/test_covering_projection_sidecar.cpp
         tests/test_eq_sidecar_bucket.cpp
+        tests/test_eq_sidecar_admit.cpp
         tests/test_eq_bloom.cpp
         tests/test_where_concurrency.cpp
         tests/test_query_table_stats.cpp
@@ -342,6 +347,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_wal_segment_scanner.cpp
         tests/test_table_storage_health.cpp
         tests/test_page_cache.cpp
+        tests/test_memory_registry.cpp
         tests/test_storage_soak.cpp
         tests/test_ci_microbench.cpp
         cli/modules/sidecar/common/sidecar_wal_lsn.cpp

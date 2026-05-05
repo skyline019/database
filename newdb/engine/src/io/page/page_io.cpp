@@ -630,6 +630,59 @@ Status compact_heap_file(const char* path,
     return Status::Ok();
 }
 
+Status reorder_heap_ids_dense(const char* path,
+                                const std::string& table_name,
+                                const TableSchema& schema,
+                                std::size_t* out_rows_after,
+                                bool* out_file_changed) {
+    if (!schema.primary_key.empty() && schema.primary_key != "id") {
+        return Status::Fail("reorder ids: primary key must be id (or unset)");
+    }
+    HeapTable tbl;
+    const Status lst = load_heap_file(path, table_name, schema, tbl);
+    if (!lst.ok) {
+        return lst;
+    }
+    std::sort(tbl.rows.begin(), tbl.rows.end(), [](const Row& a, const Row& b) {
+        return a.id < b.id;
+    });
+    bool already_dense = true;
+    for (std::size_t i = 0; i < tbl.rows.size(); ++i) {
+        if (tbl.rows[i].id != static_cast<int>(i + 1)) {
+            already_dense = false;
+            break;
+        }
+    }
+    if (already_dense) {
+        if (out_rows_after != nullptr) {
+            *out_rows_after = tbl.rows.size();
+        }
+        if (out_file_changed != nullptr) {
+            *out_file_changed = false;
+        }
+        return Status::Ok();
+    }
+    int next_id = 1;
+    for (Row& r : tbl.rows) {
+        r.id = next_id++;
+        const auto it_attr_id = r.attrs.find("id");
+        if (it_attr_id != r.attrs.end()) {
+            it_attr_id->second = std::to_string(r.id);
+        }
+    }
+    const Status cst = create_heap_file(path, tbl.rows);
+    if (!cst.ok) {
+        return cst;
+    }
+    if (out_rows_after != nullptr) {
+        *out_rows_after = tbl.rows.size();
+    }
+    if (out_file_changed != nullptr) {
+        *out_file_changed = true;
+    }
+    return Status::Ok();
+}
+
 void scan_heap_file(const char* path) {
     const auto path_mutex = mutex_for_heap_path(path);
     std::lock_guard<std::mutex> io_lock(*path_mutex);

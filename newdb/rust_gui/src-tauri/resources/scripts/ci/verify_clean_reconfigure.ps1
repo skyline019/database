@@ -10,7 +10,10 @@ param(
     [switch]$BenchGateWalRecovery,
     [switch]$SkipGuiGate,
     [switch]$SkipSemanticGate,
-    [switch]$SkipBenchGate
+    [switch]$SkipBenchGate,
+    # Reuse googletest sources from a prior configure under `<repo>/build/_deps/googletest-src` (offline / no re-download).
+    [switch]$UseBuildLocalGtest,
+    [string]$GoogletestSourceDir = ""
 )
 
 # Usage quick reference:
@@ -20,11 +23,28 @@ param(
 #   powershell -ExecutionPolicy Bypass -File scripts/ci/verify_clean_reconfigure.ps1 -ReleaseGrade -BuildDir build_ci_release
 # - Nightly-style runtime gates (uses scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl):
 #   ... -BenchGateStorage -BenchGateWalRecovery
+# - Use local googletest tree from an existing `<repo>/build` (after one online FetchContent):
+#   ... -UseBuildLocalGtest
+# - Or explicit path: -GoogletestSourceDir D:\path\to\googletest-src
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$p = $PSScriptRoot
+$repoRoot = $null
+for ($i = 0; $i -lt 10; $i++) {
+    $cml = Join-Path $p "CMakeLists.txt"
+    if ((Test-Path -LiteralPath $cml) -and (Select-String -Path $cml -Pattern "project\(newdb" -Quiet -ErrorAction SilentlyContinue)) {
+        $repoRoot = $p
+        break
+    }
+    $next = Split-Path -Parent $p
+    if ($next -eq $p) { break }
+    $p = $next
+}
+if (-not $repoRoot) {
+    throw "Could not locate newdb CMake repo root (project(newdb)) starting from $PSScriptRoot"
+}
 $buildPath = Join-Path $repoRoot $BuildDir
 $isMultiConfig = $Generator -match "Visual Studio|Xcode|Multi-Config"
 
@@ -63,6 +83,25 @@ if ($SkipSemanticGate -or $SkipGuiGate -or $SkipBenchGate) {
     Write-Host "[verify_clean_reconfigure] full gate mode enabled (release-grade verification)"
 }
 
+$resolvedGtestSrc = ""
+if ($UseBuildLocalGtest -and $GoogletestSourceDir.Trim() -ne "") {
+    throw "UseBuildLocalGtest and GoogletestSourceDir cannot be used together."
+}
+if ($UseBuildLocalGtest) {
+    $resolvedGtestSrc = Join-Path $repoRoot "build/_deps/googletest-src"
+    if (-not (Test-Path (Join-Path $resolvedGtestSrc "CMakeLists.txt"))) {
+        throw "UseBuildLocalGtest: missing $resolvedGtestSrc (CMakeLists.txt). Configure `<repo>/build` once with network, or pass -GoogletestSourceDir."
+    }
+} elseif ($GoogletestSourceDir.Trim() -ne "") {
+    $resolvedGtestSrc = $GoogletestSourceDir.Trim()
+    if (-not (Test-Path (Join-Path $resolvedGtestSrc "CMakeLists.txt"))) {
+        throw "GoogletestSourceDir invalid (need CMakeLists.txt): $resolvedGtestSrc"
+    }
+}
+if ($resolvedGtestSrc -ne "") {
+    Write-Host "[verify_clean_reconfigure] googletest_SOURCE_DIR (local): $resolvedGtestSrc"
+}
+
 if (Test-Path -LiteralPath $buildPath) {
     Write-Host "[verify_clean_reconfigure] removing existing build dir"
     Remove-Item -LiteralPath $buildPath -Recurse -Force
@@ -78,6 +117,9 @@ for ($attempt = 1; $attempt -le $ConfigureRetries; $attempt++) {
     $configureArgs = @("-S", $repoRoot, "-B", $buildPath, "-G", $Generator, "-DCMAKE_CXX_SCAN_FOR_MODULES=OFF")
     if (-not $isMultiConfig) {
         $configureArgs += "-DCMAKE_BUILD_TYPE=$BuildType"
+    }
+    if ($resolvedGtestSrc -ne "") {
+        $configureArgs += "-Dgoogletest_SOURCE_DIR=$resolvedGtestSrc"
     }
     & cmake @configureArgs
     if ($LASTEXITCODE -eq 0) {

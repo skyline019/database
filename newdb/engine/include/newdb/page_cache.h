@@ -21,7 +21,7 @@ struct PageCacheGlobalStats {
 /// Returns cumulative counters since process start (thread-safe).
 [[nodiscard]] PageCacheGlobalStats page_cache_global_stats();
 
-/// Test hook: zero hit/miss/eviction counters (does not clear cache entries).
+/// Test hook: clear all cached pages, release their registry bytes, and zero global stats counters.
 void page_cache_reset_stats_for_test();
 
 /// When `NEWDB_PAGE_CACHE_MAX_BYTES` > 0, try to copy a cached page into `buf` (length `page_size`).

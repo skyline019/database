@@ -197,6 +197,17 @@ LEGACY_DEFAULT_STATS = {
     "sidecar_invalidate_fail_count": 0,
     "where_eq_sidecar_disk_bytes_read_total": 0,
     "where_eq_sidecar_disk_loads": 0,
+    "mem_page_cache_used_bytes": 0,
+    "mem_page_cache_evictions": 0,
+    "mem_page_cache_admit_rejects": 0,
+    "mem_sidecar_used_bytes": 0,
+    "mem_sidecar_evictions": 0,
+    "mem_sidecar_admit_rejects": 0,
+    "mem_query_temp_used_bytes": 0,
+    "mem_query_temp_evictions": 0,
+    "mem_query_temp_admit_rejects": 0,
+    "mem_global_used_bytes": 0,
+    "mem_global_admit_rejects": 0,
 }
 
 

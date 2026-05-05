@@ -74,6 +74,21 @@ bool TxnCoordinator::recoverFromWAL() {
             .count());
     m_wal_recovery_records_scanned.store(static_cast<std::uint64_t>(recs.size()), std::memory_order_relaxed);
     m_wal_recovery_analyze_ms.store(analyze_elapsed_ms, std::memory_order_relaxed);
+    {
+        newdb::WalRecoveryStats scan{};
+        std::uint64_t records_after_cp = 0;
+        if (wm->capture_recovery_scan_stats(&scan).ok) {
+            m_wal_recovery_segments_after_checkpoint.store(scan.indexed_segments, std::memory_order_relaxed);
+            if (scan.last_complete_checkpoint_lsn > 0) {
+                for (const auto& wr : recs) {
+                    if (wr.lsn > scan.last_complete_checkpoint_lsn) {
+                        ++records_after_cp;
+                    }
+                }
+            }
+            m_wal_recovery_records_after_checkpoint.store(records_after_cp, std::memory_order_relaxed);
+        }
+    }
     struct TxnWalOp {
         TxnRecord rec;
         std::uint64_t op_seq{0};
@@ -111,6 +126,12 @@ bool TxnCoordinator::recoverFromWAL() {
             } else if (wr.op == newdb::WalOp::TXN_ABORT_PARTIAL && wr.has_pitr_target_lsn) {
                 partial_cutoff_by_txn[wr.txn_id] = wr.pitr_target_lsn;
             }
+            continue;
+        }
+        // Redo/undo chain: only heap table DML (INSERT/UPDATE/DELETE). Skip SESSION_SNAPSHOT,
+        // SAVEPOINT_*, PITR_MARK rows, and any other non-DML logical WAL entries.
+        if (wr.op != newdb::WalOp::INSERT && wr.op != newdb::WalOp::UPDATE &&
+            wr.op != newdb::WalOp::DELETE) {
             continue;
         }
         TxnWalOp oprec;
@@ -184,7 +205,9 @@ bool TxnCoordinator::recoverFromWAL() {
     }
     m_wal_recovery_dangling_txns.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
                                        std::memory_order_relaxed);
-    
+    m_wal_recovery_redo_plan_pending_txn_count.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
+                                                     std::memory_order_relaxed);
+
     if (dangling_count > 0) {
         logging_console_printf("[WAL] Found %zu uncommitted operations, starting recovery...\n", dangling_count);
         m_wal_recovery_undo_ops.fetch_add(static_cast<std::uint64_t>(dangling_count),
@@ -217,6 +240,7 @@ bool TxnCoordinator::recoverFromWAL() {
     }();
     std::unordered_set<std::string> redo_guard; // lite: full key set
     std::unordered_map<std::uint64_t, std::uint64_t> applied_max_lsn_by_object; // strict: per-object max lsn
+    std::uint64_t redo_apply_conflicts = 0;
     for (auto& table_kv : redo_by_table) {
         const std::string data_file = resolveDataFilePath(table_kv.first);
         auto& ops = table_kv.second;
@@ -228,12 +252,14 @@ bool TxnCoordinator::recoverFromWAL() {
             if (strict_redo) {
                 const auto it = applied_max_lsn_by_object.find(op.db_object_id);
                 if (it != applied_max_lsn_by_object.end() && op.record_lsn <= it->second) {
+                    ++redo_apply_conflicts;
                     continue;
                 }
                 applied_max_lsn_by_object[op.db_object_id] = std::max(applied_max_lsn_by_object[op.db_object_id], op.record_lsn);
             } else {
                 const std::string key = std::to_string(op.db_object_id) + ":" + op.rec.key + ":" + std::to_string(op.record_lsn);
                 if (!redo_guard.insert(key).second) {
+                    ++redo_apply_conflicts;
                     continue;
                 }
             }
@@ -252,6 +278,7 @@ bool TxnCoordinator::recoverFromWAL() {
             std::chrono::steady_clock::now() - redo_started_at)
             .count());
     m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
+    m_wal_recovery_apply_conflict_count.store(redo_apply_conflicts, std::memory_order_relaxed);
     m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
     m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
 

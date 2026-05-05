@@ -12,6 +12,7 @@
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>
 #include <newdb/memory_budget.h>
+#include <newdb/memory_registry.h>
 #include <newdb/page_cache.h>
 
 #include <atomic>
@@ -180,6 +181,11 @@ TxnRuntimeStats TxnCoordinator::runtimeStats() const {
     s.wal_recovery_redo_ms = m_wal_recovery_redo_ms.load(std::memory_order_relaxed);
     s.wal_recovery_checkpoint_begin_count = m_wal_recovery_checkpoint_begin_count.load(std::memory_order_relaxed);
     s.wal_recovery_checkpoint_end_count = m_wal_recovery_checkpoint_end_count.load(std::memory_order_relaxed);
+    s.wal_recovery_records_after_checkpoint = m_wal_recovery_records_after_checkpoint.load(std::memory_order_relaxed);
+    s.wal_recovery_segments_after_checkpoint = m_wal_recovery_segments_after_checkpoint.load(std::memory_order_relaxed);
+    s.wal_recovery_redo_plan_pending_txn_count =
+        m_wal_recovery_redo_plan_pending_txn_count.load(std::memory_order_relaxed);
+    s.wal_recovery_apply_conflict_count = m_wal_recovery_apply_conflict_count.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
         s.wal_recovery_policy = m_wal_recovery_policy;
@@ -314,15 +320,29 @@ TxnRuntimeStats TxnCoordinator::runtimeStats() const {
     s.compact_debt_priority = m_compact_debt_priority_last.load(std::memory_order_relaxed);
     {
         const newdb::PageCacheGlobalStats pc = newdb::page_cache_global_stats();
+        const newdb::MemoryRegistryTotals regs = newdb::memory_registry_totals();
         s.page_cache_hits = pc.hits;
         s.page_cache_misses = pc.misses;
         s.page_cache_evictions = pc.evictions;
         s.page_cache_bytes_in_cache = pc.bytes_in_cache;
         s.memory_budget_max_bytes = newdb::memory_budget_max_bytes_env();
-        s.memory_budget_used_bytes = pc.bytes_in_cache;
-        s.memory_budget_reject_count = pc.reject_oversized_page;
+        s.memory_budget_used_bytes = regs.global_used_bytes != 0
+                                         ? regs.global_used_bytes
+                                         : pc.bytes_in_cache;
+        s.memory_budget_reject_count = regs.global_admit_rejects + pc.reject_oversized_page;
         s.memory_budget_bytes_evicted_total = pc.bytes_evicted_total;
         s.memory_budget_sidecar_load_skipped_total = eq_sidecar_memory_budget_skip_count();
+        s.mem_page_cache_used_bytes = regs.page_cache_used_bytes;
+        s.mem_page_cache_evictions = regs.page_cache_evictions;
+        s.mem_page_cache_admit_rejects = regs.page_cache_admit_rejects;
+        s.mem_sidecar_used_bytes = regs.sidecar_used_bytes;
+        s.mem_sidecar_evictions = regs.sidecar_evictions;
+        s.mem_sidecar_admit_rejects = regs.sidecar_admit_rejects;
+        s.mem_query_temp_used_bytes = regs.query_temp_used_bytes;
+        s.mem_query_temp_evictions = regs.query_temp_evictions;
+        s.mem_query_temp_admit_rejects = regs.query_temp_admit_rejects;
+        s.mem_global_used_bytes = regs.global_used_bytes;
+        s.mem_global_admit_rejects = regs.global_admit_rejects;
     }
     {
         std::lock_guard<std::mutex> lk(m_last_storage_health_mu);
@@ -367,6 +387,8 @@ TxnRuntimeStats TxnCoordinator::runtimeStats() const {
         s.last_snapshot_source = "none";
         break;
     }
+    s.lock_key_range_count = m_lock_key_range_count.load(std::memory_order_relaxed);
+    s.lock_key_predicate_count = m_lock_key_predicate_count.load(std::memory_order_relaxed);
     return s;
 }
 

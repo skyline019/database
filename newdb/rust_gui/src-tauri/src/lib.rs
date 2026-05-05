@@ -53,6 +53,13 @@ struct DllApi {
         *mut std::os::raw::c_char,
         usize,
     ) -> i32,
+    session_where_plan_json: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        i32,
+        *const *const std::os::raw::c_char,
+        *mut std::os::raw::c_char,
+        usize,
+    ) -> i32,
 }
 
 static DLL_API: OnceCell<DllApi> = OnceCell::new();
@@ -242,10 +249,36 @@ struct PageJsonResult {
     columns: Option<Vec<ColumnMeta>>,
 }
 
+fn default_text_main() -> String {
+    "#dbe7ff".to_string()
+}
+fn default_text_regular() -> String {
+    "#c7d2fe".to_string()
+}
+fn default_text_soft() -> String {
+    "#93c5fd".to_string()
+}
+fn default_page_bg() -> String {
+    "#080d18".to_string()
+}
+fn default_table_bg() -> String {
+    "#08121f".to_string()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct UiSettings {
     accent: String,
+    #[serde(default = "default_text_main")]
+    text_main: String,
+    #[serde(default = "default_text_regular")]
+    text_regular: String,
+    #[serde(default = "default_text_soft")]
+    text_soft: String,
+    #[serde(default = "default_page_bg")]
+    page_bg: String,
+    #[serde(default = "default_table_bg")]
+    table_bg: String,
     bg_mode: String,
     bg_image_url: String,
     bg_image_opacity: f32,
@@ -269,11 +302,16 @@ impl Default for UiSettings {
     fn default() -> Self {
         Self {
             accent: "#3b82f6".to_string(),
+            text_main: default_text_main(),
+            text_regular: default_text_regular(),
+            text_soft: default_text_soft(),
+            page_bg: default_page_bg(),
+            table_bg: default_table_bg(),
             bg_mode: "gradient".to_string(),
             bg_image_url: String::new(),
             bg_image_opacity: 0.22,
             panel_opacity: 0.9,
-            table_view_opacity: 0.96,
+            table_view_opacity: 0.74,
             log_panel_opacity: 0.92,
             font_scale: 1.0,
             dense_mode: false,
@@ -772,6 +810,18 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
                 > = lib.get(b"newdb_session_execute\0").map_err(|e| e.to_string())?;
                 *sym
             };
+            let session_where_plan_json = {
+                let sym: Symbol<
+                    unsafe extern "C" fn(
+                        *mut std::ffi::c_void,
+                        i32,
+                        *const *const std::os::raw::c_char,
+                        *mut std::os::raw::c_char,
+                        usize,
+                    ) -> i32,
+                > = lib.get(b"newdb_session_where_plan_json\0").map_err(|e| e.to_string())?;
+                *sym
+            };
             Ok(DllApi {
                 _lib: lib,
                 version,
@@ -779,6 +829,7 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
                 session_destroy,
                 session_set_table,
                 session_execute,
+                session_where_plan_json,
             })
         }
     })
@@ -937,12 +988,139 @@ fn ensure_dll_session(
     Ok(h as usize)
 }
 
+fn merge_where_plan_c_api_to_show_plan_shell(js: &serde_json::Value) -> Option<String> {
+    if js.get("ok")?.as_i64()? != 1 {
+        return None;
+    }
+    let candidates_in = js.get("candidates")?.as_array()?.clone();
+    let chosen_plan = js.get("chosen_plan_id").and_then(|v| v.as_str());
+    let mut plan_candidates: Vec<serde_json::Value> = Vec::new();
+    for c in &candidates_in {
+        let id = c.get("id")?.as_str()?;
+        let estimated_cost = c.get("estimated_cost")?.as_f64()?;
+        let rows = c.get("estimated_rows").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let rationale = c.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
+        let is_ch = chosen_plan == Some(id);
+        let mut ent = serde_json::json!({
+            "id": id,
+            "estimated_cost": estimated_cost,
+            "cost": {"estimated_rows": rows},
+            "rationale": rationale,
+        });
+        if let Some(m) = ent.as_object_mut() {
+            if is_ch {
+                m.insert("chosen".to_string(), serde_json::json!(true));
+            } else if chosen_plan.is_some() && chosen_plan != Some("") {
+                m.insert(
+                    "reason_rejected".to_string(),
+                    serde_json::json!("not_chosen"),
+                );
+            }
+        }
+        plan_candidates.push(ent);
+    }
+    let considered = plan_candidates.len().max(1);
+    let chosen = js
+        .get("chosen_plan_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let chosen_reason = js
+        .get("chosen_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let out = serde_json::json!({
+        "plan_id": chosen,
+        "chosen_reason": chosen_reason,
+        "logical_rows": 0,
+        "matched_rows": 0,
+        "estimated_scan_rows": 0,
+        "plan_candidates_considered": considered,
+        "plan_candidates": plan_candidates,
+        "table_stats_stale": false,
+        "path": "where_executor",
+        "snapshot_lsn": 0,
+        "snapshot_source": "",
+        "readpath_enabled": true,
+        "delta": {
+            "fallback_scans": 0,
+            "eq_sidecar": 0,
+            "id_pk": 0,
+            "plan_fallback": 0,
+            "rows_scanned": 0,
+            "rows_returned": 0
+        }
+    });
+    serde_json::to_string(&out).ok()
+}
+
+fn try_execute_show_plan_via_where_plan_json(
+    api: &DllApi,
+    handle: usize,
+    command_line: &str,
+) -> Option<Result<String, String>> {
+    let t = command_line.trim_start();
+    let prefix = "SHOW PLAN";
+    if t.len() < prefix.len() {
+        return None;
+    }
+    if !t[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let tail = t[prefix.len()..].trim();
+    if tail.is_empty() {
+        return None;
+    }
+    let tokens: Vec<&str> = tail.split_whitespace().collect();
+    if tokens.len() < 3 {
+        return None;
+    }
+    let argv_c: Vec<std::ffi::CString> = tokens.iter().map(|s| as_cstring(s)).collect();
+    let argv_ptrs: Vec<*const std::os::raw::c_char> =
+        argv_c.iter().map(|c| c.as_ptr()).collect();
+    let argc = argv_ptrs.len() as i32;
+    let mut buf = vec![0_i8; 256 * 1024];
+    let ok = unsafe {
+        (api.session_where_plan_json)(
+            handle as *mut std::ffi::c_void,
+            argc,
+            argv_ptrs.as_ptr(),
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    };
+    let out_u8: Vec<u8> = buf
+        .into_iter()
+        .take_while(|b| *b != 0)
+        .map(|b| b as u8)
+        .collect();
+    let text = String::from_utf8_lossy(&out_u8).trim().to_string();
+    if ok == 0 {
+        return Some(Err(if text.is_empty() {
+            "newdb_session_where_plan_json failed".to_string()
+        } else {
+            text
+        }));
+    }
+    let v: serde_json::Value =
+        match serde_json::from_str(&text) {
+            Ok(x) => x,
+            Err(_) => return Some(Ok(text + "\n")),
+        };
+    if let Some(merged) = merge_where_plan_c_api_to_show_plan_shell(&v) {
+        return Some(Ok(merged));
+    }
+    Some(Ok(text + "\n"))
+}
+
 fn execute_via_dll_session(
     api: &DllApi,
     handle: usize,
     st: &SessionState,
     command_line: &str,
 ) -> Result<String, String> {
+    if let Some(r) = try_execute_show_plan_via_where_plan_json(api, handle, command_line) {
+        return r;
+    }
     let table = as_cstring(&normalize_table(st));
     let cmd = as_cstring(command_line);
     let mut out = vec![0_i8; 256 * 1024];

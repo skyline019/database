@@ -263,21 +263,39 @@ bool handle_query_where_count_commands(ShellState& st,
             const char* readpath_json = txn_isolation_readpath_enabled() ? "true" : "false";
             const std::vector<PlanCandidate> plan_cands =
                 where_build_plan_candidates(tbl, st.session.schema, conds, where_stats_hint);
+            const std::string plan_id_chosen = plan_id.empty() ? "?" : plan_id;
+            std::string chosen_reason;
+            for (const auto& pcn : plan_cands) {
+                if (pcn.id == plan_id_chosen) {
+                    chosen_reason = pcn.rationale;
+                    break;
+                }
+            }
             std::ostringstream cand_json;
             cand_json << "[";
             for (std::size_t i = 0; i < plan_cands.size(); ++i) {
                 if (i > 0) {
                     cand_json << ',';
                 }
+                const bool is_chosen = (plan_cands[i].id == plan_id_chosen);
                 cand_json << "{\"id\":\"" << json_string_escape(plan_cands[i].id) << "\",\"estimated_cost\":"
                           << plan_cands[i].estimated_cost << ",\"cost\":{\"estimated_rows\":"
-                          << plan_cands[i].cost.estimated_rows << "}}";
+                          << plan_cands[i].cost.estimated_rows
+                          << "},\"rationale\":\"" << json_string_escape(plan_cands[i].rationale) << "\"";
+                if (is_chosen) {
+                    cand_json << ",\"chosen\":true";
+                } else if (plan_id_chosen != "?") {
+                    cand_json << ",\"reason_rejected\":\"not_chosen\"";
+                }
+                cand_json << "}";
             }
             cand_json << "]";
-            const std::string plan_id_esc = json_string_escape(plan_id.empty() ? "?" : plan_id);
+            const std::string plan_id_esc = json_string_escape(plan_id_chosen);
             const std::string snap_esc = json_string_escape(plan_stats.last_snapshot_source);
+            const std::string chosen_reason_esc = json_string_escape(chosen_reason);
             std::ostringstream json;
-            json << "{\"plan_id\":\"" << plan_id_esc << "\",\"logical_rows\":" << logical_rows
+            json << "{\"plan_id\":\"" << plan_id_esc << "\",\"chosen_reason\":\"" << chosen_reason_esc
+                 << "\",\"logical_rows\":" << logical_rows
                  << ",\"matched_rows\":" << matched_idx.size() << ",\"estimated_scan_rows\":" << estimated_scan_rows
                  << ",\"plan_candidates_considered\":"
                  << static_cast<unsigned>(plan_candidates_considered == 0u ? 1u : plan_candidates_considered)

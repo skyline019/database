@@ -6,89 +6,17 @@ on:
       - "newdb/**"
       - "waterfall/**"
       - ".github/workflows/newdb-ci.yml"
+      - "newdb/.github/workflows/**"
   pull_request:
     paths:
       - "newdb/**"
       - "waterfall/**"
       - ".github/workflows/newdb-ci.yml"
+      - "newdb/.github/workflows/**"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * 1"
 
 jobs:
-  linux-gcc-coverage:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: newdb
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ pkg-config lcov
-
-      - name: Configure (with coverage)
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DNEWDB_ENABLE_COVERAGE=ON
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Test
-        run: cd build && ctest --output-on-failure
-
-      - name: Bench gate (smoke + microbench, PR profile + gate-fail JSON)
-        run: >
-          python3 scripts/ci/ci_bench_gate.py build
-          --profile pr
-          --gate-fail-json-out scripts/results/pr_gate_fail.json
-
-      - name: Validate runtime stats fixture (contract)
-        run: python3 scripts/validate/validate_runtime_stats.py scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
-
-      - name: Coverage (geninfo + line gate)
-        run: |
-          cd build
-          geninfo . --output-filename coverage.info --ignore-errors mismatch,gcov,negative
-          python3 ../scripts/ci/check_coverage_threshold.py coverage.info \
-            --require newdb/engine/src/:70 \
-            --require newdb/cli/:40
-
-      - name: Upload lcov artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: newdb-coverage-lcov
-          path: newdb/build/coverage.info
-
-  linux-clang:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: newdb
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build clang pkg-config
-
-      - name: Configure
-        env:
-          CXX: clang++
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build and test
-        run: |
-          cmake --build build --parallel
-          cd build && ctest --output-on-failure
-
-      - name: Bench gate (smoke + microbench, PR profile + gate-fail JSON)
-        run: >
-          python3 scripts/ci/ci_bench_gate.py build
-          --profile pr
-          --gate-fail-json-out scripts/results/pr_gate_fail.json
-
-      - name: Validate runtime stats fixture (contract)
-        run: python3 scripts/validate/validate_runtime_stats.py scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+  reusable-ci:
+    uses: ./newdb/.github/workflows/newdb-ci-reusable.yml

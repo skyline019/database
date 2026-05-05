@@ -46,6 +46,10 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `wal_recovery_dangling_txns` (int >= 0): 最近一次恢复识别到的 dangling 事务数
 - `wal_recovery_redo_ms` (int >= 0, optional / legacy default 0): CLI `recoverFromWAL` 路径上 redo（已提交重放）阶段墙钟毫秒
 - `wal_recovery_checkpoint_begin_count` / `wal_recovery_checkpoint_end_count` (int >= 0, optional): 扫描 WAL 时观测到的 checkpoint begin/end 记录计数
+- `wal_recovery_records_after_checkpoint` (int >= 0, optional): 最近协助恢复路径下，LSN 大于最后完整 checkpoint 边界的记录条数（CLI `capture_recovery_scan_stats` + 扫描向量）
+- `wal_recovery_segments_after_checkpoint` (int >= 0, optional): 参与索引的 WAL 段数（`WalRecoveryStats::indexed_segments` 镜像）
+- `wal_recovery_redo_plan_pending_txn_count` (int >= 0, optional): 重放计划阶段观测到的未提交事务数（与 CLI reconcile 中 `dangling_by_txn` 规模一致）
+- `wal_recovery_apply_conflict_count` (int >= 0, optional): redo 应用阶段因幂等/去重跳过的操作次数
 - `wal_group_commit_count` (int >= 0): group commit flush 次数
 - `wal_group_commit_batch_commits` (int >= 0): group commit 累计批次提交事务数
 - `wal_group_commit_pending_commits` (int >= 0): 尚未 flush 的待批提交事务数
@@ -153,6 +157,19 @@ breaking v1 validation:
 | `vacuum_score_file_bytes_term` | int | Last vacuum enqueue score: raw `.bin` size term |
 | `vacuum_score_health_bonus_term` | int | Last vacuum enqueue score: health-derived bonus term |
 | `vacuum_score_wal_since_term` | int | Last vacuum enqueue score: optional WAL-since term (`NEWDB_VACUUM_SCORE_WAL_SINCE=1`) |
+| `lock_key_range_count` | int | Successful first-time `LockKeyKind::RangeWriteIntent` reservations (`tryReserveWriteLockKey`) |
+| `lock_key_predicate_count` | int | Successful first-time `LockKeyKind::PredicateWriteIntent` reservations |
+| `mem_page_cache_used_bytes` | int | Phase-5 MemoryRegistry per-kind PageCache used bytes (`memory_registry_totals().page_cache_used_bytes`) |
+| `mem_page_cache_evictions` | int | Phase-5 MemoryRegistry PageCache eviction counter (record_eviction calls) |
+| `mem_page_cache_admit_rejects` | int | Phase-5 MemoryRegistry PageCache `try_admit` rejects (cap exhausted or oversized page) |
+| `mem_sidecar_used_bytes` | int | Phase-5 MemoryRegistry equality sidecar used bytes (LRU resident) |
+| `mem_sidecar_evictions` | int | Phase-5 MemoryRegistry equality sidecar evictor invocations |
+| `mem_sidecar_admit_rejects` | int | Phase-5 MemoryRegistry equality sidecar `try_admit` rejects (entry too large or cap exhausted) |
+| `mem_query_temp_used_bytes` | int | Phase-5 MemoryRegistry WHERE query temp reservation (rough estimate) |
+| `mem_query_temp_evictions` | int | Phase-5 MemoryRegistry WHERE query temp evictions (placeholder; reserved) |
+| `mem_query_temp_admit_rejects` | int | Phase-5 MemoryRegistry WHERE query temp `try_admit` rejects (caller fell back) |
+| `mem_global_used_bytes` | int | Phase-5 MemoryRegistry aggregate per-kind used bytes |
+| `mem_global_admit_rejects` | int | Phase-5 MemoryRegistry aggregate per-kind admit reject counter |
 
 `newdb_runtime_report` may emit derived summaries (not in JSONL rows): `page_cache_hit_ratio`,
 `where_scan_amplification`, `wal_recovery_redo_ratio` in its `--output` / `--json` report.

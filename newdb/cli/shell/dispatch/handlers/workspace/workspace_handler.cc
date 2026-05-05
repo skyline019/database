@@ -141,6 +141,35 @@ bool handle_workspace_admin_commands(ShellState& st,
         shell_invalidate_session_table(st);
         return true;
     }
+    if (strcasecmp_ascii(line, "CONFIRM_REORDER") == 0) {
+        if (current_file.empty()) {
+            log_and_print(log_file, "[REORDER] no table selected. Use CREATE TABLE or USE first.\n");
+            return true;
+        }
+        log_and_print(log_file,
+                      "[REORDER] confirmed: deleted rows will not be recovered; reassigning row ids to 1..N "
+                      "(primary key must be id).\n");
+        std::size_t rows_after = 0;
+        bool file_changed = false;
+        const newdb::Status rst =
+            newdb::io::reorder_heap_ids_dense(eff_data.c_str(), current_table, st.session.schema, &rows_after,
+                                             &file_changed);
+        if (rst.ok) {
+            if (file_changed) {
+                (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+                log_and_print(log_file, "[REORDER] ok: table '%s' (file=%s), rows=%zu, ids dense 1..%zu.\n",
+                              current_table.c_str(), current_file.c_str(), rows_after, rows_after);
+            } else {
+                log_and_print(log_file,
+                              "[REORDER] noop: table '%s' (file=%s), rows=%zu, ids already dense 1..%zu (no rewrite).\n",
+                              current_table.c_str(), current_file.c_str(), rows_after, rows_after);
+            }
+        } else {
+            log_and_print(log_file, "[REORDER] failed: %s\n", rst.message.c_str());
+        }
+        shell_invalidate_session_table(st);
+        return true;
+    }
     if (strcasecmp_ascii(line, "SCAN") == 0) {
         if (current_file.empty()) {
             log_and_print(log_file, "[SCAN] no table selected. Use CREATE TABLE or USE first.\n");

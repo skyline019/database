@@ -19,6 +19,8 @@ struct ColumnStats {
     std::string max_value;
     /// Up to 3 most frequent non-null values (best-effort; may be empty).
     std::vector<std::string> top_k;
+    /// Equi-depth histogram buckets (fixed 8 buckets over sorted non-null samples).
+    std::vector<std::uint64_t> histogram_buckets;
 };
 
 struct TableStats {

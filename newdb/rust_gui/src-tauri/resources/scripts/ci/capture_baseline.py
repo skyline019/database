@@ -194,6 +194,12 @@ def main() -> int:
         help="Write baseline/{runtime_stats.jsonl,runtime_report.json,ctest.log,manifest.json} under DIR",
     )
     p.add_argument(
+        "--cross-host-baseline-dir",
+        metavar="DIR",
+        help="After writing emit-baseline-dir bundle, also copy manifest.json to DIR/<host_slug>/ "
+        "for cross-machine baseline archives (requires --emit-baseline-dir)",
+    )
+    p.add_argument(
         "--runtime-jsonl-input",
         metavar="PATH",
         help="When used with --emit-baseline-dir, copy this file to baseline/runtime_stats.jsonl",
@@ -403,8 +409,9 @@ def main() -> int:
             f"--runtime-jsonl {fixture_rel} --runtime-last-n 2 "
             f"--gate-fail-json-out scripts/results/runtime_gate_fail.json"
         )
+        gen_ts = datetime.now(timezone.utc).isoformat()
         manifest = {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+            "generated_at_utc": gen_ts,
             "repo_root": str(repo),
             "build_dir": str(build),
             "build_config": cfg,
@@ -436,8 +443,39 @@ def main() -> int:
                 manifest["git_commit"] = gc
                 manifest["git_root"] = str(root)
                 break
-        (bl / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        man_path = bl / "manifest.json"
+        man_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         print(f"[capture_baseline] wrote baseline bundle -> {bl}")
+
+        if args.cross_host_baseline_dir:
+            ch = Path(args.cross_host_baseline_dir)
+            slug_bits = [
+                platform.system().lower().replace(" ", "_"),
+                platform.machine().lower().replace(" ", "_"),
+                str(_cpu_count()),
+                manifest.get("compiler_hint", "").replace("/", "_").replace("\\", "_")[:48],
+            ]
+            host_slug = "__".join(x for x in slug_bits if x)
+            dest_dir = ch / host_slug
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(man_path, dest_dir / "manifest.json")
+            idx_path = ch / "host_index.json"
+            hosts: list[dict[str, Any]] = []
+            if idx_path.is_file():
+                try:
+                    hosts = json.loads(idx_path.read_text(encoding="utf-8")).get("hosts", [])
+                except json.JSONDecodeError:
+                    hosts = []
+            entry = {
+                "host_slug": host_slug,
+                "manifest": str(dest_dir / "manifest.json"),
+                "generated_at_utc": gen_ts,
+                "bench_gate_profile": manifest.get("bench_gate_profile"),
+            }
+            hosts = [h for h in hosts if h.get("host_slug") != host_slug]
+            hosts.append(entry)
+            idx_path.write_text(json.dumps({"hosts": hosts}, indent=2), encoding="utf-8")
+            print(f"[capture_baseline] cross-host baseline copy -> {dest_dir / 'manifest.json'}")
 
     print("[capture_baseline] done")
     return 0

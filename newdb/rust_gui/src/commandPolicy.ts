@@ -48,6 +48,8 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
       "txn_snapshot_pinned_count",
       "txn_readpath_disabled_count",
       "last_snapshot_source",
+      "lock_key_range_count",
+      "lock_key_predicate_count",
     ],
   },
   {

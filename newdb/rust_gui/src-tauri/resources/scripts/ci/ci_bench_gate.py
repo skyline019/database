@@ -10,10 +10,160 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
 from typing import Any, Optional
+
+
+def _apply_recommended_thresholds_blob(args: argparse.Namespace, blob: Any) -> None:
+    """Merge a `recommended_thresholds_<profile>` style dict into argparse args.
+
+    Only fills numeric attributes still at sentinel `-1` (float) / negative (int) so that
+    profile defaults and explicit CLI flags continue to win.
+    """
+    thr: Optional[dict] = None
+    if isinstance(blob, dict):
+        prof = getattr(args, "_profile_effective", getattr(args, "profile", "local"))
+        prof_key = f"recommended_thresholds_{prof}"
+        if isinstance(blob.get(prof_key), dict):
+            thr = blob[prof_key]
+        elif isinstance(blob.get("recommended_thresholds_pr"), dict):
+            thr = blob["recommended_thresholds_pr"]
+        elif "profile" in blob:
+            thr = blob
+    if not isinstance(thr, dict):
+        return
+    for key, val in thr.items():
+        if not hasattr(args, key):
+            continue
+        cur = getattr(args, key)
+        if isinstance(cur, bool):
+            continue
+        if isinstance(cur, float) and cur >= 0.0:
+            continue
+        if isinstance(cur, int) and cur >= 0:
+            continue
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            setattr(args, key, float(val))
+
+
+def _apply_recommended_thresholds_path(args: argparse.Namespace, path: str) -> None:
+    """Load a recommended-thresholds JSON file and merge keys into args (sentinel only)."""
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            blob = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"NOTE: could not apply recommended thresholds from {path}: {exc}", file=sys.stderr)
+        return
+    _apply_recommended_thresholds_blob(args, blob)
+
+
+def _detect_local_host_slug() -> str:
+    """Best-effort local host_slug shaped like capture_baseline.py output (without compiler tail)."""
+    try:
+        cpu_count = str(os.cpu_count() or 0)
+    except Exception:
+        cpu_count = "0"
+    bits = [
+        platform.system().lower().replace(" ", "_"),
+        platform.machine().lower().replace(" ", "_"),
+        cpu_count,
+    ]
+    return "__".join(b for b in bits if b)
+
+
+def _select_baseline_host(hosts: list, prefer_slug: str, local_slug: str) -> Optional[dict]:
+    """Pick the closest host entry from `hosts[]` per plan precedence (slug → 3-seg → 2-seg → newest)."""
+    if not isinstance(hosts, list) or not hosts:
+        return None
+
+    def first_match(predicate) -> Optional[dict]:
+        for h in hosts:
+            if isinstance(h, dict) and predicate(h):
+                return h
+        return None
+
+    target = prefer_slug or local_slug
+    if target:
+        same = first_match(lambda h: h.get("host_slug") == target)
+        if same is not None:
+            return same
+        target_bits = target.split("__")
+        if len(target_bits) >= 3:
+            three = first_match(
+                lambda h: isinstance(h.get("host_slug"), str)
+                and h["host_slug"].split("__")[:3] == target_bits[:3]
+            )
+            if three is not None:
+                return three
+        if len(target_bits) >= 2:
+            two = first_match(
+                lambda h: isinstance(h.get("host_slug"), str)
+                and h["host_slug"].split("__")[:2] == target_bits[:2]
+            )
+            if two is not None:
+                return two
+
+    def _ts(h: dict) -> str:
+        return str(h.get("generated_at_utc") or "")
+
+    return max((h for h in hosts if isinstance(h, dict)), key=_ts, default=None)
+
+
+def _apply_baseline_host_index(args: argparse.Namespace) -> None:
+    """Walk the cross-host `host_index.json`, pick a manifest, and merge recommended thresholds.
+
+    Always best-effort: missing file / parse errors only print a NOTE (matches plan §C.4).
+    The selected slug is stashed at `args._baseline_host_slug_used` for gate-fail diagnostics.
+    """
+    idx_path = args.baseline_host_index
+    if not idx_path:
+        return
+    if not os.path.isabs(idx_path):
+        here_dir = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(here_dir))
+        idx_path = os.path.join(repo_root, idx_path.replace("/", os.sep))
+    if not os.path.isfile(idx_path):
+        print(f"NOTE: --baseline-host-index file not found: {idx_path}", file=sys.stderr)
+        return
+    try:
+        with open(idx_path, encoding="utf-8") as f:
+            blob = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"NOTE: could not parse --baseline-host-index: {exc}", file=sys.stderr)
+        return
+    hosts = blob.get("hosts") if isinstance(blob, dict) else None
+    if not isinstance(hosts, list) or not hosts:
+        print("NOTE: --baseline-host-index has no hosts[] entries", file=sys.stderr)
+        return
+    chosen = _select_baseline_host(
+        hosts,
+        prefer_slug=getattr(args, "baseline_prefer_host_slug", "") or "",
+        local_slug=_detect_local_host_slug(),
+    )
+    if chosen is None:
+        print("NOTE: --baseline-host-index could not pick a host entry", file=sys.stderr)
+        return
+    setattr(args, "_baseline_host_slug_used", str(chosen.get("host_slug") or ""))
+    manifest_path = chosen.get("manifest")
+    if not isinstance(manifest_path, str) or not manifest_path:
+        return
+    if not os.path.isabs(manifest_path):
+        manifest_path = os.path.join(os.path.dirname(idx_path), manifest_path)
+    if not os.path.isfile(manifest_path):
+        print(f"NOTE: baseline manifest missing: {manifest_path}", file=sys.stderr)
+        return
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"NOTE: could not parse baseline manifest {manifest_path}: {exc}", file=sys.stderr)
+        return
+    _apply_recommended_thresholds_blob(args, manifest)
 
 
 def _apply_profile_defaults(args: argparse.Namespace) -> None:
@@ -35,6 +185,11 @@ def _apply_profile_defaults(args: argparse.Namespace) -> None:
             args.max_vacuum_compact_failure_delta = 0.0
         if args.max_compact_debt_bytes_peak < 0.0:
             args.max_compact_debt_bytes_peak = 1.0e11
+        # Storage-health soft gates (enabled by default on PR; permissive ceilings — tighten per host baseline).
+        if args.max_table_storage_health_fragmentation_ratio < 0.0:
+            args.max_table_storage_health_fragmentation_ratio = 1.0
+        if args.max_vacuum_health_bonus_last < 0.0:
+            args.max_vacuum_health_bonus_last = 1.0e15
     elif prof == "nightly":
         if args.max_wal_recovery_last_elapsed_ms < 0.0:
             args.max_wal_recovery_last_elapsed_ms = 5000.0
@@ -53,6 +208,14 @@ def _apply_profile_defaults(args: argparse.Namespace) -> None:
             args.max_lazy_materialize_count_delta = 0.0
         if args.max_lazy_materialize_rows_total_delta < 0.0:
             args.max_lazy_materialize_rows_total_delta = 0.0
+        if args.max_compact_debt_bytes_peak < 0.0:
+            args.max_compact_debt_bytes_peak = 1.0e11
+        if args.min_page_cache_hit_ratio < 0.0:
+            args.min_page_cache_hit_ratio = 0.0
+        if args.max_memory_budget_reject_delta < 0.0:
+            args.max_memory_budget_reject_delta = 1.0e9
+        if args.max_table_storage_health_fragmentation_ratio < 0.0:
+            args.max_table_storage_health_fragmentation_ratio = 1.0
 
 
 def _last_json_line(text: str) -> Optional[dict]:
@@ -157,6 +320,7 @@ def _emit_gate_fail_json(
         "build_dir_arg": args.build_dir,
         "resolved_build_dir": resolved_build_dir,
         "build_config": build_config or "",
+        "baseline_host_slug_used": getattr(args, "_baseline_host_slug_used", ""),
     }
     if extra:
         fail.update(extra)
@@ -475,9 +639,36 @@ def main() -> int:
         action="store_true",
         help="When set, tighten unset lazy-materialize runtime gates to 0 (Release-style hardening).",
     )
+    p.add_argument(
+        "--recommended-thresholds-json",
+        default="",
+        help="Optional JSON file (e.g. nightly_soak_hints recommended_thresholds_pr) "
+        "to fill gate thresholds still at sentinel -1 after profile defaults.",
+    )
+    p.add_argument(
+        "--baseline-host-index",
+        default="",
+        help="Optional path to a cross-host `host_index.json` produced by capture_baseline.py "
+        "with --cross-host-baseline-dir; thresholds are merged via nearest-host-slug match.",
+    )
+    p.add_argument(
+        "--baseline-prefer-host-slug",
+        default="",
+        help="Optional override host_slug for --baseline-host-index lookup (skips auto detection).",
+    )
     args = p.parse_args()
     setattr(args, "_profile_effective", args.profile)
     _apply_profile_defaults(args)
+    if args.recommended_thresholds_json:
+        rp = args.recommended_thresholds_json
+        if not os.path.isabs(rp):
+            here_dir = os.path.dirname(os.path.abspath(__file__))
+            repo_root = os.path.dirname(os.path.dirname(here_dir))
+            rp = os.path.join(repo_root, rp.replace("/", os.sep))
+        _apply_recommended_thresholds_path(args, rp)
+    setattr(args, "_baseline_host_slug_used", "")
+    if args.baseline_host_index:
+        _apply_baseline_host_index(args)
     if args.release_grade:
         if args.max_lazy_materialize_count_delta < 0.0:
             args.max_lazy_materialize_count_delta = 0.0

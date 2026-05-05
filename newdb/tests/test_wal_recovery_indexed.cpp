@@ -2,6 +2,7 @@
 
 #include <newdb/wal_manager.h>
 #include <newdb/heap_table.h>
+#include <newdb/wal/wal_recovery_pipeline.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -601,6 +602,170 @@ TEST(WalRecoveryIndexed, CheckpointTruncateStrictFailsWithOpenCheckpointBracket)
     EXPECT_NE(tr->tail_checkpoint_bracket_depth, 0u);
     EXPECT_FALSE(tr->truncate_executed);
 
+    wal.close();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(WalRecoveryIndexed, MultiSegmentMiddleCorruptedReplay) {
+    namespace fs = std::filesystem;
+    const fs::path dir = unique_temp_subdir("wal_mid_corrupt");
+    const std::string db = "recovery_mid_corrupt";
+
+    std::vector<std::string> seg_paths;
+    {
+        newdb::WalManager wal(db, dir.string());
+        wal.set_segment_max_bytes(96);
+        ASSERT_TRUE(wal.open().ok);
+        newdb::Row r;
+        r.attrs["name"] = "u";
+        r.attrs["dept"] = "ENG";
+        r.attrs["age"] = "30";
+        r.attrs["salary"] = "100";
+        for (int i = 0; i < 60; ++i) {
+            r.id = i + 1;
+            const auto txn = static_cast<std::uint64_t>(i + 1);
+            ASSERT_TRUE(wal.begin_transaction(txn).ok);
+            ASSERT_TRUE(wal.append_record(txn, newdb::WalOp::INSERT, "users", &r).ok);
+            ASSERT_TRUE(wal.commit_transaction(txn).ok);
+        }
+        ASSERT_TRUE(wal.flush().ok);
+        std::error_code ec;
+        for (const auto& entry : fs::directory_iterator(dir, ec)) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            const std::string fname = entry.path().filename().string();
+            if (fname.find(".wal") == std::string::npos) {
+                continue;
+            }
+            if (fname.find(".wal_lsn") != std::string::npos ||
+                fname.find(".walsync") != std::string::npos) {
+                continue;
+            }
+            seg_paths.push_back(entry.path().string());
+        }
+        wal.close();
+    }
+    std::sort(seg_paths.begin(), seg_paths.end());
+    ASSERT_GE(seg_paths.size(), 3u);
+    {
+        std::fstream f(seg_paths[1], std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(f.good());
+        f.seekg(0, std::ios::end);
+        const auto sz = f.tellg();
+        ASSERT_GE(sz, std::streamoff{8});
+        f.seekp(static_cast<std::streamoff>(sz) - 8);
+        char flip[8];
+        f.read(flip, sizeof(flip));
+        f.clear();
+        for (auto& c : flip) {
+            c = static_cast<char>(static_cast<unsigned char>(c) ^ 0xFFu);
+        }
+        f.seekp(static_cast<std::streamoff>(sz) - 8);
+        f.write(flip, sizeof(flip));
+    }
+
+    newdb::WalManager wal2(db, dir.string());
+    newdb::HeapTable table;
+    table.name = "users";
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    schema.attrs = {
+        newdb::AttrMeta{"name", newdb::AttrType::String},
+        newdb::AttrMeta{"dept", newdb::AttrType::String},
+        newdb::AttrMeta{"age", newdb::AttrType::String},
+        newdb::AttrMeta{"salary", newdb::AttrType::String},
+    };
+    newdb::WalRecoveryStats st{};
+    (void)wal2.recover(&table, schema, &st);
+    EXPECT_GE(st.checksum_failures + st.segment_index_partial_tail_stops + st.segment_index_bad_header_stops,
+              1u);
+    EXPECT_GE(st.apply_count, 1u);
+    EXPECT_GE(table.logical_row_count(), 1u);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(WalRecoveryIndexed, CrossSegmentUncommittedTxnDangling) {
+    namespace fs = std::filesystem;
+    const fs::path dir = unique_temp_subdir("wal_cross_seg_uc");
+    const std::string db = "recovery_cross_seg_uc";
+
+    newdb::WalManager wal(db, dir.string());
+    wal.set_segment_max_bytes(96);
+    ASSERT_TRUE(wal.open().ok);
+    newdb::Row r;
+    r.attrs["name"] = "open";
+    r.attrs["dept"] = "ENG";
+    r.attrs["age"] = "1";
+    r.attrs["salary"] = "0";
+    const std::uint64_t txn = 7777;
+    ASSERT_TRUE(wal.begin_transaction(txn).ok);
+    for (int i = 0; i < 12; ++i) {
+        r.id = 1000 + i;
+        ASSERT_TRUE(wal.append_record(txn, newdb::WalOp::INSERT, "users", &r).ok);
+    }
+    ASSERT_TRUE(wal.flush().ok);
+    wal.close();
+
+    newdb::WalManager wal2(db, dir.string());
+    newdb::HeapTable table;
+    table.name = "users";
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    schema.attrs = {
+        newdb::AttrMeta{"name", newdb::AttrType::String},
+        newdb::AttrMeta{"dept", newdb::AttrType::String},
+        newdb::AttrMeta{"age", newdb::AttrType::String},
+        newdb::AttrMeta{"salary", newdb::AttrType::String},
+    };
+    newdb::WalRecoveryStats st{};
+    ASSERT_TRUE(wal2.recover(&table, schema, &st).ok);
+    EXPECT_GE(st.uncommitted_txn_discarded_count, 1u);
+    EXPECT_EQ(st.apply_count, 0u);
+    EXPECT_EQ(table.logical_row_count(), 0u);
+
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(WalRecoveryIndexed, CheckpointBeginNoEndKeepsCpDepth) {
+    namespace fs = std::filesystem;
+    const fs::path dir = unique_temp_subdir("wal_cp_begin_no_end");
+    const std::string db = "recovery_cp_begin_no_end";
+
+    newdb::WalManager wal(db, dir.string());
+    ASSERT_TRUE(wal.open().ok);
+    ASSERT_TRUE(wal.checkpoint_begin(42).ok);
+    ASSERT_TRUE(wal.flush().ok);
+
+    newdb::HeapTable table;
+    table.name = "users";
+    newdb::TableSchema schema;
+    schema.primary_key = "id";
+    newdb::WalRecoveryStats st{};
+    ASSERT_TRUE(wal.recover(&table, schema, &st).ok);
+    EXPECT_GE(st.incomplete_checkpoint_count, 1u);
+    EXPECT_GE(st.checkpoint_midpoint_recovery_count, 1u);
+
+    wal.close();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+}
+
+TEST(WalRecoveryPipeline, CaptureScanStatsAndSummary) {
+    namespace fs = std::filesystem;
+    const fs::path dir = unique_temp_subdir("wal_rec_pipe");
+    newdb::WalManager wal("dbpipe", dir.string());
+    ASSERT_TRUE(wal.open().ok);
+    newdb::WalRecoveryStats st{};
+    ASSERT_TRUE(wal.capture_recovery_scan_stats(&st).ok);
+    const auto sum = newdb::wal_recovery::summarize_recovery_stats(st);
+    (void)sum;
+    newdb::wal_recovery::WalRecordReader reader(wal);
+    (void)reader;
     wal.close();
     std::error_code ec;
     fs::remove_all(dir, ec);

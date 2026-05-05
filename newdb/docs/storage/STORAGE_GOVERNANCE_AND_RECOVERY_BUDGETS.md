@@ -4,6 +4,7 @@
 
 ## 1. VACUUM / compact 主线
 
+- **独立指标 `compact_debt_bytes`**：与 `compute_compact_debt_enqueue_metrics` / `TxnRuntimeStats.compact_debt_*` 同源；**`compact_debt_priority`** 为归一化入队优先级；**`vacuum_health_bonus_last`** / **`vacuum_priority_score_last`** 为 health 加权观测（见 [`RUNTIME_STATS_SCHEMA.md`](../../scripts/validate/RUNTIME_STATS_SCHEMA.md)）。CI：`newdb_runtime_report` 汇总 **`compact_debt_bytes_peak`**，`ci_bench_gate.py --max-compact-debt-bytes-peak`（PR/release profile 默认启用阈值占位）。
 - **后台线程**：[`vacuum_service.cc`](../../cli/modules/txn/coordinator/vacuum/vacuum_service.cc) 中 `startVacuumThread`：工作线程最长 **60s** 等待队列信号或超时唤醒，处理 **`m_vacuum_queue`**（项为 `(table, debt_score)`，**`debt_score` 默认取 heap `.bin` 文件字节数**，每次出队取 **debt 最大** 的表；仍保留冷却、去重与队列上限）。
   - **可选 health 加权**：`NEWDB_VACUUM_QUEUE_USE_HEALTH=1` 时，入队前对目标表做一次 **lazy** `load_heap_file` + [`measure_table_storage_health`](../../cli/modules/storage/table_storage_health.h)，将 **`tombstone_slots * NEWDB_VACUUM_HEALTH_SLOT_WEIGHT`（默认 65536）+ `floor(tombstone_ratio * 1e6)`** 累加到 `debt_score`（饱和到 `uint64` 上限）；失败或开关关闭时行为与「仅文件字节」一致。运行态导出 **`vacuum_health_bonus_last`**（最后一次入队的 bonus）。
 - **入队**：`triggerVacuum(table_name)`（同文件）：
@@ -66,3 +67,24 @@
 - Vacuum：`cli/modules/txn/coordinator/vacuum/vacuum_service.cc`
 - 物化辅助：`cli/shell/state/shell_state.h`（`newdb_materialize_heap_if_lazy`）
 - WAL 恢复统计：`engine/include/newdb/wal_manager.h`（`WalRecoveryStats`）
+
+## 6. 内存预算（v2 closed loop · MemoryRegistry）
+
+P5 引入统一的 **`MemoryRegistry`**（[`engine/include/newdb/memory_registry.h`](../../engine/include/newdb/memory_registry.h)），把三类内存预算从「各自为政 + 软拒绝」推到「统一 cap + admit/evict + per-kind runtime」：
+
+| Kind | env 上限 | 接线点 |
+|------|---------|--------|
+| `MemoryKind::PageCache` | `NEWDB_PAGE_CACHE_MAX_BYTES` | `engine/src/cache/page_cache.cpp`（`page_cache_put` 先 `try_admit`，evictor 从 LRU 尾部回收） |
+| `MemoryKind::EqSidecar` | `NEWDB_SIDECAR_CACHE_MAX_BYTES` | `cli/modules/sidecar/eq/equality_index_sidecar.cc`（`eq_sidecar_cache_install` admit / `eq_sidecar_evictor_callback` 释放） |
+| `MemoryKind::QueryTemp` | `NEWDB_QUERY_TEMP_MAX_BYTES` | `cli/modules/where/executor/plan/plan_impl.cc`（`query_with_index` 与 `where_build_plan_candidates` 入口估算 + RAII 释放，admit 失败置 `where_policy_last` 阻塞回退） |
+
+全局上限沿用旧的 `NEWDB_MEMORY_BUDGET_MAX_BYTES`（缺省回退 `NEWDB_PAGE_CACHE_MAX_BYTES`）。任一 kind cap 为 0 表示该 kind 不做硬门（保留软拒绝路径，向后兼容）。
+
+`TxnRuntimeStats` 新增（与 `RUNTIME_STATS_SCHEMA.md` Optional v2 字段一一对应）：
+
+- `mem_page_cache_used_bytes` / `mem_page_cache_evictions` / `mem_page_cache_admit_rejects`
+- `mem_sidecar_used_bytes` / `mem_sidecar_evictions` / `mem_sidecar_admit_rejects`
+- `mem_query_temp_used_bytes` / `mem_query_temp_evictions` / `mem_query_temp_admit_rejects`
+- `mem_global_used_bytes` / `mem_global_admit_rejects`
+
+旧字段 `memory_budget_used_bytes` / `memory_budget_reject_count` 改为「per-kind 聚合 + page cache reject_oversized」的复合视图，保持 `--max-memory-budget-reject-delta` PR 门兼容。

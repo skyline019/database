@@ -76,6 +76,27 @@ TEST(HeapTable, FindByIdReturnsNullWhenMissing) {
     EXPECT_EQ(t.find_by_id(99), nullptr);
 }
 
+TEST(HeapTable, TombstoneAfterMiddleRowSuppressesThatId) {
+    TableSchema schema = sample_schema();
+    HeapTable t;
+    // Simulate append-only heap rows: ids 1,2,3 then a tombstone for id 2 appended after id 3.
+    t.rows = {
+        Row{1, {{"balance", "10"}, {"name", "a"}}, {}},
+        Row{2, {{"balance", "20"}, {"name", "b"}}, {}},
+        Row{3, {{"balance", "30"}, {"name", "c"}}, {}},
+        Row{2, {{"__deleted", "1"}}, {}},
+    };
+    t.rebuild_indexes(schema);
+    ASSERT_NE(t.find_by_id(1), nullptr);
+    EXPECT_EQ(t.find_by_id(2), nullptr);
+    ASSERT_NE(t.find_by_id(3), nullptr);
+
+    const auto& by_id = t.sorted_indices(schema, "id", SortDir::Asc);
+    ASSERT_EQ(by_id.size(), 2u);
+    EXPECT_EQ(t.rows[by_id[0]].id, 1);
+    EXPECT_EQ(t.rows[by_id[1]].id, 3);
+}
+
 TEST(HeapTable, RowGetPkValueMissingAttr) {
     Row r{1, {}, {}};
     std::string v;

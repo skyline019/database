@@ -20,7 +20,7 @@ extern "C" {
 
 #define NEWDB_C_API_VERSION_MAJOR 0
 #define NEWDB_C_API_VERSION_MINOR 5
-#define NEWDB_C_API_VERSION_PATCH 0
+#define NEWDB_C_API_VERSION_PATCH 1
 #define NEWDB_C_API_ABI_VERSION 1
 
 typedef enum newdb_error_code {
@@ -71,6 +71,12 @@ NEWDB_API int newdb_session_runtime_stats(newdb_session_handle handle,
 NEWDB_API int newdb_session_append_runtime_snapshot(newdb_session_handle handle,
                                                     const char* output_jsonl_path,
                                                     const char* label);
+/** WHERE token sequence (same as CLI WHERE args): `attr op value [AND|OR attr op value ...]`. */
+NEWDB_API int newdb_session_where_plan_json(newdb_session_handle handle,
+                                            int argc,
+                                            const char* const* argv_where_tokens,
+                                            char* output_buf,
+                                            size_t output_buf_size);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -4,6 +4,7 @@
 #include "cli/modules/where/executor/internal/query_internal.h"
 #include "cli/modules/sidecar/eq/equality_index_sidecar.h"
 #include "cli/modules/sidecar/visibility/visibility_checkpoint_sidecar.h"
+#include "cli/modules/where/executor/cost/cost_model.h"
 
 #include <algorithm>
 #include <atomic>
@@ -17,6 +18,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <newdb/memory_registry.h>
 #include <newdb/row.h>
 #include <numeric>
 #include <optional>
@@ -27,6 +29,36 @@
 #include <list>
 
 namespace {
+
+std::uint64_t where_query_temp_est_bytes(const std::size_t n, const std::size_t cond_count) {
+    const std::uint64_t rows = static_cast<std::uint64_t>(n);
+    const std::uint64_t cc = static_cast<std::uint64_t>(std::max<std::size_t>(std::size_t{1}, cond_count));
+    const std::uint64_t v =
+        rows * static_cast<std::uint64_t>(sizeof(std::size_t)) + cc * static_cast<std::uint64_t>(256);
+    constexpr std::uint64_t kCap = (std::uint64_t{1} << 40);
+    return v > kCap ? kCap : v;
+}
+
+struct QueryTempBytesGuard {
+    std::uint64_t bytes{0};
+    WhereQueryContext* ctx{nullptr};
+    explicit QueryTempBytesGuard(std::uint64_t b, WhereQueryContext* c) : bytes(b), ctx(c) {
+        if (ctx != nullptr) {
+            ctx->query_temp_reserved_bytes.store(bytes, std::memory_order_relaxed);
+        }
+    }
+    ~QueryTempBytesGuard() {
+        if (bytes > 0) {
+            newdb::memory_registry_release(newdb::MemoryKind::QueryTemp, bytes);
+        }
+        if (ctx != nullptr) {
+            ctx->query_temp_reserved_bytes.store(0, std::memory_order_relaxed);
+        }
+    }
+    QueryTempBytesGuard(const QueryTempBytesGuard&) = delete;
+    QueryTempBytesGuard& operator=(const QueryTempBytesGuard&) = delete;
+};
+
 struct QueryTraceGuard {
     const char* mode{"compute"};
     std::size_t rows{0};
@@ -49,9 +81,8 @@ struct QueryTraceGuard {
         if (context != nullptr) {
             std::lock_guard<std::mutex> lk(context->mu);
             context->last_plan_id = mode;
-            const std::uint32_t capped =
-                plan_candidates > 8u ? 8u : (plan_candidates == 0u ? 1u : plan_candidates);
-            context->last_plan_candidates_considered.store(capped, std::memory_order_relaxed);
+            const std::uint32_t store_pc = plan_candidates == 0u ? 1u : plan_candidates;
+            context->last_plan_candidates_considered.store(store_pc, std::memory_order_relaxed);
         }
         if (enabled) {
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -452,6 +483,16 @@ std::vector<std::size_t> query_with_index(const newdb::HeapTable& tbl,
     }
 
     if (conds.empty()) {
+        const std::uint64_t qt_est = where_query_temp_est_bytes(n, 1);
+        if (!newdb::memory_registry_try_admit(newdb::MemoryKind::QueryTemp, qt_est)) {
+            where_policy_set(ctx, true, "query_temp_memory_cap");
+            trace.mode = "query_temp_memory_cap";
+            trace.rows = 0;
+            trace.plan_candidates = 1;
+            bump_query_io(0, 0);
+            return {};
+        }
+        QueryTempBytesGuard qt_guard(qt_est, &ctx);
         result = visible_slots_for_query(tbl, schema, n);
         query_cache_put(ctx, cache_key, result);
         trace.mode = "full_scan_all";
@@ -460,6 +501,16 @@ std::vector<std::size_t> query_with_index(const newdb::HeapTable& tbl,
         bump_query_io(static_cast<std::uint64_t>(result.size()), result.size());
         return result;
     }
+    const std::uint64_t qt_est_main = where_query_temp_est_bytes(n, conds.size());
+    if (!newdb::memory_registry_try_admit(newdb::MemoryKind::QueryTemp, qt_est_main)) {
+        where_policy_set(ctx, true, "query_temp_memory_cap");
+        trace.mode = "query_temp_memory_cap";
+        trace.rows = 0;
+        trace.plan_candidates = 1;
+        bump_query_io(0, 0);
+        return {};
+    }
+    QueryTempBytesGuard qt_guard_main(qt_est_main, &ctx);
     maybe_prewarm_eq_sidecars(tbl, schema, conds, n, ctx);
 
     if (conds.size() == 1) {
@@ -592,7 +643,7 @@ and_fast_path_fallback:
                         ++c;
                     }
                 }
-                trace.plan_candidates = c > 8u ? 8u : c;
+                trace.plan_candidates = c;
             }
             bump_query_io(static_cast<std::uint64_t>(seed_slots.size()), result.size());
             return result;
@@ -686,7 +737,7 @@ and_fast_path_fallback:
             trace.rows = result.size();
             {
                 const std::uint32_t k = static_cast<std::uint32_t>(conds.size());
-                trace.plan_candidates = k > 8u ? 8u : (k == 0u ? 1u : k);
+                trace.plan_candidates = k == 0u ? 1u : k;
             }
             bump_query_io(static_cast<std::uint64_t>(ordered_slots.size()), result.size());
             return result;
@@ -751,25 +802,35 @@ std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& t
                                                        const TableStats* stats_hint) {
     std::map<std::string, double> best;
     const std::size_t n = tbl.logical_row_count();
-    best["heap_scan"] = static_cast<double>(n);
+    const std::uint64_t qt_est_plan = where_query_temp_est_bytes(n, conds.empty() ? 1 : conds.size());
+    if (!newdb::memory_registry_try_admit(newdb::MemoryKind::QueryTemp, qt_est_plan)) {
+        std::vector<PlanCandidate> out;
+        PlanCandidate pc;
+        pc.id = "heap_scan";
+        pc.estimated_cost = newdb::where_cost::heap_full_scan_cost(n);
+        pc.cost.estimated_rows = static_cast<double>(n);
+        pc.rationale = "query_temp_memory_cap_minimal_plan";
+        out.push_back(std::move(pc));
+        return out;
+    }
+    QueryTempBytesGuard qt_guard_plan(qt_est_plan, nullptr);
+    best["heap_scan"] = newdb::where_cost::heap_full_scan_cost(n);
     if (conds.size() == 1) {
         const WhereCond& c = conds[0];
         if (c.attr == "id" && c.op == CondOp::Eq) {
-            best["id_lookup"] = 1.0;
+            best["id_lookup"] = newdb::where_cost::pk_point_lookup_cost();
         }
         const std::string& pk = schema.primary_key;
         if (!pk.empty() && c.attr == pk && c.op == CondOp::Eq) {
-            best["pk_lookup"] = 1.0;
+            best["pk_lookup"] = newdb::where_cost::pk_point_lookup_cost();
         }
         if (c.op == CondOp::Eq && c.attr != "id" && c.attr != pk) {
-            double cst = std::max(4.0, static_cast<double>(n) * 0.08);
+            double sel = 0.08;
             if (stats_hint != nullptr) {
-                const double sel = eq_selectivity_from_stats(stats_hint, c.attr, n);
-                if (sel > 0.0) {
-                    cst = std::max(1.0, static_cast<double>(n) * sel);
-                }
+                const double s = eq_selectivity_from_stats(stats_hint, c.attr, n);
+                if (s > 0.0) sel = s;
             }
-            best["eq_sidecar"] = cst;
+            best["eq_sidecar"] = newdb::where_cost::eq_sidecar_probe_cost(n, sel);
         }
     }
     std::vector<PlanCandidate> out;
@@ -780,12 +841,16 @@ std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& t
         pc.estimated_cost = kv.second;
         if (kv.first == "heap_scan") {
             pc.cost.estimated_rows = static_cast<double>(n);
+            pc.rationale = "full_heap_visibility_scan";
         } else if (kv.first == "id_lookup" || kv.first == "pk_lookup") {
             pc.cost.estimated_rows = 1.0;
+            pc.rationale = "unique_pk_point_lookup";
         } else if (kv.first == "eq_sidecar") {
             pc.cost.estimated_rows = std::max(1.0, kv.second);
+            pc.rationale = "equality_sidecar_ndv_estimate";
         } else {
             pc.cost.estimated_rows = static_cast<double>(n);
+            pc.rationale = "generic";
         }
         out.push_back(std::move(pc));
     }
@@ -795,6 +860,9 @@ std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& t
         }
         return a.id < b.id;
     });
+    if (!out.empty()) {
+        out.front().rationale += "|chosen_lowest_cost";
+    }
     return out;
 }
 

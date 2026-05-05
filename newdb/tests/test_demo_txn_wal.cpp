@@ -37,6 +37,25 @@ int env_int_or(const char* key, const int defv) {
     }
 }
 
+/** Clears hybrid self-test env on scope exit (avoids flakes when a prior EXPECT fails mid-test). */
+struct HybridTestEnvGuard {
+    ~HybridTestEnvGuard() {
+        set_env_value("NEWDB_HYBRID_MIN_DWELL_MS", nullptr);
+        set_env_value("NEWDB_HYBRID_TEST_QUEUE_DEPTH", nullptr);
+        set_env_value("NEWDB_HYBRID_TEST_RECOVERY_TAIL_MS", nullptr);
+        set_env_value("NEWDB_HYBRID_TEST_LOCK_TAIL_MS", nullptr);
+    }
+};
+
+/** Wait until `min_dwell_ms` has passed on steady_clock (matches coordinator), plus CI margin. */
+void sleep_hybrid_dwell_elapsed(int min_dwell_ms) {
+    const auto start = std::chrono::steady_clock::now();
+    const auto need = std::chrono::milliseconds(min_dwell_ms + 280);
+    while (std::chrono::steady_clock::now() - start < need) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+}
+
 bool run_wal_crash_point_and_expect_failure(const std::string& point) {
     const auto dir = newdb::test::unique_temp_subdir(std::string("newdb_txn_wal_crash_matrix_") + point);
     std::filesystem::create_directories(dir);
@@ -223,6 +242,7 @@ TEST(DemoTxnWal, CheckpointTruncateKeepsRecoveryConsistent) {
 }
 
 TEST(DemoTxnWal, HybridAdaptiveDwellWindowDebouncesModeFlip) {
+    HybridTestEnvGuard hybrid_env_guard;
     const auto dir = newdb::test::unique_temp_subdir("newdb_txn_wal_hybrid_flip");
     std::filesystem::create_directories(dir);
     TxnCoordinator tx;
@@ -230,6 +250,7 @@ TEST(DemoTxnWal, HybridAdaptiveDwellWindowDebouncesModeFlip) {
     tx.setHybridAdaptiveEnabled(true);
     tx.setWalSyncMode(newdb::WalSyncMode::Normal);
 
+    constexpr int kDwellMs = 200;
     set_env_value("NEWDB_HYBRID_MIN_DWELL_MS", "200");
     set_env_value("NEWDB_HYBRID_TEST_QUEUE_DEPTH", "0");
     set_env_value("NEWDB_HYBRID_TEST_RECOVERY_TAIL_MS", "700");
@@ -247,7 +268,7 @@ TEST(DemoTxnWal, HybridAdaptiveDwellWindowDebouncesModeFlip) {
     EXPECT_EQ(s.hybrid_mode, "durability_mode");
     EXPECT_EQ(s.hybrid_mode_switch_count, 1u);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(220));
+    sleep_hybrid_dwell_elapsed(kDwellMs);
     tx.flushWAL(); // dwell passed, durability -> throughput (switch #2)
     s = tx.runtimeStats();
     EXPECT_EQ(s.hybrid_mode, "throughput_mode");
@@ -261,20 +282,16 @@ TEST(DemoTxnWal, HybridAdaptiveDwellWindowDebouncesModeFlip) {
     EXPECT_EQ(s.hybrid_mode, "throughput_mode");
     EXPECT_EQ(s.hybrid_mode_switch_count, 2u);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(220));
+    sleep_hybrid_dwell_elapsed(kDwellMs);
     tx.flushWAL(); // dwell passed, throughput -> durability (switch #3)
     s = tx.runtimeStats();
     EXPECT_EQ(s.hybrid_mode, "durability_mode");
     EXPECT_EQ(s.hybrid_mode_switch_count, 3u);
     EXPECT_EQ(s.hybrid_last_switch_reason, "recovery_or_lock_tail");
-
-    set_env_value("NEWDB_HYBRID_MIN_DWELL_MS", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_QUEUE_DEPTH", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_RECOVERY_TAIL_MS", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_LOCK_TAIL_MS", nullptr);
 }
 
 TEST(DemoTxnWal, HybridAdaptiveAlternatingSignalsAreCappedByDwellWindow) {
+    HybridTestEnvGuard hybrid_env_guard;
     const auto dir = newdb::test::unique_temp_subdir("newdb_txn_wal_hybrid_flip_cap");
     std::filesystem::create_directories(dir);
     TxnCoordinator tx;
@@ -309,11 +326,6 @@ TEST(DemoTxnWal, HybridAdaptiveAlternatingSignalsAreCappedByDwellWindow) {
     s = tx.runtimeStats();
     EXPECT_EQ(s.hybrid_mode, "durability_mode");
     EXPECT_EQ(s.hybrid_mode_switch_count, 1u);
-
-    set_env_value("NEWDB_HYBRID_MIN_DWELL_MS", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_QUEUE_DEPTH", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_RECOVERY_TAIL_MS", nullptr);
-    set_env_value("NEWDB_HYBRID_TEST_LOCK_TAIL_MS", nullptr);
 }
 
 TEST(DemoTxnWal, WalV1PayloadCarriesBeforeAfterAndOpSeq) {

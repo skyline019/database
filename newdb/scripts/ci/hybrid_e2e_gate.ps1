@@ -17,6 +17,23 @@ if (-not [System.IO.Path]::IsPathRooted($BuildDir)) {
     $BuildDir = Join-Path $projectRoot $BuildDir
 }
 
+function Resolve-NewdbTestsExe {
+    param([string]$RootBuildDir)
+    $direct = Join-Path $RootBuildDir "newdb_tests.exe"
+    if (Test-Path -LiteralPath $direct) {
+        return $direct
+    }
+    foreach ($cfg in @("RelWithDebInfo", "Release", "Debug", "MinSizeRel")) {
+        $candidate = Join-Path (Join-Path $RootBuildDir $cfg) "newdb_tests.exe"
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
+    }
+    throw "newdb_tests.exe not found under $RootBuildDir (expected flat or MSVC RelWithDebInfo/Release/Debug/MinSizeRel subdir)"
+}
+
+$newdbTestsExe = Resolve-NewdbTestsExe $BuildDir
+
 function Exec([string]$label, [scriptblock]$cmd) {
     Write-Host "==> $label"
     & $cmd
@@ -28,7 +45,7 @@ function Exec([string]$label, [scriptblock]$cmd) {
 Exec "Build" { cmake --build "$BuildDir" -j $Jobs }
 
 Exec "Focused gates (DemoLsmLite/Txn/Wal)" {
-    & (Join-Path $BuildDir "newdb_tests.exe") --gtest_filter="DemoLsmLite.*:Txn*:*Wal*"
+    & $newdbTestsExe --gtest_filter="DemoLsmLite.*:Txn*:*Wal*"
 }
 
 Exec "ctest full" {

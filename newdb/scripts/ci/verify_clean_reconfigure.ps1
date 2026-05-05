@@ -152,7 +152,14 @@ if ($LASTEXITCODE -ne 0) { throw "ctest failed: $LASTEXITCODE" }
 if (-not $SkipSemanticGate) {
     Write-Host "[verify_clean_reconfigure] running semantic gate (C API + MDB mismatch contracts)"
     $semanticFilter = "CApi.*MismatchReturnsExecutionFailedWithCapiPrefix:DemoMdb.*Mismatch*StopsScriptAndKeepsPreviousData"
-    & (Join-Path $buildPath "newdb_tests.exe") "--gtest_filter=$semanticFilter"
+    $newdbTestsExe = Join-Path $buildPath "newdb_tests.exe"
+    if ($isMultiConfig) {
+        $newdbTestsExe = Join-Path (Join-Path $buildPath $BuildConfig) "newdb_tests.exe"
+    }
+    if (-not (Test-Path -LiteralPath $newdbTestsExe)) {
+        throw "semantic gate: newdb_tests.exe not found at $newdbTestsExe (multi-config=$isMultiConfig build-config=$BuildConfig)"
+    }
+    & $newdbTestsExe "--gtest_filter=$semanticFilter"
     if ($LASTEXITCODE -ne 0) { throw "semantic gate failed: $LASTEXITCODE" }
 }
 

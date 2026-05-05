@@ -45,7 +45,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ pkg-config libcrc32c-dev
+          sudo apt-get install -y cmake ninja-build g++ pkg-config
 
       - name: Build
         run: |

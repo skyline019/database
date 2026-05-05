@@ -7,4 +7,4 @@ on:
 
 jobs:
   reusable-ci:
-    uses: ./.github/workflows/newdb-ci-reusable.yml@main
+    uses: ./.github/workflows/newdb-ci-reusable.yml

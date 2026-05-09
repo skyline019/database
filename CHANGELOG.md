@@ -29,7 +29,8 @@
 
 ### CI / 构建
 
-- **Windows `verify_clean_reconfigure`**：语义门在 Visual Studio 多配置下正确解析 `newdb_tests.exe` 路径（`$BuildConfig` 子目录）。
+- **Linux**：`waterfall` 静态库启用 **POSITION_INDEPENDENT_CODE**，修复链入 `libnewdb.so` / `libnewdb_cli_backend.so` 时的 **「recompile with -fPIC」** 链接错误；`endian_shim.h` 避免与 glibc **LITTLE_ENDIAN/BIG_ENDIAN** 宏重定义告警。
+- **Windows `verify_clean_reconfigure`**：GUI 门开启时在 CMake 中打开 **NEWDB_BUILD_CLI_BACKEND_PLUGIN**，生成 **`newdb_cli_backend.dll`**，满足 Tauri `bundle.resources` 校验；语义门在 Visual Studio 多配置下正确解析 `newdb_tests.exe` 路径（`$BuildConfig` 子目录）。
 - **GUI 门**：在 `cargo test` 前调用 `sync_runtime_binaries.ps1`，将 CMake 产物同步到 `rust_gui/src-tauri/bin`，满足 Tauri `bundle.resources` 对 `bin/newdb_demo.exe` 等文件的校验。
 - **`ci_bench_gate.py`**：在 monorepo 布局下，相对 `build_dir` 优先解析为 `newdb/<build_dir>`；`verify_clean_reconfigure` 同时传入 **绝对** `buildPath`，避免误连到仓库根下的空目录。
 - **`hybrid_e2e_gate.ps1`**：解析 `newdb_tests.exe` 时兼容 MSVC 配置子目录（与 verify 语义门一致）。

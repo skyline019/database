@@ -121,6 +121,10 @@ for ($attempt = 1; $attempt -le $ConfigureRetries; $attempt++) {
     if ($resolvedGtestSrc -ne "") {
         $configureArgs += "-Dgoogletest_SOURCE_DIR=$resolvedGtestSrc"
     }
+    # Tauri bundle.resources requires bin/newdb_cli_backend.dll on Windows; default CMake leaves plugin OFF.
+    if ((-not $SkipGuiGate) -and ($env:OS -eq "Windows_NT")) {
+        $configureArgs += "-DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON"
+    }
     & cmake @configureArgs
     if ($LASTEXITCODE -eq 0) {
         $configured = $true

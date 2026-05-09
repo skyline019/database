@@ -26,6 +26,8 @@ add_library(waterfall STATIC
     utils/system_errors.cc
     ${WATERFALL_CRC32C_COMPAT_SOURCES}
 )
+# Required when linking this archive into shared objects (libnewdb.so, libnewdb_cli_backend.so, etc.).
+set_target_properties(waterfall PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # PUBLIC `${CMAKE_CURRENT_SOURCE_DIR}/include`: all `<waterfall/...>` includes resolve here (thin shims + headers).
 # PRIVATE source tree: `"error.h"` / `"tuple.h"` in `storage/*.cc` resolve next to those TUs.

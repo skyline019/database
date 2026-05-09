@@ -63,13 +63,16 @@
 #  endif
 #endif
 
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#    define LITTLE_ENDIAN 1
-#    define BIG_ENDIAN 0
-#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-#    define LITTLE_ENDIAN 0
-#    define BIG_ENDIAN 1
-#else
-#    define LITTLE_ENDIAN 0
-#    define BIG_ENDIAN 0
+// glibc <endian.h> (Linux) already defines LITTLE_ENDIAN / BIG_ENDIAN; do not override.
+#if !defined(LITTLE_ENDIAN) && !defined(BIG_ENDIAN)
+#    if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#        define LITTLE_ENDIAN 1
+#        define BIG_ENDIAN 0
+#    elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#        define LITTLE_ENDIAN 0
+#        define BIG_ENDIAN 1
+#    else
+#        define LITTLE_ENDIAN 0
+#        define BIG_ENDIAN 0
+#    endif
 #endif

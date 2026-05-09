@@ -4,7 +4,7 @@
 
 **CLI 内模块/子模块的先后次序、责任链与写/WHERE 微观路径**见 [§11](#11-模块与子模块间流动详解)。**核心类型、启发式算法、编译/运行期耦合**见 [§12](#12-数据结构算法要点耦合与关联)；**各字段与 API 形参逐项解释**见 [§12.12](#1212-字段与形参释义手册)。
 
-> 模块边界与 include 规则见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；构建与测试命令见 [BUILD.md](../dev/BUILD.md)。
+> 模块边界与 include 规则见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；构建与测试命令见 [BUILD.md](../dev/BUILD.md)。**Shell / C API 适配层**的 CMake OBJECT 积木（`newdb_shell_*` → `newdb_capi_adapter` → 默认 `newdb_shared`）与 **plugin 双产物**说明见同目录装配图、[BUILD.md § CMake shell 积木](../dev/BUILD.md) 与 [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)。
 
 ---
 
@@ -79,6 +79,13 @@ database/                    # 仓库根
 | `cli/modules/sidecar/*` | 等值索引、覆盖投影、页索引、可见性 checkpoint、**index_catalog** | sidecar 文件、缓存 |
 | `cli/modules/storage/` | **table_storage_health** 度量 | 碎片率、tier |
 
+### 2.2.1 CMake：shell OBJECT 与 `newdb_capi_adapter`
+
+- **默认（full embed）**：`cli/` 下 shell、dispatch、txn、WHERE、sidecar 等按 TU 拆成 **`newdb_shell_*` OBJECT** 库，由静态目标 **`newdb_capi_adapter`** 用 `$<TARGET_OBJECTS:…>` 聚合成一整块，再与 **`newdb_core`** 一起链入 **`newdb_shared`**（`libnewdb`）。交互式 REPL 独占 TU 在 **`newdb_shell_bootstrap_repl`**，仅叠进 **`newdb_shell`**，供 **`newdb_demo`** 等可执行文件链接。
+- **装配图与 STATIC 预研结论**：[MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)（Mermaid、「Release assembly gates」）。
+- **目标名与 preset 速查**：[BUILD.md](../dev/BUILD.md) 中「CMake shell 积木目标」「C API 产物矩阵」。
+- **Plugin**：`newdb_shared` 可仅链引擎核，CLI 侧由 **`newdb_cli_backend`** + 环境变量 **`NEWDB_CLI_BACKEND_PATH`** 运行时加载；发行目录示例见 [plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)。
+
 ### 2.3 `newdb/tools`、`newdb/tests`、`newdb/rust_gui`、`newdb/scripts`
 
 | 组件 | 职责 | 数据流要点 |
@@ -107,6 +114,8 @@ flowchart TB
 
   subgraph newdb["newdb/"]
     ENG[newdb_core engine]
+    CAP[newdb_capi_adapter STATIC]
+    SH[newdb_shell REPL_plus_embed]
     DEM[newdb_demo]
     DLL[newdb_shared libnewdb]
     TOOLS[newdb_perf / smoke / runtime_report]
@@ -120,15 +129,52 @@ flowchart TB
   end
 
   WF --> ENG
-  ENG --> DEM
-  ENG --> DLL
+  ENG --> CAP
+  CAP --> DLL
+  ENG --> SH
+  SH --> DEM
   ENG --> TOOLS
-  ENG --> TESTS
+  SH --> TESTS
   ENG --> GCAPI
   DLL --> TAURI
   BIN --> TAURI
   DEM -.子进程/可选.-> TAURI
 ```
+
+**说明（默认 full embed）**：`newdb_shared` 链 **`newdb_core` + `newdb_capi_adapter`**（后者内部折叠全部 `newdb_shell_*` OBJECT，不含 REPL-only TU）。`newdb_tests` / **`newdb_demo`** 通过 **`newdb_shell`** 拉入 REPL 与同一适配闭包。**Plugin** 时 `newdb_shared` 与 `newdb_capi_adapter` 解耦，见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md) 与 [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)。
+
+### 3.1 扩展：`newdb_shared` 三种链接形态（对照）
+
+与 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)「Shared library modes」表一致；下图强调 **主 DLL 与 CLI 代码的静态/运行时关系**（省略 `waterfall` → `newdb_core` 边以聚焦 C API 边界）。
+
+```mermaid
+flowchart TB
+  subgraph defEmbed [默认_full_embed]
+    E0[newdb_core]
+    C0[newdb_capi_adapter]
+    Sh0[newdb_shared]
+    E0 --> C0
+    C0 --> Sh0
+  end
+  subgraph slimMode [NEWDB_SHARED_SLIM]
+    E1[newdb_core]
+    Slim[c_api_slim_TU]
+    Sh1[newdb_shared]
+    E1 --> Slim
+    Slim --> Sh1
+  end
+  subgraph plugMode [Plugin_backend]
+    E2[newdb_core]
+    Sh2[newdb_shared]
+    BE[newdb_cli_backend]
+    E2 --> Sh2
+    Sh2 -->|runtime_dlopen| BE
+  end
+```
+
+- **full embed**：`newdb_capi_adapter` 在**链接期**进入 `newdb_shared`；会话/命令能力进程内可用，无第二 DLL。  
+- **slim**：`newdb_shared` 仅引擎 + 瘦 C API；无 `newdb_capi_adapter`、无完整 runtime stats / 完整 `execute` 等（见 [CI_SLIM_FULL_MATRIX.md](../dev/CI_SLIM_FULL_MATRIX.md)）。  
+- **plugin**：`newdb_shared` 仍只含 `newdb_core`，**会话侧符号**在 **`newdb_cli_backend`** 中；主库在 `newdb_session_create` 前按路径 **动态加载** backend（失败则 `NULL`）。
 
 ---
 
@@ -147,12 +193,15 @@ sequenceDiagram
   participant W as WalManager
 
   U->>G: 输入命令 / 菜单
-  alt DLL 路径
+  alt 进程内_full_embed
     G->>L: session_execute(line, buf)
-    L->>S: 解析并分发
-  else 子进程路径
+    L->>S: 静态链入 newdb_capi_adapter 再入 Session
+  else 进程内_plugin
+    G->>L: session_execute(line, buf)
+    L->>S: dlopen newdb_cli_backend 后同 Session 边界
+  else 子进程_demo
     G->>D: --exec-line / stdin 管道
-    D->>S: CLI dispatch → 引擎
+    D->>S: newdb_shell dispatch 到引擎
   end
   S->>H: 读改堆页 / 迭代
   S->>W: 写路径追加 WAL、同步策略
@@ -164,9 +213,13 @@ sequenceDiagram
   G-->>U: 表格 / 日志面板
 ```
 
+**说明**：`full_embed` 与 **`plugin`** 对用户均为「进程内 DLL」；差别在 **`libnewdb` 是否静态包含 CLI 适配层**（plugin 下由独立 `newdb_cli_backend` + **`NEWDB_CLI_BACKEND_PATH`** 提供）。**slim** 形态下 `libnewdb` 不含完整 CLI/`execute` 链，GUI 需使用 **full** 或 **plugin** 构建产物。
+
 ---
 
 ## 5. 持久化与恢复数据流（磁盘）
+
+**编译归属（默认 full embed）**：图中 **CLI** 指随 **`newdb_capi_adapter`** 与主 `libnewdb` 静态链接的 handler / txn / WAL 协调路径；**plugin** 形态下同一批 TU 位于 **`newdb_cli_backend`**，经 `NEWDB_CLI_BACKEND_PATH` 在运行时挂入，与引擎的 **WAL/堆** 关系不变。
 
 ```mermaid
 flowchart LR
@@ -247,13 +300,14 @@ flowchart LR
   RPT --> PY
   JL --> PY
   PY --> DB
+  PY -.可选_CLI_embed_子集.-> TIER[validate_runtime_stats tier]
   subgraph gui2["rust_gui"]
     DASH[Runtime Dashboard 模态]
   end
   DB -.读取/展示.-> DASH
 ```
 
-`rust_gui` 通过 **镜像脚本**（`sync_runtime_binaries.ps1`）与 Tauri `invoke` 调用本机 Python/可执行文件参与校验；与引擎内部计数通过「导出 JSON / 日志」间接耦合。
+`rust_gui` 通过 **镜像脚本**（`sync_runtime_binaries.ps1`）与 Tauri `invoke` 调用本机 Python/可执行文件参与校验；与引擎内部计数通过「导出 JSON / 日志」间接耦合。`validate_runtime_stats.py` 默认校验完整 **`required_stats_keys`**；可选 **`--stats-keys-tier engine|cli_embed`** 做契约子集门禁（与 [RUNTIME_STATS_SCHEMA.md](../../scripts/validate/RUNTIME_STATS_SCHEMA.md)、CI `runtime-stats-schema-gate` 一致）。
 
 ---
 
@@ -261,19 +315,25 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  SRC[tests/*.cpp + cli 部分 TU 复用]
+  SRC[tests/*.cpp]
+  SH[newdb_shell]
+  CAPI[newdb_capi_adapter]
+  CORE[newdb_core]
   GT[GoogleTest FetchContent]
-  CAP[gtest_capi.dll + gtest_c_api.cpp]
+  GCAP[gtest_capi + gtest_c_api.cpp]
   CTEST[CTest 注册]
 
+  SRC --> SH
+  SH --> CAPI
+  CAPI --> CORE
   SRC --> GT
   SRC --> CTEST
-  CAP --> GT
+  GCAP --> GT
   GT -->|断言| SRC
 ```
 
-- **进程内**：`newdb_tests` 直接链 `newdb_core` + `GTest::gtest_main`。
-- **跨语言演示**：`gtest_capi` 导出 C 接口包装 gtest，供 Python ctypes 等（见 `scripts/examples`）。
+- **进程内（`newdb_tests`）**：链 **`newdb_shell`** → **`newdb_capi_adapter`** → **`newdb_core`** + `GTest::gtest_main`（与 `newdb_demo` 同一条 CLI 闭包，便于集成测复用 dispatch/txn/WHERE）。
+- **跨语言演示（`gtest_capi`）**：导出 C 接口包装 gtest，供 Python ctypes 等（见 `scripts/examples`）；与引擎业务数据流正交。
 
 ---
 
@@ -297,7 +357,7 @@ flowchart TB
 | **事务与 WAL** | BEGIN…COMMIT、写操作 | WAL 记录、LSN | `wal_service`、`wal_manager`、recovery |
 | **可见性** | 快照、读事务 | 过滤后的行集 | `mvcc`、`txn_manager` |
 | **观测** | 运行中事件 | JSON/JSONL、报告 | `stats_impl`、`runtime_report`、scripts |
-| **GUI** | 点击 / 脚本 | 命令、文件对话框 | Tauri、`libnewdb`、`newdb_demo` |
+| **GUI** | 点击 / 脚本 | 命令、文件对话框 | Tauri、`libnewdb`（full_embed 或 **plugin** + `newdb_cli_backend`）、可选 `newdb_demo` 子进程 |
 
 ---
 
@@ -1541,8 +1601,7 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `encrypt_log` | `true` 时使用旧式 XOR 帧写会话日志；默认 UTF-8 明文行。 |
 | `verbose` | 额外路径/加载错误等到 stderr。 |
 | `where_ctx` | 每条 shell 级 WHERE 缓存与原子计数器（见 §12.12.5）。 |
-| `runtime_policy` | `RuntimePolicy`：`profile` 为基准测试档案枚举；`initialized` 是否已按环境初始化。 |
-| `BenchmarkProfile` | `NewdbDefault` / `LeveldbLike` / `InnodbLike` / `HybridBalanced`：影响默认吞吐/延迟启发式（与 hybrid 模式字符串配合）。 |
+| `runtime_policy` | [`ShellRuntimePolicy`](../../cli/shell/state/shell_state_benchmark.h)：内含 [`ShellBenchmarkProfile`](../../cli/shell/state/shell_state_benchmark.h)（`NewdbDefault` / `LeveldbLike` / `InnodbLike` / `HybridBalanced`）与 `initialized`（是否已按环境应用预设）。LSM 侧见 [`lsm_lite_service.cc`](../../cli/shell/dispatch/services/lsm/lsm_lite_service.cc)。 |
 
 **`LsmShellCache`（`st.lsm`）**
 

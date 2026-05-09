@@ -1,8 +1,8 @@
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
 
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <vector>
 #include <cstdarg>
@@ -14,13 +14,17 @@
 
 static constexpr std::uint8_t kLogXorKey = 0x5Au;
 
-static const ShellState* g_bound_shell = nullptr;
+static std::optional<LoggingShellSink> g_log_sink;
 
 static NewdbConsoleEchoFn g_console_echo = nullptr;
 static void* g_console_echo_user = nullptr;
 
-void logging_bind_shell(const ShellState* st) {
-    g_bound_shell = st;
+void logging_bind_sink(const LoggingShellSink* sink) {
+    if (sink == nullptr) {
+        g_log_sink.reset();
+    } else {
+        g_log_sink = *sink;
+    }
 }
 
 void logging_set_console_echo(NewdbConsoleEchoFn fn, void* user) {
@@ -183,14 +187,14 @@ void log_and_print(const char* log_file, const char* fmt, ...) {
     }
     buf[sizeof(buf) - 1] = '\0';
     write_stdout_and_echo(buf);
-    const bool enc = g_bound_shell && g_bound_shell->encrypt_log;
+    const bool enc = g_log_sink.has_value() && g_log_sink->encrypt_log;
     if (should_persist_log_line(buf)) {
         append_session_log_line(log_file, buf, enc);
     }
 
 #if defined(__linux__)
-    if (g_bound_shell && g_bound_shell->mirror_output_fd >= 0) {
-        (void)send(g_bound_shell->mirror_output_fd, buf, std::strlen(buf), 0);
+    if (g_log_sink.has_value() && g_log_sink->mirror_output_fd >= 0) {
+        (void)send(g_log_sink->mirror_output_fd, buf, std::strlen(buf), 0);
     }
 #endif
 }

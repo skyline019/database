@@ -1,6 +1,8 @@
 #include "cli/shell/repl/demo_shell.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
+#include "cli/shell/state/shell_state_owner.h"
 #include "test_util.h"
+#include "shell_state_test_support.h"
 
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>
@@ -41,11 +43,12 @@ TEST(DemoMdb, UpdateMismatchStopsScriptAndKeepsPreviousData) {
         out << "UPDATE(1,Alice,30)\n";
     }
 
-    ShellState st;
-    st.data_dir = temp_dir.string();
-    st.log_file_path = (temp_dir / "demo_log.bin").string();
+    ShellStateOwner st_owner = make_shell_state_for_test();
+    ShellStateFacade stf(st_owner.shell());
+    stf.data_dir() = temp_dir.string();
+    stf.log_file_path() = (temp_dir / "demo_log.bin").string();
 
-    run_mdb_script(st, script.string().c_str());
+    run_mdb_script(st_owner.shell(), script.string().c_str());
 
     const fs::path data_file = temp_dir / "tu.bin";
     ASSERT_TRUE(fs::exists(data_file));
@@ -90,11 +93,12 @@ TEST(DemoMdb, LegacyUpdateBalanceMismatchStopsScriptAndKeepsPreviousData) {
         out << "UPDATE(1,Alice,200)\n";
     }
 
-    ShellState st;
-    st.data_dir = temp_dir.string();
-    st.log_file_path = (temp_dir / "demo_log.bin").string();
+    ShellStateOwner st_owner = make_shell_state_for_test();
+    ShellStateFacade stf(st_owner.shell());
+    stf.data_dir() = temp_dir.string();
+    stf.log_file_path() = (temp_dir / "demo_log.bin").string();
 
-    run_mdb_script(st, script.string().c_str());
+    run_mdb_script(st_owner.shell(), script.string().c_str());
 
     const fs::path data_file = temp_dir / "tu_legacy.bin";
     ASSERT_TRUE(fs::exists(data_file));
@@ -140,11 +144,12 @@ TEST(DemoMdb, LowercaseCommandsAreAccepted) {
         out << "page(1,10,id,desc)\n";
     }
 
-    ShellState st;
-    st.data_dir = temp_dir.string();
-    st.log_file_path = (temp_dir / "demo_log.bin").string();
+    ShellStateOwner st_owner = make_shell_state_for_test();
+    ShellStateFacade stf(st_owner.shell());
+    stf.data_dir() = temp_dir.string();
+    stf.log_file_path() = (temp_dir / "demo_log.bin").string();
 
-    run_mdb_script(st, script.string().c_str());
+    run_mdb_script(st_owner.shell(), script.string().c_str());
 
     const fs::path data_file = temp_dir / "tl.bin";
     ASSERT_TRUE(fs::exists(data_file));
@@ -185,11 +190,12 @@ TEST(DemoMdb, DelattrPersistsSchemaSidecarAndRemovesColumn) {
         out << "DELATTR(age)\n";
     }
 
-    ShellState st;
-    st.data_dir = temp_dir.string();
-    st.log_file_path = (temp_dir / "demo_log.bin").string();
+    ShellStateOwner st_owner = make_shell_state_for_test();
+    ShellStateFacade stf(st_owner.shell());
+    stf.data_dir() = temp_dir.string();
+    stf.log_file_path() = (temp_dir / "demo_log.bin").string();
 
-    run_mdb_script(st, script.string().c_str());
+    run_mdb_script(st_owner.shell(), script.string().c_str());
 
     const fs::path data_file = temp_dir / "tda.bin";
     ASSERT_TRUE(fs::exists(data_file));

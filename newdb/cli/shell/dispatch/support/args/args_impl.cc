@@ -13,49 +13,9 @@
 
 #include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
 #include "cli/modules/common/util/utils.h"
 #include "cli/modules/where/executor/where.h"
-
-namespace {
-int ascii_tolower(int c) {
-    return std::tolower(static_cast<unsigned char>(c));
-}
-} // namespace
-
-int strncasecmp_ascii(const char* a, const char* b, std::size_t n) {
-    for (std::size_t i = 0; i < n; ++i) {
-        const unsigned char ca = static_cast<unsigned char>(a[i]);
-        const unsigned char cb = static_cast<unsigned char>(b[i]);
-        if (ca == 0 || cb == 0) {
-            return (ca == cb) ? 0 : (ca == 0 ? -1 : 1);
-        }
-        const int la = ascii_tolower(ca);
-        const int lb = ascii_tolower(cb);
-        if (la != lb) {
-            return la < lb ? -1 : 1;
-        }
-    }
-    return 0;
-}
-
-int strcasecmp_ascii(const char* a, const char* b) {
-    if (!a || !b) return a == b ? 0 : (a ? 1 : -1);
-    std::size_t i = 0;
-    for (;;) {
-        const unsigned char ca = static_cast<unsigned char>(a[i]);
-        const unsigned char cb = static_cast<unsigned char>(b[i]);
-        if (ca == 0 || cb == 0) {
-            return (ca == cb) ? 0 : (ca == 0 ? -1 : 1);
-        }
-        const int la = ascii_tolower(ca);
-        const int lb = ascii_tolower(cb);
-        if (la != lb) {
-            return la < lb ? -1 : 1;
-        }
-        ++i;
-    }
-}
 
 bool row_at_slot_read(const newdb::HeapTable& tbl, const std::size_t i, newdb::Row& r) {
     if (tbl.is_heap_storage_backed()) {
@@ -147,14 +107,15 @@ bool validate_typed_attr_value(const char* tag,
 }
 
 void refresh_schema_if_missing(ShellState& st, const std::string& eff_data) {
-    if (!st.session.schema.attrs.empty() || eff_data.empty()) {
+    ShellStateFacade f(st);
+    if (!f.schema().attrs.empty() || eff_data.empty()) {
         return;
     }
     newdb::TableSchema loaded;
     const newdb::Status s = newdb::load_schema_text(
         newdb::schema_sidecar_path_for_data_file(eff_data), loaded);
     if (s.ok && (!loaded.attrs.empty() || !loaded.primary_key.empty())) {
-        st.session.schema = std::move(loaded);
+        f.schema() = std::move(loaded);
     }
 }
 

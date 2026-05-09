@@ -161,6 +161,15 @@
   - `newdb/scripts/ci/verify_clean_reconfigure.ps1`
   - `newdb/scripts/ci/ci_bench_gate.py`
 
+### 6.3 CMake：shell OBJECT 与 C API 适配层（地图入口）
+- **设计点**：将 shell/dispatch/txn/WHERE/sidecar 等拆成 **`newdb_shell_*` OBJECT** 目标，由 **`newdb_capi_adapter`** 聚合进默认 **`newdb_shared`**；REPL-only TU 叠进 **`newdb_shell`**；可选 **plugin** 双产物与 `NEWDB_CLI_BACKEND_PATH`。
+- **作用/行为**：增量编译边界清晰；模块边界与合并门禁有单一文档（装配图、Release gates、STATIC 预研结论）。
+- **对应文件 / 文档**：
+  - `newdb/CMakeLists.txt`（`newdb_shell_add_object_library`、`newdb_capi_adapter`、`newdb_shell`）
+  - [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)
+  - [BUILD.md](../dev/BUILD.md)（CMake shell 积木、C API 矩阵、preset）
+  - [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)、[plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)
+
 ---
 
 ## 7. 当前结论（工程状态）

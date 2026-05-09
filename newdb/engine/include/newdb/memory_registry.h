@@ -5,6 +5,11 @@
 
 namespace newdb {
 
+/// Process-wide memory governance: `PageCache`, equality-sidecar loads, and WHERE `QueryTemp`
+/// estimates share one admission/eviction contract (`memory_registry_try_admit` / `release`).
+/// New read-path allocations that can spike RSS should register the appropriate `MemoryKind`
+/// so `TxnRuntimeStats` `mem_*` fields and CI JSONL gates stay aligned.
+
 /// Memory-heavy subsystems registered with the global registry (Phase 5 v2 closed loop).
 enum class MemoryKind : int {
     PageCache = 0,

@@ -1,11 +1,12 @@
 #include <waterfall/config.h>
 
+#include <newdb/heap_table.h>
+
 #include <cstddef>
 #include <optional>
 #include <string>
 
 #include "cli/shell/dispatch/shared/dispatch_internal.h"
-#include "cli/shell/state/shell_state.h"
 
 void fast_index_insert(newdb::HeapTable& tbl,
                        const newdb::TableSchema& schema,

@@ -35,11 +35,14 @@ Status compact_heap_file(const char* path,
 // Rewrite heap with logical rows renumbered to ids 1..N in ascending order of previous id.
 // Only when primary key is unset or `id`. Irreversible for WAL point-in-time recovery of old ids.
 // If `out_file_changed` is non-null: set false when ids were already dense (no file rewrite), true when rewritten.
+// If `out_old_new_ids` is non-null and the file is rewritten: fills (id_before, id_after) for each logical row
+// (sorted by id_before ascending); omitted when noop (already dense).
 Status reorder_heap_ids_dense(const char* path,
                                 const std::string& table_name,
                                 const TableSchema& schema,
                                 std::size_t* out_rows_after = nullptr,
-                                bool* out_file_changed = nullptr);
+                                bool* out_file_changed = nullptr,
+                                std::vector<std::pair<int, int>>* out_old_new_ids = nullptr);
 
 // Debug / ad-hoc scan of raw pages (stdout).
 void scan_heap_file(const char* path);

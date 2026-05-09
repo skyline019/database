@@ -38,7 +38,7 @@
 
 **MSVC 多配置**：可执行文件与 DLL 位于 `<build-dir>/<Configuration>/`（如 `RelWithDebInfo/newdb_demo.exe`），而非仅 `<build-dir>/`。
 
-**GUI 安装包**：由 `newdb/rust_gui` 执行 `npm run tauri:build` 生成；捆绑资源见 `rust_gui/src-tauri/tauri.conf.json` 的 `bundle.resources`（含 `bin/newdb_demo.exe`、`bin/libnewdb.dll`、`resources/scripts` 等）。发布前需将引擎构建结果同步至 `src-tauri/bin`（脚本：`rust_gui/scripts/sync_runtime_binaries.ps1`）。
+**GUI 安装包**：由 `newdb/rust_gui` 执行 `npm run tauri:build` 生成；捆绑资源见 `rust_gui/src-tauri/tauri.conf.json` 的 `bundle.resources`（含 `bin/newdb_demo.exe`、`bin/libnewdb.dll`、`bin/newdb_cli_backend.dll`、`resources/scripts` 等）。发布前需以 **plugin C API** 配置构建引擎（`NEWDB_C_API_PLUGIN_BACKEND=ON`、`NEWDB_BUILD_CLI_BACKEND_PLUGIN=ON`），将产物同步至 `src-tauri/bin`（`rust_gui/scripts/sync_runtime_binaries.ps1`），再打包；推荐顺序见 **`npm run tauri:build:plugin`**（`rust_gui/scripts/build_tauri_plugin_bundle.ps1`）与 **`newdb/.github/workflows/newdb-gui.yml`**。
 
 ---
 

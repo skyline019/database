@@ -3,71 +3,33 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 #include <algorithm>
 
 #include <newdb/schema.h>
 #include <newdb/schema_io.h>
-#include <newdb/session.h>
 
 #include "cli/shell/dispatch/router/dispatch.h"
 #include "cli/shell/diag/demo_diag.h"
 #include "cli/shell/repl/demo_shell.h"
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_ops.h"
+#include "cli/shell/state/shell_state_facade.h"
+#include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/common/util/utils.h"
 
-namespace {
-
-std::uintmax_t log_size_or_zero(const std::string& path) {
-    std::error_code ec;
-    const std::uintmax_t n = std::filesystem::file_size(path, ec);
-    return ec ? 0 : n;
-}
-
-std::string read_log_tail_from(const std::string& path, const std::uintmax_t start_pos) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return {};
-    }
-    in.seekg(0, std::ios::end);
-    const std::streamoff end = in.tellg();
-    if (end <= 0 || start_pos >= static_cast<std::uintmax_t>(end)) {
-        return {};
-    }
-    in.seekg(static_cast<std::streamoff>(start_pos), std::ios::beg);
-    std::string out;
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return out;
-}
-
-bool should_stop_script_on_output(const std::string& output) {
-    if (output.find("[ERROR]") != std::string::npos) {
-        return true;
-    }
-    if (output.find("[INSERT] attribute '") != std::string::npos
-        || output.find("[UPDATE] attribute '") != std::string::npos
-        || output.find("[SETATTR] attribute '") != std::string::npos) {
-        return true;
-    }
-    return output.find("expects ") != std::string::npos
-           && output.find(", got '") != std::string::npos;
-}
-
-} // namespace
-
 void demo_autopick_initial_table_if_empty(ShellState& st) {
-    std::string& current_table = st.session.table_name;
-    std::string& current_file = st.session.data_path;
+    ShellStateFacade f(st);
+    std::string& current_table = f.table_name();
+    std::string& current_file = f.data_path();
     if (!current_table.empty() || !current_file.empty()) {
         return;
     }
-    st.session.schema = newdb::TableSchema{};
+    f.schema() = newdb::TableSchema{};
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path cwd = workspace_directory(st);
+    const fs::path cwd = f.workspace_directory();
     std::vector<std::string> tables;
     for (fs::directory_iterator it(cwd, ec), end; !ec && it != end; it.increment(ec)) {
         const fs::directory_entry& ent = *it;
@@ -82,7 +44,7 @@ void demo_autopick_initial_table_if_empty(ShellState& st) {
         std::string filename = p.filename().string();
         std::string stem = p.stem().string();
         bool looks_like_log =
-            (filename == std::filesystem::path(st.log_file_path).filename().string());
+            (filename == std::filesystem::path(f.log_file_path()).filename().string());
         if (!looks_like_log) {
             const std::string suf = "_log";
             if (stem.size() >= suf.size() &&
@@ -108,17 +70,18 @@ void demo_autopick_initial_table_if_empty(ShellState& st) {
 }
 
 void interactive_shell(ShellState& st, const char* data_file, const char* table_name) {
-    const char* log_file = st.log_file_path.c_str();
-    logging_bind_shell(&st);
-    st.txn.set_workspace_root(st.data_dir);
+    ShellStateFacade f(st);
+    const char* log_file = f.log_file_path().c_str();
+    f.bind_logging();
+    f.txn().set_workspace_root(f.data_dir());
 
     // When stdout is redirected to a pipe (e.g. GUI embedded terminal),
     // stdio becomes fully-buffered and prompts like "demo> " won't show up
     // unless we flush explicitly. Make interactive stdout unbuffered.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    std::string& current_table = st.session.table_name;
-    std::string& current_file = st.session.data_path;
+    std::string& current_table = f.table_name();
+    std::string& current_file = f.data_path();
     if (data_file) {
         current_file = data_file;
     }
@@ -130,7 +93,7 @@ void interactive_shell(ShellState& st, const char* data_file, const char* table_
         }
     }
 
-    demo_verbose(st, "workspace directory: %s\n", workspace_directory(st).string().c_str());
+    demo_verbose(f, "workspace directory: %s\n", f.workspace_directory().string().c_str());
 
     demo_autopick_initial_table_if_empty(st);
 
@@ -211,54 +174,4 @@ void interactive_shell(ShellState& st, const char* data_file, const char* table_
             break;
         }
     }
-}
-void run_mdb_script(ShellState& st, const char* script_file) {
-    logging_bind_shell(&st);
-    st.txn.set_workspace_root(st.data_dir);
-    std::string& current_table = st.session.table_name;
-    std::string& current_file = st.session.data_path;
-    const char* log_file = st.log_file_path.c_str();
-    if (!current_table.empty()) {
-        current_file = current_table + ".bin";
-        reload_schema_from_data_path(st, current_file);
-        demo_verbose(st, "mdb script: table=%s file=%s\n", current_table.c_str(), current_file.c_str());
-    } else {
-        current_file.clear();
-        demo_verbose(st, "mdb script: no default table preselected\n");
-    }
-
-    FILE* sf = std::fopen(script_file, "r");
-    if (!sf) {
-        std::perror("open script file");
-        return;
-    }
-
-    log_and_print(log_file,
-                  "[SCRIPT] running command file '%s' on table '%s' (file=%s)\n",
-                  script_file,
-                  current_table.empty() ? "(none)" : current_table.c_str(),
-                  current_file.empty() ? "(none)" : current_file.c_str());
-
-    char line[512];
-    std::size_t line_no = 0;
-    while (std::fgets(line, sizeof(line), sf)) {
-        ++line_no;
-        std::string s = trim(line);
-        if (s.empty() || s[0] == '#') continue;
-        const std::uintmax_t before = log_size_or_zero(log_file);
-        if (!process_command_line(st, s.c_str())) {
-            break;
-        }
-        const std::string tail = read_log_tail_from(log_file, before);
-        if (should_stop_script_on_output(tail)) {
-            log_and_print(log_file,
-                          "[SCRIPT] stopped at line %zu due to command error.\n",
-                          line_no);
-            break;
-        }
-    }
-
-    std::fclose(sf);
-    log_and_print(log_file,
-                  "[SCRIPT] command file '%s' finished.\n", script_file);
 }

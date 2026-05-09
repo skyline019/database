@@ -10,6 +10,7 @@
 |------|------|
 | **本文** | 模块/子模块目录职责、主要 `.cc/.h` 入口、类型清单与数据载体、handler 责任链顺序、磁盘产物；**§11 关键方法实现**（与源码逐步对照） |
 | **原文** | Mermaid 图、§11 细节、§12.11 源码行号节选、**§12.12 字段/形参全字典**、§13 维护清单 |
+| **CMake 积木** | `newdb_shell_*` OBJECT → `newdb_capi_adapter` → 默认 `newdb_shared`；`newdb_shell` / plugin 形态 | 见 **原文 §2.2.1**、**§3.1**（三种 `newdb_shared` 形态对照图）、[MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)、[BUILD.md](../dev/BUILD.md) |
 
 路径默认以**仓库根 `database/`** 为起点，写作 `newdb/...`、`waterfall/...`。
 

@@ -1,6 +1,6 @@
 #pragma once
 
-struct ShellState;
+#include "cli/shell/state/shell_state_fwd.h"
 
 // When session has no table/file yet, scan workspace for *.bin (same rules as interactive shell).
 void demo_autopick_initial_table_if_empty(ShellState& st);

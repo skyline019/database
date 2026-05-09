@@ -1,7 +1,12 @@
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <vector>
+
+// ASCII-only case-insensitive compare (shared by dispatch, bridge, handlers).
+int strcasecmp_ascii(const char* a, const char* b);
+int strncasecmp_ascii(const char* a, const char* b, std::size_t n);
 
 // 去掉首尾空白
 std::string trim(const std::string& s);

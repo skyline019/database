@@ -9,7 +9,7 @@
 #include "cli/shell/bootstrap/demo_runner.h"
 #include "cli/shell/repl/demo_shell.h"
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_owner.h"
 
 #ifndef NEWDB_DISPLAY_PROJECT
 #define NEWDB_DISPLAY_PROJECT "newdb"
@@ -59,7 +59,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    ShellState app;
+    ShellStateOwner app_owner;
+    ShellState& app = app_owner.shell();
     demo_init_session_logging(app, inv.ws, default_log_name, inv.encrypt_log, inv.verbose);
 
     const int phase = demo_try_run_terminal_phase(app, inv, data_table, data_file_str);

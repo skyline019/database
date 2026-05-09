@@ -14,12 +14,13 @@ struct TableSchema;
 struct AttrMeta;
 } // namespace newdb
 
-struct ShellState;
+#include "cli/modules/common/util/utils.h"
+#include "cli/shell/state/shell_state_fwd.h"
+
 struct WhereCond;
 
 // ---- shared low-level helpers (args / parsing / validation) ----
-int strcasecmp_ascii(const char* a, const char* b);
-int strncasecmp_ascii(const char* a, const char* b, std::size_t n);
+// strcasecmp_ascii / strncasecmp_ascii: see utils.h
 
 bool row_at_slot_read(const newdb::HeapTable& tbl, std::size_t i, newdb::Row& r);
 bool parse_int64_fast(const std::string& s, long long& out);

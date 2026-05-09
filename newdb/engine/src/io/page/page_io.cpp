@@ -634,7 +634,8 @@ Status reorder_heap_ids_dense(const char* path,
                                 const std::string& table_name,
                                 const TableSchema& schema,
                                 std::size_t* out_rows_after,
-                                bool* out_file_changed) {
+                                bool* out_file_changed,
+                                std::vector<std::pair<int, int>>* out_old_new_ids) {
     if (!schema.primary_key.empty() && schema.primary_key != "id") {
         return Status::Fail("reorder ids: primary key must be id (or unset)");
     }
@@ -660,7 +661,17 @@ Status reorder_heap_ids_dense(const char* path,
         if (out_file_changed != nullptr) {
             *out_file_changed = false;
         }
+        if (out_old_new_ids != nullptr) {
+            out_old_new_ids->clear();
+        }
         return Status::Ok();
+    }
+    if (out_old_new_ids != nullptr) {
+        out_old_new_ids->clear();
+        out_old_new_ids->reserve(tbl.rows.size());
+        for (std::size_t i = 0; i < tbl.rows.size(); ++i) {
+            out_old_new_ids->emplace_back(tbl.rows[i].id, static_cast<int>(i) + 1);
+        }
     }
     int next_id = 1;
     for (Row& r : tbl.rows) {

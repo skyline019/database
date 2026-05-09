@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <newdb/page_io.h>
+#include <newdb/schema_io.h>
 
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
 #include "cli/shell/dispatch/shared/dispatch_internal.h"
@@ -21,7 +22,8 @@
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_ops.h"
+#include "cli/shell/state/shell_state_facade.h"
 #include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/common/util/utils.h"
@@ -34,10 +36,11 @@ bool handle_workspace_admin_commands(ShellState& st,
                                      const std::string& eff_data,
                                      std::string& current_table,
                                      std::string& current_file) {
+    ShellStateFacade f(st);
     if (strcasecmp_ascii(line, "LIST TABLES") == 0 || strcasecmp_ascii(line, "SHOW TABLES") == 0) {
         namespace fs = std::filesystem;
         std::error_code ec;
-        const fs::path cwd = workspace_directory(st);
+        const fs::path cwd = f.workspace_directory();
         std::vector<std::string> tables;
         for (fs::directory_iterator it(cwd, ec), end; !ec && it != end; it.increment(ec)) {
             const fs::directory_entry& ent = *it;
@@ -46,7 +49,7 @@ bool handle_workspace_admin_commands(ShellState& st,
             if (p.extension() != ".bin") continue;
             std::string filename = p.filename().string();
             std::string stem = p.stem().string();
-            bool looks_like_log = (filename == std::filesystem::path(st.log_file_path).filename().string());
+            bool looks_like_log = (filename == std::filesystem::path(f.log_file_path()).filename().string());
             if (!looks_like_log) {
                 const std::string suf = "_log";
                 if (stem.size() >= suf.size() && stem.compare(stem.size() - suf.size(), suf.size(), suf) == 0) {
@@ -62,7 +65,7 @@ bool handle_workspace_admin_commands(ShellState& st,
         }
         log_and_print(log_file, "[LIST] tables (%zu):\n", tables.size());
         for (const auto& t : tables) {
-            const std::string df = resolve_table_file(st, t + ".bin");
+            const std::string df = f.resolve_table_file(t + ".bin");
             const std::string af = newdb::schema_sidecar_path_for_data_file(df);
             std::error_code ec1, ec2;
             bool has_attr = fs::exists(af, ec1);
@@ -80,7 +83,7 @@ bool handle_workspace_admin_commands(ShellState& st,
             return true;
         }
         std::string tname = args[0];
-        const std::string df = resolve_table_file(st, tname + ".bin");
+        const std::string df = f.resolve_table_file(tname + ".bin");
         const std::string af = newdb::schema_sidecar_path_for_data_file(df);
         namespace fs = std::filesystem;
         std::error_code ec1, ec2;
@@ -93,7 +96,7 @@ bool handle_workspace_admin_commands(ShellState& st,
         if (tname == current_table) {
             current_table.clear();
             current_file.clear();
-            st.session.schema = newdb::TableSchema{};
+            f.schema() = newdb::TableSchema{};
         }
         lsm_lite_clear_txn_views(st, df);
         log_and_print(log_file, "[DROP] ok: table '%s' dropped (data=%s%s)\n",
@@ -112,7 +115,7 @@ bool handle_workspace_admin_commands(ShellState& st,
         }
         std::vector<newdb::Row> rows;
         if (newdb::io::create_heap_file(eff_data.c_str(), rows)) {
-            newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+            newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), f.schema());
             log_and_print(log_file, "[RESET] empty table '%s' recreated (file=%s).\n", current_table.c_str(), current_file.c_str());
         } else {
             log_and_print(log_file, "[RESET] failed.\n");
@@ -128,9 +131,9 @@ bool handle_workspace_admin_commands(ShellState& st,
         }
         std::size_t rows_after = 0;
         const newdb::Status vst =
-            newdb::io::compact_heap_file(eff_data.c_str(), current_table, st.session.schema, &rows_after);
+            newdb::io::compact_heap_file(eff_data.c_str(), current_table, f.schema(), &rows_after);
         if (vst.ok) {
-            (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+            (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), f.schema());
             log_and_print(log_file, "[VACUUM] compacted table '%s' (file=%s), rows=%zu.\n",
                           current_table.c_str(), current_file.c_str(), rows_after);
         } else {
@@ -151,14 +154,34 @@ bool handle_workspace_admin_commands(ShellState& st,
                       "(primary key must be id).\n");
         std::size_t rows_after = 0;
         bool file_changed = false;
+        std::vector<std::pair<int, int>> id_pairs;
         const newdb::Status rst =
-            newdb::io::reorder_heap_ids_dense(eff_data.c_str(), current_table, st.session.schema, &rows_after,
-                                             &file_changed);
+            newdb::io::reorder_heap_ids_dense(eff_data.c_str(), current_table, f.schema(), &rows_after,
+                                             &file_changed, &id_pairs);
         if (rst.ok) {
             if (file_changed) {
-                (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+                (void)newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), f.schema());
                 log_and_print(log_file, "[REORDER] ok: table '%s' (file=%s), rows=%zu, ids dense 1..%zu.\n",
                               current_table.c_str(), current_file.c_str(), rows_after, rows_after);
+                if (!id_pairs.empty()) {
+                    std::ostringstream js;
+                    js << "[REORDER_MAP_JSON]{\"table\":\"";
+                    for (char c : current_table) {
+                        if (c == '\\' || c == '"') {
+                            js << '\\';
+                        }
+                        js << c;
+                    }
+                    js << "\",\"pairs\":[";
+                    for (std::size_t i = 0; i < id_pairs.size(); ++i) {
+                        if (i > 0) {
+                            js << ',';
+                        }
+                        js << '[' << id_pairs[i].first << ',' << id_pairs[i].second << ']';
+                    }
+                    js << "]}\n";
+                    log_and_print(log_file, "%s", js.str().c_str());
+                }
             } else {
                 log_and_print(log_file,
                               "[REORDER] noop: table '%s' (file=%s), rows=%zu, ids already dense 1..%zu (no rewrite).\n",

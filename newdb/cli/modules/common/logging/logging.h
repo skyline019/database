@@ -3,9 +3,18 @@
 #include <cstddef>
 #include <string>
 
-struct ShellState;
+class ShellState;
+
+/// Snapshot of shell fields used by logging (mirror FD + XOR framing); avoids coupling `logging.cc` to `shell_state.h`.
+struct LoggingShellSink {
+    int mirror_output_fd{-1};
+    bool encrypt_log{false};
+};
+
+void logging_bind_sink(const LoggingShellSink* sink);
 
 // Binds mirror FD + encryption flags from the active shell (call once per mode / after filling ShellState).
+// Implemented in `cli/shell/state/shell_state_facade.cc` (with `shell_state.h`).
 void logging_bind_shell(const ShellState* st);
 
 // Optional: duplicate stdout/stderr-style output into a GUI (Qt) or other sink. Not thread-safe.

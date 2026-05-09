@@ -23,7 +23,8 @@
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_heap_read_guard.h"
+#include "cli/shell/state/shell_state_facade.h"
 #include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
 #include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
@@ -77,6 +78,7 @@ bool handle_query_page_command(ShellState& st,
                                const char* log_file,
                                const std::string& eff_data,
                                newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     if (strncasecmp_ascii(line, "PAGE", 4) != 0) {
         return false;
     }
@@ -143,11 +145,11 @@ bool handle_query_page_command(ShellState& st,
     std::vector<std::size_t> sorted_idx = load_or_build_page_index_sidecar(
         PageSidecarRequest{
             .data_file = eff_data,
-            .table_name = st.session.table_name,
+            .table_name = f.table_name(),
             .order_key = order_key,
             .descending = desc,
         },
-        st.session.schema,
+        f.schema(),
         tbl);
     if (use_keyset) {
         sorted_idx = table_view::page_indices_keyset_after_id(tbl, sorted_idx, desc, *after_id, true);
@@ -158,7 +160,7 @@ bool handle_query_page_command(ShellState& st,
                   order_key.c_str(),
                   desc ? "desc" : "asc",
                   use_keyset ? (" after_id=" + std::to_string(*after_id)).c_str() : "");
-    table_view::print_page_indexed(st.session.schema,
+    table_view::print_page_indexed(f.schema(),
                                    tbl,
                                    sorted_idx,
                                    static_cast<std::size_t>(page),
@@ -173,6 +175,7 @@ bool handle_query_where_count_commands(ShellState& st,
                                        const std::string& eff_data,
                                        const std::string& current_table,
                                        newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     const HeapReadViewGuard _heap_read_view(st, tbl);
     TableStats where_stats_buf{};
     const TableStats* where_stats_hint = nullptr;
@@ -186,7 +189,7 @@ bool handle_query_where_count_commands(ShellState& st,
                     std::error_code ec;
                     const std::string sp = table_stats_file_path_for_data_file(eff_data);
                     if (fs::exists(sp, ec)) {
-                        loaded_table_stats_file = load_table_stats_file(eff_data, st.session.schema, &where_stats_buf);
+                        loaded_table_stats_file = load_table_stats_file(eff_data, f.schema(), &where_stats_buf);
                         if (!loaded_table_stats_file) {
                             table_stats_file_stale = true;
                         }
@@ -194,17 +197,35 @@ bool handle_query_where_count_commands(ShellState& st,
                 }
             }
             if (!loaded_table_stats_file) {
-                (void)build_table_stats_from_heap(tbl, st.session.schema, &where_stats_buf);
+                (void)build_table_stats_from_heap(tbl, f.schema(), &where_stats_buf);
                 if (const char* pr = std::getenv("NEWDB_QUERY_PERSIST_TABLE_STATS")) {
                     if (pr[0] == '1' && pr[1] == '\0') {
-                        (void)save_table_stats_file(eff_data, st.session.schema, where_stats_buf);
+                        (void)save_table_stats_file(eff_data, f.schema(), where_stats_buf);
                     }
                 }
             }
             where_stats_hint = &where_stats_buf;
         }
     }
-    const WhereQueryStatsHintScope _where_stats_hint(st.where_ctx, where_stats_hint);
+    const WhereQueryStatsHintScope _where_stats_hint(f.where(), where_stats_hint);
+    // Bare COUNT hot path: heap read guard is active; skip SHOW PLAN / WHERE / COUNT(cond) branches.
+    if (line != nullptr) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') {
+            ++p;
+        }
+        if (strcasecmp_ascii(p, "COUNT") == 0 && p[5] == '\0') {
+            const std::size_t visible = tbl.logical_row_count();
+            log_and_print(log_file,
+                          "[COUNT] table='%s' rows=%zu decode_calls=%llu decode_hits=%llu decode_misses=%llu\n",
+                          current_table.c_str(),
+                          visible,
+                          static_cast<unsigned long long>(tbl.decode_heap_slot_calls),
+                          static_cast<unsigned long long>(tbl.decode_heap_slot_hits),
+                          static_cast<unsigned long long>(tbl.decode_heap_slot_misses));
+            return true;
+        }
+    }
     const bool show_plan_json = strncasecmp_ascii(line, "SHOW PLAN", 9) == 0;
     const bool explain_where = strncasecmp_ascii(line, "EXPLAIN WHERE", 14) == 0;
     if (show_plan_json || explain_where) {
@@ -226,35 +247,35 @@ bool handle_query_where_count_commands(ShellState& st,
             return true;
         }
         const HeapReadViewGuard _heap_read_view_plan(st, tbl);
-        const TxnRuntimeStats plan_stats = st.txn.runtimeStats();
-        const std::uint64_t fb0 = st.where_ctx.fallback_scans.load(std::memory_order_relaxed);
-        const std::uint64_t eq0 = st.where_ctx.plan_eq_sidecar_count.load(std::memory_order_relaxed);
-        const std::uint64_t id0 = st.where_ctx.plan_id_pk_count.load(std::memory_order_relaxed);
-        const std::uint64_t pf0 = st.where_ctx.plan_fallback_count.load(std::memory_order_relaxed);
-        const std::uint64_t sc0 = st.where_ctx.query_rows_scanned_total.load(std::memory_order_relaxed);
-        const std::uint64_t rt0 = st.where_ctx.query_rows_returned_total.load(std::memory_order_relaxed);
+        const TxnRuntimeStats plan_stats = f.txn().runtimeStats();
+        const std::uint64_t fb0 = f.where().fallback_scans.load(std::memory_order_relaxed);
+        const std::uint64_t eq0 = f.where().plan_eq_sidecar_count.load(std::memory_order_relaxed);
+        const std::uint64_t id0 = f.where().plan_id_pk_count.load(std::memory_order_relaxed);
+        const std::uint64_t pf0 = f.where().plan_fallback_count.load(std::memory_order_relaxed);
+        const std::uint64_t sc0 = f.where().query_rows_scanned_total.load(std::memory_order_relaxed);
+        const std::uint64_t rt0 = f.where().query_rows_returned_total.load(std::memory_order_relaxed);
         const std::size_t estimated_scan_rows =
-            where_estimate_scan_rows(tbl, st.session.schema, conds, &st.where_ctx);
+            where_estimate_scan_rows(tbl, f.schema(), conds, &f.where());
         const std::vector<std::size_t> matched_idx =
-            query_with_index(tbl, st.session.schema, conds, &st.where_ctx);
+            query_with_index(tbl, f.schema(), conds, &f.where());
         const std::uint32_t plan_candidates_considered =
-            st.where_ctx.last_plan_candidates_considered.load(std::memory_order_relaxed);
-        if (where_policy_last_blocked(&st.where_ctx)) {
+            f.where().last_plan_candidates_considered.load(std::memory_order_relaxed);
+        if (where_policy_last_blocked(&f.where())) {
             log_and_print(log_file,
                           show_plan_json ? "[SHOW PLAN] blocked: %s\n" : "[EXPLAIN WHERE] blocked: %s\n",
-                          where_policy_last_message(&st.where_ctx).c_str());
+                          where_policy_last_message(&f.where()).c_str());
             return true;
         }
-        const std::uint64_t fb1 = st.where_ctx.fallback_scans.load(std::memory_order_relaxed);
-        const std::uint64_t eq1 = st.where_ctx.plan_eq_sidecar_count.load(std::memory_order_relaxed);
-        const std::uint64_t id1 = st.where_ctx.plan_id_pk_count.load(std::memory_order_relaxed);
-        const std::uint64_t pf1 = st.where_ctx.plan_fallback_count.load(std::memory_order_relaxed);
-        const std::uint64_t sc1 = st.where_ctx.query_rows_scanned_total.load(std::memory_order_relaxed);
-        const std::uint64_t rt1 = st.where_ctx.query_rows_returned_total.load(std::memory_order_relaxed);
+        const std::uint64_t fb1 = f.where().fallback_scans.load(std::memory_order_relaxed);
+        const std::uint64_t eq1 = f.where().plan_eq_sidecar_count.load(std::memory_order_relaxed);
+        const std::uint64_t id1 = f.where().plan_id_pk_count.load(std::memory_order_relaxed);
+        const std::uint64_t pf1 = f.where().plan_fallback_count.load(std::memory_order_relaxed);
+        const std::uint64_t sc1 = f.where().query_rows_scanned_total.load(std::memory_order_relaxed);
+        const std::uint64_t rt1 = f.where().query_rows_returned_total.load(std::memory_order_relaxed);
         std::string plan_id;
         {
-            std::lock_guard<std::mutex> lk(st.where_ctx.mu);
-            plan_id = st.where_ctx.last_plan_id;
+            std::lock_guard<std::mutex> lk(f.where().mu);
+            plan_id = f.where().last_plan_id;
         }
         if (show_plan_json) {
             const std::size_t logical_rows = tbl.logical_row_count();
@@ -262,7 +283,8 @@ bool handle_query_where_count_commands(ShellState& st,
                 tbl.active_snapshot.has_value() ? tbl.active_snapshot->snapshot_lsn : 0;
             const char* readpath_json = txn_isolation_readpath_enabled() ? "true" : "false";
             const std::vector<PlanCandidate> plan_cands =
-                where_build_plan_candidates(tbl, st.session.schema, conds, where_stats_hint);
+                where_build_plan_candidates(tbl, f.schema(), conds,
+                                            WherePlanningStatsRef{where_stats_hint});
             const std::string plan_id_chosen = plan_id.empty() ? "?" : plan_id;
             std::string chosen_reason;
             for (const auto& pcn : plan_cands) {
@@ -353,7 +375,7 @@ bool handle_query_where_count_commands(ShellState& st,
         }
         const std::size_t limit = 50;
         const auto rows = lookup_or_build_covering_proj_sidecar(
-            eff_data, key_attr, proj_attr, key_value, limit, st.session.schema, tbl);
+            eff_data, key_attr, proj_attr, key_value, limit, f.schema(), tbl);
         log_and_print(log_file,
                       "[WHEREP] key=%s=%s proj=%s rows=%zu (covering sidecar)\n",
                       key_attr.c_str(),
@@ -382,9 +404,9 @@ bool handle_query_where_count_commands(ShellState& st,
                           "[WHERE] usage: WHERE(attr, op, value [, AND|OR, attr, op, value] ...)\n");
             return true;
         }
-        const std::vector<std::size_t> matched_idx = query_with_index(tbl, st.session.schema, conds, &st.where_ctx);
-        if (where_policy_last_blocked(&st.where_ctx)) {
-            log_and_print(log_file, "[WHERE] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+        const std::vector<std::size_t> matched_idx = query_with_index(tbl, f.schema(), conds, &f.where());
+        if (where_policy_last_blocked(&f.where())) {
+            log_and_print(log_file, "[WHERE] blocked: %s\n", where_policy_last_message(&f.where()).c_str());
             return true;
         }
         log_and_print(log_file,
@@ -396,7 +418,7 @@ bool handle_query_where_count_commands(ShellState& st,
             return true;
         }
         const std::size_t page_size = std::min<std::size_t>(50, matched_idx.size());
-        table_view::print_page_indexed(st.session.schema, tbl, matched_idx, 1, page_size);
+        table_view::print_page_indexed(f.schema(), tbl, matched_idx, 1, page_size);
         if (matched_idx.size() > page_size) {
             log_and_print(log_file,
                           "[WHERE] showing first %zu rows.\n",
@@ -405,17 +427,6 @@ bool handle_query_where_count_commands(ShellState& st,
         return true;
     }
 
-    if (strcasecmp_ascii(line, "COUNT") == 0) {
-        const std::size_t visible = tbl.logical_row_count();
-        log_and_print(log_file,
-                      "[COUNT] table='%s' rows=%zu decode_calls=%llu decode_hits=%llu decode_misses=%llu\n",
-                      current_table.c_str(),
-                      visible,
-                      static_cast<unsigned long long>(tbl.decode_heap_slot_calls),
-                      static_cast<unsigned long long>(tbl.decode_heap_slot_hits),
-                      static_cast<unsigned long long>(tbl.decode_heap_slot_misses));
-        return true;
-    }
     if (strncasecmp_ascii(line, "COUNT", 5) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 5, args) || args.empty()) {
@@ -435,7 +446,7 @@ bool handle_query_where_count_commands(ShellState& st,
         if (conds.size() == 1 && conds[0].op == CondOp::Eq && conds[0].attr != "id") {
             const std::uint64_t before_calls = tbl.decode_heap_slot_calls;
             const CoveringAggLookup cov = lookup_or_build_covering_agg_sidecar(
-                eff_data, conds[0].attr, "__count__", conds[0].value, st.session.schema, tbl);
+                eff_data, conds[0].attr, "__count__", conds[0].value, f.schema(), tbl);
             const std::uint64_t after_calls = tbl.decode_heap_slot_calls;
             if (cov.used) {
                 log_and_print(log_file,
@@ -446,9 +457,9 @@ bool handle_query_where_count_commands(ShellState& st,
                 return true;
             }
         }
-        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
-        if (where_policy_last_blocked(&st.where_ctx)) {
-            log_and_print(log_file, "[COUNT] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, f.schema(), conds, &f.where());
+        if (where_policy_last_blocked(&f.where())) {
+            log_and_print(log_file, "[COUNT] blocked: %s\n", where_policy_last_message(&f.where()).c_str());
             return true;
         }
         const std::size_t cnt = candidates.size();
@@ -466,6 +477,7 @@ bool handle_query_min_max_commands(ShellState& st,
                                    const char* line,
                                    const char* log_file,
                                    newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     if (strncasecmp_ascii(line, "MIN", 3) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 3, args) || args.empty()) {
@@ -480,7 +492,7 @@ bool handle_query_min_max_commands(ShellState& st,
             log_and_print(log_file, "[MIN] invalid arguments: %s\n", err_msg.c_str());
             return true;
         }
-        newdb::AttrType tp = st.session.schema.type_of(attr);
+        newdb::AttrType tp = f.schema().type_of(attr);
         if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
             log_and_print(log_file,
                           "[MIN] attribute '%s' is not numeric (int/float/double)\n",
@@ -489,9 +501,9 @@ bool handle_query_min_max_commands(ShellState& st,
         }
         bool has_val = false;
         std::string best;
-        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
-        if (where_policy_last_blocked(&st.where_ctx)) {
-            log_and_print(log_file, "[MIN] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, f.schema(), conds, &f.where());
+        if (where_policy_last_blocked(&f.where())) {
+            log_and_print(log_file, "[MIN] blocked: %s\n", where_policy_last_message(&f.where()).c_str());
             return true;
         }
         newdb::Row r;
@@ -513,7 +525,7 @@ bool handle_query_min_max_commands(ShellState& st,
                 best = vstr;
                 has_val = true;
             } else {
-                int cmp = st.session.schema.compare_attr(attr, vstr, best);
+                int cmp = f.schema().compare_attr(attr, vstr, best);
                 if (cmp < 0) {
                     best = vstr;
                 }
@@ -546,7 +558,7 @@ bool handle_query_min_max_commands(ShellState& st,
             log_and_print(log_file, "[MAX] invalid arguments: %s\n", err_msg.c_str());
             return true;
         }
-        newdb::AttrType tp = st.session.schema.type_of(attr);
+        newdb::AttrType tp = f.schema().type_of(attr);
         if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
             log_and_print(log_file,
                           "[MAX] attribute '%s' is not numeric (int/float/double)\n",
@@ -555,9 +567,9 @@ bool handle_query_min_max_commands(ShellState& st,
         }
         bool has_val = false;
         std::string best;
-        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
-        if (where_policy_last_blocked(&st.where_ctx)) {
-            log_and_print(log_file, "[MAX] blocked: %s\n", where_policy_last_message(&st.where_ctx).c_str());
+        const std::vector<std::size_t> candidates = build_candidate_slots(tbl, f.schema(), conds, &f.where());
+        if (where_policy_last_blocked(&f.where())) {
+            log_and_print(log_file, "[MAX] blocked: %s\n", where_policy_last_message(&f.where()).c_str());
             return true;
         }
         newdb::Row r;
@@ -579,7 +591,7 @@ bool handle_query_min_max_commands(ShellState& st,
                 best = vstr;
                 has_val = true;
             } else {
-                int cmp = st.session.schema.compare_attr(attr, vstr, best);
+                int cmp = f.schema().compare_attr(attr, vstr, best);
                 if (cmp > 0) {
                     best = vstr;
                 }
@@ -606,6 +618,7 @@ bool handle_query_find_commands(ShellState& st,
                                 const char* log_file,
                                 const std::string& eff_data,
                                 newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     const HeapReadViewGuard _heap_read_view(st, tbl);
     if (strncasecmp_ascii(line, "FIND(", 5) == 0) {
         std::vector<std::string> args;
@@ -650,7 +663,7 @@ bool handle_query_find_commands(ShellState& st,
             log_and_print(log_file, "[FINDPK] usage: FINDPK(value)\n");
             return true;
         }
-        const std::string pk = st.session.schema.primary_key.empty() ? "id" : st.session.schema.primary_key;
+        const std::string pk = f.schema().primary_key.empty() ? "id" : f.schema().primary_key;
         const std::string& val = args[0];
         newdb::Row scratch;
         const newdb::Row* found = nullptr;
@@ -689,7 +702,7 @@ bool handle_query_find_commands(ShellState& st,
             return true;
         }
         newdb::io::query_attr_int_ge(eff_data.c_str(),
-                                     st.session.schema.default_int_predicate_attr().c_str(),
+                                     f.schema().default_int_predicate_attr().c_str(),
                                      min_bal);
         return true;
     }
@@ -702,6 +715,7 @@ bool handle_query_sum_avg_commands(ShellState& st,
                                    const char* log_file,
                                    const std::string& eff_data,
                                    newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     const HeapReadViewGuard _heap_read_view(st, tbl);
     auto run_numeric_agg = [&](const char* tag, bool is_avg, const char* args_text) -> bool {
         std::vector<std::string> args;
@@ -716,7 +730,7 @@ bool handle_query_sum_avg_commands(ShellState& st,
             log_and_print(log_file, "[%s] invalid arguments: %s\n", tag, err_msg.c_str());
             return true;
         }
-        newdb::AttrType tp = st.session.schema.type_of(attr);
+        newdb::AttrType tp = f.schema().type_of(attr);
         if (!(tp == newdb::AttrType::Int || tp == newdb::AttrType::Float || tp == newdb::AttrType::Double)) {
             log_and_print(log_file, "[%s] attribute '%s' is not numeric (int/float/double)\n", tag, attr.c_str());
             return true;
@@ -724,7 +738,7 @@ bool handle_query_sum_avg_commands(ShellState& st,
         if (conds.size() == 1 && conds[0].op == CondOp::Eq && conds[0].attr != "id") {
             const std::uint64_t before_calls = tbl.decode_heap_slot_calls;
             const CoveringAggLookup cov = lookup_or_build_covering_agg_sidecar(
-                eff_data, conds[0].attr, attr, conds[0].value, st.session.schema, tbl);
+                eff_data, conds[0].attr, attr, conds[0].value, f.schema(), tbl);
             const std::uint64_t after_calls = tbl.decode_heap_slot_calls;
             if (cov.used) {
                 const std::uint64_t decode_delta = after_calls - before_calls;
@@ -786,10 +800,10 @@ bool handle_query_sum_avg_commands(ShellState& st,
             std::size_t seed_idx = conds.size();
             std::size_t best_cost = std::numeric_limits<std::size_t>::max();
             for (std::size_t i = 0; i < conds.size(); ++i) {
-                if (!is_index_friendly_single(conds[i], st.session.schema)) {
+                if (!is_index_friendly_single(conds[i], f.schema())) {
                     continue;
                 }
-                const std::size_t cost = seed_cost_simple(conds[i], st.session.schema);
+                const std::size_t cost = seed_cost_simple(conds[i], f.schema());
                 if (cost < best_cost) {
                     best_cost = cost;
                     seed_idx = i;
@@ -797,14 +811,14 @@ bool handle_query_sum_avg_commands(ShellState& st,
             }
             if (seed_idx < conds.size()) {
                 std::vector<WhereCond> seed_cond{conds[seed_idx]};
-                const std::vector<std::size_t> seed_slots = build_candidate_slots(tbl, st.session.schema, seed_cond, &st.where_ctx);
-                if (where_policy_last_blocked(&st.where_ctx)) {
-                    log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&st.where_ctx).c_str());
+                const std::vector<std::size_t> seed_slots = build_candidate_slots(tbl, f.schema(), seed_cond, &f.where());
+                if (where_policy_last_blocked(&f.where())) {
+                    log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&f.where()).c_str());
                     return true;
                 }
                 for (const std::size_t slot : seed_slots) {
                     if (!row_at_slot_read(tbl, slot, r)) continue;
-                    if (!row_match_multi_conditions(r, st.session.schema, conds)) continue;
+                    if (!row_match_multi_conditions(r, f.schema(), conds)) continue;
                     accumulate_row(r);
                 }
                 fused_done = true;
@@ -812,9 +826,9 @@ bool handle_query_sum_avg_commands(ShellState& st,
         }
 
         if (!fused_done) {
-            const std::vector<std::size_t> candidates = build_candidate_slots(tbl, st.session.schema, conds, &st.where_ctx);
-            if (where_policy_last_blocked(&st.where_ctx)) {
-                log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&st.where_ctx).c_str());
+            const std::vector<std::size_t> candidates = build_candidate_slots(tbl, f.schema(), conds, &f.where());
+            if (where_policy_last_blocked(&f.where())) {
+                log_and_print(log_file, "[%s] blocked: %s\n", tag, where_policy_last_message(&f.where()).c_str());
                 return true;
             }
             for (const std::size_t slot : candidates) {

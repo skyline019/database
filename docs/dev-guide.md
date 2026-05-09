@@ -75,6 +75,8 @@ cd newdb/rust_gui
 powershell -ExecutionPolicy Bypass -File .\scripts\sync_runtime_binaries.ps1 -BuildDir ..\build_mingw
 ```
 
+安装包（Tauri）需 **plugin** 产物目录中的 `newdb_cli_backend.dll` 等文件已同步到 `src-tauri/bin`；推荐 **`npm run tauri:build:plugin`**（Windows 上一键：CMake plugin 配置 → sync → `tauri build`），详见 `newdb/rust_gui/README.md`。
+
 ## 测试与质量护栏
 
 运行回归测试：

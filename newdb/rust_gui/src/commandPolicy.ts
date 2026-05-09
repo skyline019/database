@@ -23,7 +23,7 @@ export function shouldStopAndSkipHistory(
   return hasCommandError(rawOutput, errorCode);
 }
 
-/** Grouped keys for `SHOW TUNING JSON` / C API runtime mirror — sync with `newdb/scripts/validate/RUNTIME_STATS_SCHEMA.md`. */
+/** Grouped keys for `SHOW TUNING JSON` / C API runtime mirror — sync with `scripts/validate/RUNTIME_STATS_SCHEMA.md` and required keys in `scripts/validate/contract/runtime_stats.v1.required.json`. */
 export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; keys: readonly string[] }> = [
   {
     title: "WHERE / 计划观测",

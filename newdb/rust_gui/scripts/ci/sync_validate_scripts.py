@@ -32,6 +32,8 @@ MIRROR_RELS = [
 ]
 TRACKED_FILES = [
     "RUNTIME_STATS_SCHEMA.md",
+    "contract/runtime_stats.v1.required.json",
+    "contract/runtime_stats.v1.line.schema.json",
     "validate_runtime_stats.py",
     "test_validate_runtime_stats_compat.py",
     "test_runtime_report_compact_gates.py",
@@ -40,6 +42,7 @@ TRACKED_FILES = [
     "validate_perf_summary.py",
     "check_lsm_layout.py",
     "check_c_api_abi.py",
+    "check_runtime_stats_contract_parity.py",
     "c_api_expected_symbols.txt",
 ]
 

@@ -198,8 +198,18 @@ TEST(PageIo, ReorderHeapIdsDenseAfterGaps) {
                                             })
                     .ok);
     std::size_t rows_after = 0;
-    ASSERT_TRUE(newdb::io::reorder_heap_ids_dense(path.c_str(), "reorder", minimal_schema(), &rows_after).ok);
+    std::vector<std::pair<int, int>> pairs;
+    ASSERT_TRUE(
+        newdb::io::reorder_heap_ids_dense(path.c_str(), "reorder", minimal_schema(), &rows_after, nullptr, &pairs)
+            .ok);
     EXPECT_EQ(rows_after, 3u);
+    ASSERT_EQ(pairs.size(), 3u);
+    EXPECT_EQ(pairs[0].first, 5);
+    EXPECT_EQ(pairs[0].second, 1);
+    EXPECT_EQ(pairs[1].first, 7);
+    EXPECT_EQ(pairs[1].second, 2);
+    EXPECT_EQ(pairs[2].first, 10);
+    EXPECT_EQ(pairs[2].second, 3);
 
     newdb::HeapTable tbl;
     ASSERT_TRUE(newdb::io::load_heap_file(path.c_str(), "reorder", minimal_schema(), tbl).ok);
@@ -225,7 +235,9 @@ TEST(PageIo, ReorderHeapIdsDenseNoopWhenAlreadyDense) {
                     .ok);
     std::size_t rows_after = 0;
     bool file_changed = true;
-    ASSERT_TRUE(newdb::io::reorder_heap_ids_dense(path.c_str(), "dense", minimal_schema(), &rows_after, &file_changed).ok);
+    ASSERT_TRUE(newdb::io::reorder_heap_ids_dense(path.c_str(), "dense", minimal_schema(), &rows_after, &file_changed,
+                                                  nullptr)
+                    .ok);
     EXPECT_EQ(rows_after, 3u);
     EXPECT_FALSE(file_changed);
 }

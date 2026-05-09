@@ -1,6 +1,6 @@
 #pragma once
 
-struct ShellState;
+struct ShellStateFacade;
 
-// Extra diagnostics to stderr when ShellState::verbose is set.
-void demo_verbose(const ShellState& st, const char* fmt, ...);
+// Extra diagnostics to stderr when ShellState::verbose is set (via facade).
+void demo_verbose(const ShellStateFacade& f, const char* fmt, ...);

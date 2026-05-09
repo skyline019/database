@@ -1,5 +1,6 @@
 #pragma once
 
+#include <newdb/wal_sync_mode.h>
 #include <newdb/error.h>
 #include <newdb/row.h>
 #include <newdb/schema.h>
@@ -22,12 +23,6 @@
 #include <atomic>
 
 namespace newdb {
-
-enum class WalSyncMode : uint8_t {
-    Full = 0,   // fflush + fsync/_commit each flush
-    Normal = 1, // fflush always, fsync/_commit periodically
-    Off = 2     // fflush only
-};
 
 enum class WalOp : uint8_t {
     INSERT = 1,

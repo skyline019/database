@@ -51,6 +51,10 @@ struct TableSchema {
                      const std::string& vb) const;
 };
 
+inline const AttrMeta* find_attr_meta(const TableSchema& sch, const std::string& name) {
+    return sch.find_attr(name);
+}
+
 // Typed attrs declared in schema must have values parseable as that type (extra attrs allowed).
 Status validate_storage_row(const TableSchema& schema, const Row& row);
 

@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/common/util/constants.h"
@@ -53,8 +54,8 @@ bool TxnCoordinator::recoverFromWAL() {
     const newdb::Status rd = wm->read_all_records(schema, recs);
     if (!rd.ok) {
         {
-            std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
-            m_wal_recovery_policy = std::string("cli_txn_reconcile|read_all_records_failed:") + rd.message;
+            std::lock_guard<std::mutex> lk(st_->m_wal_recovery_policy_mu);
+            st_->m_wal_recovery_policy = std::string("cli_txn_reconcile|read_all_records_failed:") + rd.message;
         }
         return false;
     }
@@ -72,13 +73,13 @@ bool TxnCoordinator::recoverFromWAL() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - analyze_started_at)
             .count());
-    m_wal_recovery_records_scanned.store(static_cast<std::uint64_t>(recs.size()), std::memory_order_relaxed);
-    m_wal_recovery_analyze_ms.store(analyze_elapsed_ms, std::memory_order_relaxed);
+    st_->m_wal_recovery_records_scanned.store(static_cast<std::uint64_t>(recs.size()), std::memory_order_relaxed);
+    st_->m_wal_recovery_analyze_ms.store(analyze_elapsed_ms, std::memory_order_relaxed);
     {
         newdb::WalRecoveryStats scan{};
         std::uint64_t records_after_cp = 0;
         if (wm->capture_recovery_scan_stats(&scan).ok) {
-            m_wal_recovery_segments_after_checkpoint.store(scan.indexed_segments, std::memory_order_relaxed);
+            st_->m_wal_recovery_segments_after_checkpoint.store(scan.indexed_segments, std::memory_order_relaxed);
             if (scan.last_complete_checkpoint_lsn > 0) {
                 for (const auto& wr : recs) {
                     if (wr.lsn > scan.last_complete_checkpoint_lsn) {
@@ -86,7 +87,7 @@ bool TxnCoordinator::recoverFromWAL() {
                     }
                 }
             }
-            m_wal_recovery_records_after_checkpoint.store(records_after_cp, std::memory_order_relaxed);
+            st_->m_wal_recovery_records_after_checkpoint.store(records_after_cp, std::memory_order_relaxed);
         }
     }
     struct TxnWalOp {
@@ -203,14 +204,14 @@ bool TxnCoordinator::recoverFromWAL() {
     for (const auto& kv : dangling_by_txn) {
         dangling_count += kv.second.size();
     }
-    m_wal_recovery_dangling_txns.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
+    st_->m_wal_recovery_dangling_txns.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
                                        std::memory_order_relaxed);
-    m_wal_recovery_redo_plan_pending_txn_count.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
+    st_->m_wal_recovery_redo_plan_pending_txn_count.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
                                                      std::memory_order_relaxed);
 
     if (dangling_count > 0) {
         logging_console_printf("[WAL] Found %zu uncommitted operations, starting recovery...\n", dangling_count);
-        m_wal_recovery_undo_ops.fetch_add(static_cast<std::uint64_t>(dangling_count),
+        st_->m_wal_recovery_undo_ops.fetch_add(static_cast<std::uint64_t>(dangling_count),
                                           std::memory_order_relaxed);
     }
 
@@ -277,10 +278,10 @@ bool TxnCoordinator::recoverFromWAL() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - redo_started_at)
             .count());
-    m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
-    m_wal_recovery_apply_conflict_count.store(redo_apply_conflicts, std::memory_order_relaxed);
-    m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
-    m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
+    st_->m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
+    st_->m_wal_recovery_apply_conflict_count.store(redo_apply_conflicts, std::memory_order_relaxed);
+    st_->m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
+    st_->m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
 
     std::map<std::string, std::vector<TxnWalOp>> ops_by_table;
     for (const auto& kv : dangling_by_txn) {
@@ -362,13 +363,13 @@ bool TxnCoordinator::recoverFromWAL() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - undo_started_at)
             .count());
-    m_wal_recovery_undo_ms.store(undo_elapsed_ms, std::memory_order_relaxed);
+    st_->m_wal_recovery_undo_ms.store(undo_elapsed_ms, std::memory_order_relaxed);
 
     const auto finalize_started_at = std::chrono::steady_clock::now();
     // ??dangling ???????????????????????????
     for (const auto& kv : dangling_by_txn) {
         const uint64_t txn = kv.first;
-        m_txn_id.store(static_cast<int64_t>(txn));
+        st_->m_txn_id.store(static_cast<int64_t>(txn));
         writeWAL("TXN_ROLLBACK", "", "", "", "recovered");
     }
     // ????????WAL??????????????
@@ -378,13 +379,13 @@ bool TxnCoordinator::recoverFromWAL() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - finalize_started_at)
             .count());
-    m_wal_recovery_finalize_ms.store(finalize_elapsed_ms, std::memory_order_relaxed);
-    m_wal_recovery_runs.fetch_add(1, std::memory_order_relaxed);
+    st_->m_wal_recovery_finalize_ms.store(finalize_elapsed_ms, std::memory_order_relaxed);
+    st_->m_wal_recovery_runs.fetch_add(1, std::memory_order_relaxed);
     const auto elapsed_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - recovery_started_at)
             .count());
-    m_wal_recovery_last_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
+    st_->m_wal_recovery_last_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
     {
         std::ostringstream pol;
         pol << "cli_txn_reconcile";
@@ -400,8 +401,8 @@ bool TxnCoordinator::recoverFromWAL() {
             pol << ";heap_partial_tail_stops=" << ls->segment_index_partial_tail_stops;
             pol << ";heap_bad_header_stops=" << ls->segment_index_bad_header_stops;
         }
-        std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
-        m_wal_recovery_policy = pol.str();
+        std::lock_guard<std::mutex> lk(st_->m_wal_recovery_policy_mu);
+        st_->m_wal_recovery_policy = pol.str();
     }
     logging_console_printf("[WAL] Recovery complete\n");
 
@@ -429,9 +430,9 @@ Result<bool> TxnCoordinator::recoverToLsn(const std::uint64_t target_lsn) {
     if (!ok) {
         return Result<bool>::Err("recover to lsn failed");
     }
-    m_pitr_runs.fetch_add(1, std::memory_order_relaxed);
-    m_pitr_target_lsn.store(target_lsn, std::memory_order_relaxed);
-    m_pitr_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
+    st_->m_pitr_runs.fetch_add(1, std::memory_order_relaxed);
+    st_->m_pitr_target_lsn.store(target_lsn, std::memory_order_relaxed);
+    st_->m_pitr_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
     writeWAL("PITR_MARK", "", std::to_string(target_lsn), "", std::to_string(newdb::WalManager::wall_clock_ms()));
     return Result<bool>::Ok(true);
 }
@@ -442,7 +443,7 @@ Result<bool> TxnCoordinator::recoverToTime(const std::uint64_t target_ts_ms) {
     }
     std::uint64_t cutoff_lsn = 0;
     {
-        std::lock_guard<std::mutex> lk(m_wal_mutex);
+        std::lock_guard<std::mutex> lk(st_->m_wal_mutex);
         newdb::WalManager* wm = ensureWal();
         if (wm != nullptr) {
             newdb::TableSchema schema;
@@ -478,9 +479,9 @@ Result<bool> TxnCoordinator::recoverToTime(const std::uint64_t target_ts_ms) {
     if (!ok) {
         return Result<bool>::Err("recover to time failed");
     }
-    m_pitr_runs.fetch_add(1, std::memory_order_relaxed);
-    m_pitr_target_lsn.store(cutoff_lsn, std::memory_order_relaxed);
-    m_pitr_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
+    st_->m_pitr_runs.fetch_add(1, std::memory_order_relaxed);
+    st_->m_pitr_target_lsn.store(cutoff_lsn, std::memory_order_relaxed);
+    st_->m_pitr_elapsed_ms.store(elapsed_ms, std::memory_order_relaxed);
     writeWAL("PITR_MARK", "", std::to_string(cutoff_lsn), "", std::to_string(target_ts_ms));
     return Result<bool>::Ok(true);
 }

@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include <newdb/schema_io.h>
+
 #include "cli/modules/sidecar/covering/covering_index_sidecar.h"
 #include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/import_export/demo_export.h"
@@ -19,7 +21,7 @@
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/sidecar/page/page_index_sidecar.h"
 #include "cli/modules/catalog/schema_catalog.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
 #include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/common/util/utils.h"
@@ -31,6 +33,7 @@ bool handle_export_command(ShellState& st,
                            const std::string& current_table,
                            const std::string& current_file,
                            newdb::HeapTable& tbl) {
+    ShellStateFacade f(st);
     if (strncasecmp_ascii(line, "EXPORT", 6) != 0) {
         return false;
     }
@@ -55,20 +58,20 @@ bool handle_export_command(ShellState& st,
         std::filesystem::path p(out_file);
         if (!p.is_absolute()) {
             std::filesystem::path base;
-            if (!st.data_dir.empty()) {
-                base = std::filesystem::absolute(st.data_dir, ec);
+            if (!f.data_dir().empty()) {
+                base = std::filesystem::absolute(f.data_dir(), ec);
             }
             if (base.empty()) {
-                base = workspace_directory(st);
+                base = f.workspace_directory();
             }
             p = base / p;
             out_file = p.lexically_normal().string();
         }
     }
     if (fmt == "CSV") {
-        export_table_csv(st.session.schema, tbl, out_file, log_file);
+        export_table_csv(f.schema(), tbl, out_file, log_file);
     } else if (fmt == "JSON") {
-        export_table_json(st.session.schema, tbl, out_file, log_file);
+        export_table_json(f.schema(), tbl, out_file, log_file);
     } else {
         log_and_print(log_file, "[EXPORT] unknown format '%s'\n", fmt.c_str());
     }
@@ -81,6 +84,7 @@ bool handle_import_defattr_commands(ShellState& st,
                                     const char* log_file,
                                     const std::string& eff_data,
                                     const std::string& current_file) {
+    ShellStateFacade f(st);
     if (strncasecmp_ascii(line, "IMPORTDIR", 9) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 9, args) || args.size() != 1) {
@@ -88,7 +92,7 @@ bool handle_import_defattr_commands(ShellState& st,
             return true;
         }
         if (import_tables_from_directory(args[0].c_str(),
-                                         st.data_dir.empty() ? nullptr : st.data_dir.c_str(),
+                                         f.data_dir().empty() ? nullptr : f.data_dir().c_str(),
                                          log_file)) {
             log_and_print(log_file, "[IMPORTDIR] done.\n");
         } else {
@@ -126,15 +130,15 @@ bool handle_import_defattr_commands(ShellState& st,
             log_and_print(log_file, "[DEFATTR] usage: DEFATTR <name:type> [name:type] ... (excluding 'id')\n");
             return true;
         }
-        st.session.schema.attrs = std::move(attrs);
-        if (!st.session.schema.valid_primary_key()) st.session.schema.primary_key = "id";
+        f.schema().attrs = std::move(attrs);
+        if (!f.schema().valid_primary_key()) f.schema().primary_key = "id";
         log_and_print(log_file, "[DEFATTR] attributes set to:");
-        for (const auto& m : st.session.schema.attrs) {
+        for (const auto& m : f.schema().attrs) {
             log_and_print(log_file, " %s(%s)", m.name.c_str(), newdb::TableSchema::type_name(m.type));
         }
         log_and_print(log_file, "\n");
         if (!current_file.empty()) {
-            newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), st.session.schema);
+            newdb::save_schema_text(newdb::schema_sidecar_path_for_data_file(eff_data), f.schema());
         }
         return true;
     }

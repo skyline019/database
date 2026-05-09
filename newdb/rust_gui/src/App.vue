@@ -58,6 +58,11 @@ type RuntimeArtifactInfo = {
   runtimeReportModified: string;
   dllPath: string;
   dllModified: string;
+  /** Bundled plugin backend when synced (`newdb_cli_backend.dll`); empty if full_embed only. */
+  cliBackendPluginPath?: string;
+  cliBackendPluginModified?: string;
+  /** Effective NEWDB_CLI_BACKEND_PATH (GUI may auto-set from bundle). */
+  newdbCliBackendPathEnv?: string;
   runtimeStatsSchemaVersion?: string;
   backendGitCommit?: string;
   buildProfile?: string;
@@ -321,10 +326,10 @@ const txnRecorder = ref<TxnSessionRecorder>({
 });
 const stackUndoPage = ref(1);
 const stackRedoPage = ref(1);
+/** 事务栈列表：撤销 / 重做共用一个列表区，淡出切换。 */
+const stackPanelTab = ref<"undo" | "redo">("undo");
 const stackPageSize = 8;
 const stackPreviewUnit = ref<UndoUnit | null>(null);
-/** After a real CONFIRM_REORDER (not `[REORDER] noop`), stacks are cleared and the panel is sealed until new undo history is recorded. */
-const stackPanelLockedAfterReorder = ref(false);
 const selectedStackKey = ref("");
 const showHelp = ref(false);
 const showDllModal = ref(false);
@@ -469,6 +474,15 @@ async function activateTableTabByKey(key: string) {
     await invoke("set_current_table", { table: tab.table });
   }
   await refreshPage();
+}
+
+/** 点击已打开表标签：切换 USE 与后端会话表；再次点击当前标签也会重新同步并刷新分页。 */
+async function selectOpenTableTab(key: string) {
+  if (activeTableKey.value === key) {
+    await activateTableTabByKey(key);
+    return;
+  }
+  activeTableKey.value = key;
 }
 
 function closeTableTab(key: string) {
@@ -1711,7 +1725,6 @@ function isReversible(item: UndoUnit) {
 }
 
 async function viewOperationLog(item: UndoUnit) {
-  if (stackPanelLockedAfterReorder.value) return;
   const all = logs.value.join("\n");
   const lines = all.split(/\r?\n/);
   const firstForward = item.ops[0]?.forward || "";
@@ -1757,7 +1770,6 @@ async function viewOperationLog(item: UndoUnit) {
 }
 
 async function selectStackItem(item: UndoUnit) {
-  if (stackPanelLockedAfterReorder.value) return;
   selectedStackKey.value = stackKey(item);
   stackPreviewUnit.value = item;
 }
@@ -1797,7 +1809,7 @@ function inferInverse(type: OperationType, forward: string): string | undefined 
   }
   if (type === "data_insert") {
     const m = /INSERT\(([^,)\s]+)/i.exec(forward);
-    if (m) return `DELETE(${m[1]})`;
+    if (m) return `DELETE(${normalizeHeapRowIdForCmd(m[1] ?? "")})`;
   }
   if (type === "table_rename") {
     const m = /RENAME TABLE\(([^)]+)\)/i.exec(forward);
@@ -1805,6 +1817,43 @@ function inferInverse(type: OperationType, forward: string): string | undefined 
   }
   if (cmd === "BEGIN") return "ROLLBACK";
   return undefined;
+}
+
+/** Canonical decimal for integer heap `id` (matches Rust remap keys; avoids `03` vs `3`). */
+function normalizeHeapRowIdForCmd(raw: string): string {
+  const t = String(raw ?? "").trim();
+  if (!t) return t;
+  if (/^-?\d+$/.test(t)) {
+    const n = Number(t);
+    if (Number.isSafeInteger(n)) return String(n);
+  }
+  return t;
+}
+
+/** Grid cell vs UPDATE/DELETE id (PAGE_JSON may use number-like strings; avoid `===` misses). */
+function gridRowMatchesId(row: string[], idColumnIdx: number, idArg: string): boolean {
+  if (idColumnIdx < 0 || idColumnIdx >= row.length) return false;
+  const a = String(row[idColumnIdx] ?? "").trim();
+  const b = String(idArg ?? "").trim();
+  if (a === b) return true;
+  if (/^-?\d+$/.test(a) && /^-?\d+$/.test(b)) return Number(a) === Number(b);
+  return false;
+}
+
+/** Non-id column values in `tableColumns` order (DEFATTR order), for UPDATE/INSERT undo. Skips “#” and misaligned grid columns. */
+function rowValuesInSchemaOrder(hit: string[], viewHeaders: string[]): string[] {
+  const idxByHeader = new Map<string, number>();
+  for (let i = 0; i < viewHeaders.length; i += 1) {
+    idxByHeader.set(viewHeaders[i]!.trim().toLowerCase(), i);
+  }
+  const out: string[] = [];
+  for (const c of tableColumns.value) {
+    const name = String(c.name ?? "").trim();
+    if (!name || name === "#" || name.toLowerCase() === "id") continue;
+    const idx = idxByHeader.get(name.toLowerCase());
+    out.push(idx === undefined ? "" : `${hit[idx] ?? ""}`.trim());
+  }
+  return out;
 }
 
 function inferUpdateInverseFromCurrentView(forward: string): string | undefined {
@@ -1815,25 +1864,26 @@ function inferUpdateInverseFromCurrentView(forward: string): string | undefined 
     .map((x) => x.trim())
     .filter((x) => x.length > 0);
   if (args.length < 1) return undefined;
-  const id = args[0]!;
+  const id = normalizeHeapRowIdForCmd(args[0]!);
   const idIdx = idColumnIndex.value;
   if (idIdx < 0) return undefined;
-  const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
+  const hit = tableViewData.value.rows.find((row) => gridRowMatchesId(row, idIdx, id));
   if (!hit) return undefined;
-  const oldValues = hit.filter((_, idx) => idx !== idIdx).map((x) => `${x ?? ""}`.trim());
+  const oldValues = rowValuesInSchemaOrder(hit, tableViewData.value.headers);
   return `UPDATE(${[id, ...oldValues].join(",")})`;
 }
 
 function inferDeleteInverseFromCurrentView(forward: string): string | undefined {
   const m = /DELETE\(([^,)]+)\)/i.exec(forward);
   if (!m) return undefined;
-  const id = m[1]?.trim();
+  const id = normalizeHeapRowIdForCmd(m[1] ?? "");
   if (!id) return undefined;
   const idIdx = idColumnIndex.value;
   if (idIdx < 0) return undefined;
-  const hit = tableViewData.value.rows.find((row) => row[idIdx] === id);
+  const hit = tableViewData.value.rows.find((row) => gridRowMatchesId(row, idIdx, id));
   if (!hit) return undefined;
-  return `INSERT(${hit.map((x) => `${x ?? ""}`.trim()).join(",")})`;
+  const vals = rowValuesInSchemaOrder(hit, tableViewData.value.headers);
+  return `INSERT(${[id, ...vals].join(",")})`;
 }
 
 function inferOpTypeFromCommand(command: string): OperationType {
@@ -1858,11 +1908,13 @@ function inferOpTypeFromCommand(command: string): OperationType {
 
 function inferBackwardForCommand(command: string, opType: OperationType): string | undefined {
   const up = normalizeCmd(command).toUpperCase();
-  return (
-    inferInverse(opType, command) ??
-    (up.startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(command) : undefined) ??
-    (up.startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(command) : undefined)
-  );
+  const grid =
+    up.startsWith("UPDATE(")
+      ? inferUpdateInverseFromCurrentView(command)
+      : up.startsWith("DELETE(")
+        ? inferDeleteInverseFromCurrentView(command)
+        : undefined;
+  return inferInverse(opType, command) ?? grid;
 }
 
 function commandHasEmptyUpdateInsertArg(cmd: string | undefined): boolean {
@@ -2302,7 +2354,7 @@ async function saveEditRow() {
   const headers = tableViewData.value.headers;
   const cols = tableColumns.value;
   const draft = headers.map((_, idx) => (editingDraft.value[idx] ?? "").trim());
-  const id = draft[idIdx];
+  const id = normalizeHeapRowIdForCmd(draft[idIdx] ?? "");
   if (!id) {
     await openUiMessage("alert", "更新失败", "当前行缺少 id，无法更新");
     focusCellEditor(rowIndex, idIdx);
@@ -2320,7 +2372,14 @@ async function saveEditRow() {
     }
   }
 
-  const values = draft.filter((_, idx) => idx !== idIdx);
+  const idxByHeader = new Map(headers.map((h, i) => [h.trim().toLowerCase(), i]));
+  const values = tableColumns.value
+    .map((c) => String(c.name ?? "").trim())
+    .filter((n) => n && n !== "#" && n.toLowerCase() !== "id")
+    .map((name) => {
+      const colIdx = idxByHeader.get(name.toLowerCase());
+      return colIdx === undefined ? "" : (draft[colIdx] ?? "").trim();
+    });
   const cmd = `UPDATE(${[id, ...values].join(",")})`;
   const ok = await runCommand(cmd, { opType: "data_update", title: `更新行 id=${id}` });
   if (ok !== false) {
@@ -2370,6 +2429,35 @@ async function onPageSizeChange(v: number | undefined) {
   await refreshPage();
 }
 
+/** 是否存在可执行的逆向脚本（有则视为可独立单步撤销）。 */
+function undoPayloadPresent(op: UndoOp): boolean {
+  return typeof op.backward === "string" && op.backward.trim().length > 0;
+}
+
+/** 事务栈列表展示用（内部 savepoint 名对用户可读化）。 */
+function stackSavepointDisplay(name: string): string {
+  switch (name) {
+    case "__single__":
+      return "单步";
+    case "__txn_irrev__":
+      return "连带批次（无逆向）";
+    case "__commit__":
+      return "提交前连带";
+    case "__script__":
+      return "脚本";
+    default:
+      return name;
+  }
+}
+
+/** 将事务中累积的「无逆向」操作打成一批（连带撤销）；名称须以 `__` 开头以免触发错误的 ROLLBACK TO。 */
+function flushTxnPendingOpsAsUnit(savepointName: string) {
+  const chunk = txnRecorder.value.pendingOps.splice(0);
+  if (chunk.length > 0) {
+    pushHistoryUnit(buildUndoUnit(savepointName, chunk));
+  }
+}
+
 function buildUndoUnit(
   savepointName: string,
   ops: UndoOp[],
@@ -2388,13 +2476,10 @@ function buildUndoUnit(
   };
 }
 
+/** 新历史：仅压入撤销栈；重做栈保留，可随时重做（与当前数据冲突时由后端中断）。 */
 function pushHistoryUnit(unit: UndoUnit) {
-  if (stackPanelLockedAfterReorder.value) {
-    stackPanelLockedAfterReorder.value = false;
-  }
   undoStack.value.push(unit);
   if (undoStack.value.length > 1000) undoStack.value.shift();
-  redoStack.value = [];
 }
 
 async function persistStackState() {
@@ -2413,12 +2498,21 @@ async function loadStackState() {
     const raw = await invoke<string>("load_stack_units");
     const v = JSON.parse(raw || "{}");
     undoStack.value = Array.isArray(v.undo_units) ? (v.undo_units as UndoUnit[]) : [];
-    redoStack.value = Array.isArray(v.redo_units) ? (v.redo_units as UndoUnit[]) : [];
+    let redo = Array.isArray(v.redo_units) ? (v.redo_units as UndoUnit[]) : [];
+    const legacySus = Array.isArray(v.legacy_suspended_redo_units)
+      ? (v.legacy_suspended_redo_units as UndoUnit[])
+      : Array.isArray(v.suspended_redo_units)
+        ? (v.suspended_redo_units as UndoUnit[])
+        : [];
+    if (legacySus.length > 0) {
+      redo = [...legacySus, ...redo];
+      logLine(`[STACK] 已将旧版暂存重做 (${legacySus.length}) 并入重做栈`);
+    }
+    redoStack.value = redo;
     const warnings: string[] = Array.isArray(v.warnings) ? v.warnings : [];
     for (const w of warnings) {
       logLine(`[STACK][WARN] ${w}`);
     }
-    stackPanelLockedAfterReorder.value = false;
   } catch (e) {
     logLine(`[STACK][WARN] load failed: ${String(e)}`);
   }
@@ -2434,31 +2528,30 @@ function trackTxnCommand(op: UndoOp) {
     return;
   }
   if (!txnRecorder.value.active) {
-    // Non-txn mode: each reversible op is still a savepoint-level unit.
     const unit = buildUndoUnit("__single__", [op]);
     pushHistoryUnit(unit);
     return;
   }
   if (cmd.startsWith("SAVEPOINT ")) {
     const sp = op.forward.replace(/^SAVEPOINT\s+/i, "").trim() || "__savepoint__";
-    const chunk = txnRecorder.value.pendingOps.splice(0);
-    if (chunk.length > 0) {
-      pushHistoryUnit(buildUndoUnit(sp, chunk));
-    }
+    flushTxnPendingOpsAsUnit(sp);
     txnRecorder.value.currentSavepoint = sp;
     return;
   }
   if (cmd.startsWith("COMMIT")) {
-    const chunk = txnRecorder.value.pendingOps.splice(0);
-    if (chunk.length > 0) {
-      pushHistoryUnit(buildUndoUnit("__commit__", chunk, "ready"));
-    }
+    flushTxnPendingOpsAsUnit("__commit__");
     txnRecorder.value.active = false;
     return;
   }
   if (cmd.startsWith("ROLLBACK")) {
     txnRecorder.value.pendingOps = [];
     txnRecorder.value.active = false;
+    return;
+  }
+  // 事务内：可逆命令各自成栈项；仅无可逆载荷的命令累积，在 COMMIT/SAVEPOINT/下一条可逆前打成一批（连带）。
+  if (undoPayloadPresent(op)) {
+    flushTxnPendingOpsAsUnit("__txn_irrev__");
+    pushHistoryUnit(buildUndoUnit("__single__", [op]));
     return;
   }
   txnRecorder.value.pendingOps.push(op);
@@ -2478,7 +2571,7 @@ async function confirmReorderIdsFromToolbar() {
   await runConfirmReorderCommand();
 }
 
-/** CONFIRM_REORDER: on real rewrite, clear undo/redo + txn recorder and seal the stack panel; on `[REORDER] noop` leave stacks unchanged. */
+/** CONFIRM_REORDER: on real rewrite, backend records id remap for undo/redo; reset in-flight txn UI state; keep undo/redo stacks. */
 async function runConfirmReorderCommand() {
   busy.value = true;
   try {
@@ -2491,8 +2584,6 @@ async function runConfirmReorderCommand() {
       applyStateSideEffects("CONFIRM_REORDER");
       const noop = /\[REORDER\]\s+noop\b/i.test(result);
       if (!noop) {
-        undoStack.value = [];
-        redoStack.value = [];
         stackExecTraceByUnitId.value = {};
         txnRecorder.value = {
           active: false,
@@ -2504,7 +2595,7 @@ async function runConfirmReorderCommand() {
         stackPreviewUnit.value = null;
         stackUndoPage.value = 1;
         stackRedoPage.value = 1;
-        stackPanelLockedAfterReorder.value = true;
+        logLine("[STACK] 已记录 id 重映射：撤销/重做将按当前行 id 换算执行。");
         await persistStackState();
       }
     } else {
@@ -2523,14 +2614,23 @@ async function runCommand(
 ) {
   if (!text.trim()) return;
   const opType = opts?.opType ?? "generic";
-  const backendInfer = await inferBackwardPayloadByBackend(text, opType);
+  const up = normalizeCmd(text).toUpperCase();
+  const gridBackward =
+    up.startsWith("UPDATE(")
+      ? inferUpdateInverseFromCurrentView(text)
+      : up.startsWith("DELETE(")
+        ? inferDeleteInverseFromCurrentView(text)
+        : undefined;
+  // Prefer current grid row over backend snapshot: backend query_page/SHOW ATTR can disagree with on-screen cells (e.g. schema.table, sidecar timing).
+  let backendInfer: { backward?: string; source?: string };
+  if (gridBackward !== undefined) {
+    backendInfer = {};
+  } else {
+    backendInfer = await inferBackwardPayloadByBackend(text, opType);
+  }
   const backendBackward = backendInfer.backward;
   const presetBackward =
-    opts?.backward ??
-    backendBackward ??
-    inferInverse(opType, text) ??
-    (normalizeCmd(text).toUpperCase().startsWith("UPDATE(") ? inferUpdateInverseFromCurrentView(text) : undefined) ??
-    (normalizeCmd(text).toUpperCase().startsWith("DELETE(") ? inferDeleteInverseFromCurrentView(text) : undefined);
+    opts?.backward ?? gridBackward ?? backendBackward ?? inferInverse(opType, text) ?? undefined;
   busy.value = true;
   try {
     const exec = await invoke<CommandExecResult>("execute_command_ex", { command: text });
@@ -2554,7 +2654,9 @@ async function runCommand(
           title: opts?.title ?? text,
           forward: text,
           backward: presetBackward,
-          inverseSource: backendInfer.source || (presetBackward ? "frontend:heuristic" : undefined),
+          inverseSource:
+            backendInfer.source ||
+            (gridBackward !== undefined ? "frontend:grid_view" : presetBackward ? "frontend:heuristic" : undefined),
           table: state.value.currentTable || "",
           time: now(),
           ok: true
@@ -2569,6 +2671,20 @@ async function runCommand(
     await refreshTables();
     await refreshPage();
     return !failed;
+  } catch (e: unknown) {
+    const raw =
+      typeof e === "string"
+        ? e
+        : e && typeof e === "object" && "message" in e
+          ? String((e as { message?: string }).message ?? e)
+          : String(e);
+    logLine(`[CMD][ERROR] ${raw}`);
+    await openUiMessage(
+      "alert",
+      "命令执行失败",
+      raw.trim().slice(0, 1200) || "invoke 返回错误，详情见日志。"
+    );
+    return false;
   } finally {
     busy.value = false;
   }
@@ -2799,7 +2915,6 @@ function redoGlobalIndexFromPaged(idx: number): number {
 }
 
 async function undoToIndex(targetIndex: number) {
-  if (stackPanelLockedAfterReorder.value) return;
   if (busy.value) return;
   if (targetIndex < 0 || targetIndex >= undoStack.value.length) return;
   const steps = undoStack.value.length - targetIndex;
@@ -2849,7 +2964,6 @@ async function undoToIndex(targetIndex: number) {
 }
 
 async function redoToIndex(targetIndex: number, editable: boolean) {
-  if (stackPanelLockedAfterReorder.value) return;
   if (busy.value) return;
   if (targetIndex < 0 || targetIndex >= redoStack.value.length) return;
   const steps = redoStack.value.length - targetIndex;
@@ -2858,7 +2972,7 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
   const okConfirm = await openUiMessage(
     "confirm",
     "确认重做到此处",
-    `将重做 ${steps} 个单元（包含目标单元）\n目标：${item.savepointName}\nops=${item.ops.length}\ntables=${item.tablesTouched.join(", ") || "n/a"}`
+    `将重做 ${steps} 个单元（包含目标单元）\n目标：${item.savepointName}\nops=${item.ops.length}\ntables=${item.tablesTouched.join(", ") || "n/a"}\n\n任一步与当前数据冲突将中断；未完成条目仍留在重做栈。`
   );
   if (!okConfirm) return;
   busy.value = true;
@@ -2883,7 +2997,11 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
       } else {
         top.status = "failed";
         top.lastError = r.failedOp || r.message;
-        await openUiMessage("alert", "REDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+        await openUiMessage(
+          "alert",
+          "REDO 失败",
+          `${r.message}\nfailed=${r.failedOp ?? "n/a"}\n\n本条仍留在重做栈，可先撤销或修正数据后再试。`
+        );
         break;
       }
     }
@@ -2895,7 +3013,6 @@ async function redoToIndex(targetIndex: number, editable: boolean) {
 }
 
 async function undo() {
-  if (stackPanelLockedAfterReorder.value) return;
   const item = undoStack.value[undoStack.value.length - 1];
   if (!item) return;
   stackPreviewUnit.value = item;
@@ -2938,7 +3055,6 @@ async function undo() {
 }
 
 async function redo() {
-  if (stackPanelLockedAfterReorder.value) return;
   if (!canRedo.value) return;
   const last = redoStack.value[redoStack.value.length - 1];
   if (!last) return;
@@ -2946,7 +3062,7 @@ async function redo() {
   const okConfirm = await openUiMessage(
     "confirm",
     "确认重做单元",
-    `savepoint=${last.savepointName}\nops=${last.ops.length}\ntables=${last.tablesTouched.join(", ") || "n/a"}`
+    `savepoint=${last.savepointName}\nops=${last.ops.length}\ntables=${last.tablesTouched.join(", ") || "n/a"}\n\n若与当前数据不一致可能失败，失败将中断并保持本条在重做栈。`
   );
   if (!okConfirm) return;
   busy.value = true;
@@ -2960,7 +3076,11 @@ async function redo() {
     } else {
       last.status = "failed";
       last.lastError = r.failedOp || r.message;
-      await openUiMessage("alert", "REDO 失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+      await openUiMessage(
+        "alert",
+        "REDO 失败",
+        `${r.message}\nfailed=${r.failedOp ?? "n/a"}\n\n本条仍留在重做栈。`
+      );
     }
     await persistStackState();
     await refreshAfterStackExec();
@@ -2970,7 +3090,6 @@ async function redo() {
 }
 
 async function redoFromStack(stackIndex: number, editable: boolean) {
-  if (stackPanelLockedAfterReorder.value) return;
   const item = redoStack.value[stackIndex];
   if (!item) return;
   if (busy.value) return;
@@ -3018,7 +3137,7 @@ async function redoFromStack(stackIndex: number, editable: boolean) {
     await persistStackState();
     await refreshAfterStackExec();
   } else {
-    await openUiMessage("alert", "重做失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}`);
+    await openUiMessage("alert", "重做失败", `${r.message}\nfailed=${r.failedOp ?? "n/a"}\n\n本条仍留在重做栈。`);
     await refreshAfterStackExec();
   }
 }
@@ -3038,7 +3157,6 @@ async function setWorkspace() {
   await invoke("set_workspace", { dataDir: dir });
   const newState = await invoke<State>("get_state");
   state.value = newState;
-  stackPanelLockedAfterReorder.value = false;
   checkWorkspacePathOrWarn(state.value.dataDir);
   page.value = 1;
   await refreshTables();
@@ -3506,6 +3624,11 @@ onMounted(async () => {
     logLine(`[RUNTIME] perf=${rt.perfPath} mtime=${rt.perfModified}`);
     logLine(`[RUNTIME] runtime_report=${rt.runtimeReportPath} mtime=${rt.runtimeReportModified}`);
     logLine(`[RUNTIME] dll=${rt.dllPath} mtime=${rt.dllModified}`);
+    if (rt.newdbCliBackendPathEnv) {
+      logLine(`[RUNTIME] NEWDB_CLI_BACKEND_PATH=${rt.newdbCliBackendPathEnv}`);
+    } else if (rt.cliBackendPluginPath) {
+      logLine(`[RUNTIME] cli_backend=${rt.cliBackendPluginPath} mtime=${rt.cliBackendPluginModified ?? ""}`);
+    }
   } catch (e) {
     logLine(`[RUNTIME][ERROR] ${String(e)}`);
   }
@@ -3708,95 +3831,131 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
-      <div class="stack-panel" :class="{ 'stack-panel--sealed': stackPanelLockedAfterReorder }">
+      <div class="stack-panel">
         <div class="stack-header">
           <div class="stack-title">事务栈</div>
-          <div class="stack-counts">
-            <span class="stack-chip">U {{ undoStack.length }}</span>
-            <span class="stack-chip">R {{ redoStack.length }}</span>
-          </div>
-        </div>
-        <div class="stack-panel-interactive" :inert="stackPanelLockedAfterReorder">
-        <div class="stack-actions">
-          <button class="secondary" :disabled="!canUndo || busy || stackPanelLockedAfterReorder" @click="undo">撤销</button>
-          <button class="secondary" :disabled="!canRedo || busy || stackPanelLockedAfterReorder" @click="redo">重做</button>
-        </div>
-        <div class="stack-list">
-          <div v-if="undoStack.length === 0 && redoStack.length === 0" class="stack-empty">
-            <template v-if="stackPanelLockedAfterReorder">已重排 id：撤销/重做历史已清空。产生新的可撤销操作后将恢复事务栈。</template>
-            <template v-else>暂无可撤销/重做操作</template>
-          </div>
-          <div
-            v-for="(item, idx) in undoStackPaged"
-            :key="`u2-${idx}`"
-            class="stack-item clickable"
-            :class="{ selected: selectedStackKey === stackKey(item) }"
-            @click="selectStackItem(item)"
-          >
-            <span class="stack-badge">U</span>
-            <span class="stack-item-text">
-              <span class="mono">{{ item.createdAt }}</span>
-              <span class="stack-item-title">
-                {{ item.savepointName }} (ops={{ item.ops.length }})
-                <el-tag
-                  v-if="!isReversible(item)"
-                  size="small"
-                  type="warning"
-                  effect="dark"
-                  style="margin-left: 6px;"
-                >
-                  不可逆
-                </el-tag>
-                <el-tag
-                  v-if="item.tablesTouched.length > 1"
-                  size="small"
-                  type="info"
-                  effect="dark"
-                  style="margin-left: 6px;"
-                >
-                  跨表
-                </el-tag>
-              </span>
-            </span>
-            <div class="stack-row-actions">
-              <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
+          <div class="stack-header-right">
+            <div class="stack-tab-switch" role="tablist" aria-label="撤销与重做列表切换">
               <button
-                class="secondary mini"
-                :disabled="busy"
-                @click.stop="undoToIndex(undoGlobalIndexFromPaged(idx))"
+                type="button"
+                class="stack-tab"
+                role="tab"
+                :aria-selected="stackPanelTab === 'undo'"
+                :class="{ 'stack-tab--active': stackPanelTab === 'undo' }"
+                @click="stackPanelTab = 'undo'"
               >
-                撤销到此
+                撤销 <span class="stack-tab-count">{{ undoStack.length }}</span>
+              </button>
+              <button
+                type="button"
+                class="stack-tab"
+                role="tab"
+                :aria-selected="stackPanelTab === 'redo'"
+                :class="{ 'stack-tab--active': stackPanelTab === 'redo' }"
+                @click="stackPanelTab = 'redo'"
+              >
+                重做 <span class="stack-tab-count">{{ redoStack.length }}</span>
               </button>
             </div>
           </div>
-          <div
-            v-for="(item, idx) in redoStackPaged"
-            :key="`r-${idx}`"
-            class="stack-item redo clickable"
-            :class="{ selected: selectedStackKey === stackKey(item) }"
-            @click="selectStackItem(item)"
-          >
-            <span class="stack-badge">R</span>
-            <span class="stack-item-text">
-              <span class="mono">{{ item.createdAt }}</span>
-              <span class="stack-item-title">{{ item.savepointName }} (ops={{ item.ops.length }})</span>
-            </span>
-            <div class="stack-row-actions">
-              <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
-              <button class="secondary mini" :disabled="busy" @click.stop="redoToIndex(redoGlobalIndexFromPaged(idx), false)">重做到此</button>
-              <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), false)">重做</button>
-              <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), true)">编辑</button>
-            </div>
-          </div>
         </div>
-        <div class="stack-actions" style="margin-top:8px;">
-          <button class="secondary mini" :disabled="stackUndoPage <= 1" @click="stackUndoPage -= 1">Undo上一页</button>
-          <button class="secondary mini" :disabled="undoStack.length <= stackUndoPage * stackPageSize" @click="stackUndoPage += 1">Undo下一页</button>
-          <button class="secondary mini" :disabled="stackRedoPage <= 1" @click="stackRedoPage -= 1">Redo上一页</button>
-          <button class="secondary mini" :disabled="redoStack.length <= stackRedoPage * stackPageSize" @click="stackRedoPage += 1">Redo下一页</button>
+        <div class="stack-panel-interactive">
+        <div class="stack-actions">
+          <button class="secondary" :disabled="!canUndo || busy" @click="undo">撤销</button>
+          <button class="secondary" :disabled="!canRedo || busy" @click="redo">重做</button>
+        </div>
+        <div class="stack-list stack-list--shared">
+          <Transition name="stack-fade" mode="out-in">
+            <div v-if="stackPanelTab === 'undo'" key="stack-pane-undo" class="stack-list-pane">
+              <template v-if="undoStack.length === 0">
+                <div class="stack-empty">暂无撤销记录</div>
+              </template>
+              <template v-else>
+                <div
+                  v-for="(item, idx) in undoStackPaged"
+                  :key="`u2-${item.unitId}-${idx}`"
+                  class="stack-item clickable"
+                  :class="{ selected: selectedStackKey === stackKey(item) }"
+                  @click="selectStackItem(item)"
+                >
+                  <span class="stack-badge">U</span>
+                  <span class="stack-item-text">
+                    <span class="mono">{{ item.createdAt }}</span>
+                    <span class="stack-item-title">
+                      {{ stackSavepointDisplay(item.savepointName) }} (ops={{ item.ops.length }})
+                      <el-tag
+                        v-if="!isReversible(item)"
+                        size="small"
+                        type="warning"
+                        effect="dark"
+                        style="margin-left: 6px;"
+                      >
+                        不可逆
+                      </el-tag>
+                      <el-tag
+                        v-if="item.tablesTouched.length > 1"
+                        size="small"
+                        type="info"
+                        effect="dark"
+                        style="margin-left: 6px;"
+                      >
+                        跨表
+                      </el-tag>
+                    </span>
+                  </span>
+                  <div class="stack-row-actions">
+                    <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
+                    <button
+                      class="secondary mini"
+                      :disabled="busy"
+                      @click.stop="undoToIndex(undoGlobalIndexFromPaged(idx))"
+                    >
+                      撤销到此
+                    </button>
+                  </div>
+                </div>
+              </template>
+            </div>
+            <div v-else key="stack-pane-redo" class="stack-list-pane">
+              <template v-if="redoStack.length === 0">
+                <div class="stack-empty">暂无重做记录</div>
+              </template>
+              <template v-else>
+                <div
+                  v-for="(item, idx) in redoStackPaged"
+                  :key="`r-${item.unitId}-${idx}`"
+                  class="stack-item redo clickable"
+                  :class="{ selected: selectedStackKey === stackKey(item) }"
+                  @click="selectStackItem(item)"
+                >
+                  <span class="stack-badge">R</span>
+                  <span class="stack-item-text">
+                    <span class="mono">{{ item.createdAt }}</span>
+                    <span class="stack-item-title">{{ stackSavepointDisplay(item.savepointName) }} (ops={{ item.ops.length }})</span>
+                  </span>
+                  <div class="stack-row-actions">
+                    <button class="secondary mini" :disabled="busy" @click.stop="viewOperationLog(item)">回看</button>
+                    <button class="secondary mini" :disabled="busy" @click.stop="redoToIndex(redoGlobalIndexFromPaged(idx), false)">重做到此</button>
+                    <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), false)">重做</button>
+                    <button class="secondary mini" :disabled="busy" @click.stop="redoFromStack(redoGlobalIndexFromPaged(idx), true)">编辑</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </Transition>
+        </div>
+        <div class="stack-actions stack-actions--pager" style="margin-top:8px;">
+          <template v-if="stackPanelTab === 'undo'">
+            <button class="secondary mini" :disabled="stackUndoPage <= 1" @click="stackUndoPage -= 1">上一页</button>
+            <button class="secondary mini" :disabled="undoStack.length <= stackUndoPage * stackPageSize" @click="stackUndoPage += 1">下一页</button>
+          </template>
+          <template v-else>
+            <button class="secondary mini" :disabled="stackRedoPage <= 1" @click="stackRedoPage -= 1">上一页</button>
+            <button class="secondary mini" :disabled="redoStack.length <= stackRedoPage * stackPageSize" @click="stackRedoPage += 1">下一页</button>
+          </template>
         </div>
         <div v-if="stackPreviewUnit" class="stack-empty" style="margin-top:8px;">
-          预览：{{ stackPreviewUnit.savepointName }} | tables={{ stackPreviewUnit.tablesTouched.join(',') || 'n/a' }} | status={{ stackPreviewUnit.status }}
+          预览：{{ stackSavepointDisplay(stackPreviewUnit.savepointName) }} | tables={{ stackPreviewUnit.tablesTouched.join(',') || 'n/a' }} | status={{ stackPreviewUnit.status }}
         </div>
         </div>
       </div>
@@ -3889,27 +4048,33 @@ onUnmounted(() => {
         </div>
 
         <template v-if="activeTab === 'data'">
-          <div class="open-table-tabs">
-            <div class="open-table-tabs-left">
-              <strong>已打开表</strong>
+          <div class="open-table-tabs-stack">
+            <div class="open-table-tabs">
+              <div class="open-table-tabs-left">
+                <strong>已打开表</strong>
+              </div>
+              <div class="open-table-tabs-right" v-if="tableTabs.length">
+                <el-button
+                  v-for="t in tableTabs"
+                  :key="t.key"
+                  size="small"
+                  :type="activeTableKey === t.key ? 'primary' : undefined"
+                  @click="selectOpenTableTab(t.key)"
+                >
+                  {{ t.table }}
+                  <span class="tab-pill-close" title="关闭标签" @click.stop="closeTableTab(t.key)">×</span>
+                </el-button>
+                <el-button size="small" type="warning" plain :disabled="busy" @click="confirmReorderIdsFromToolbar">
+                  确认重排 id
+                </el-button>
+              </div>
+              <div class="open-table-tabs-right" v-else>
+                <span class="mini-tip">从左侧选择表</span>
+              </div>
             </div>
-            <div class="open-table-tabs-right" v-if="tableTabs.length">
-              <el-button
-                v-for="t in tableTabs"
-                :key="t.key"
-                size="small"
-                :type="activeTableKey === t.key ? 'primary' : undefined"
-                @click="activeTableKey = t.key"
-              >
-                {{ t.table }}
-                <span class="tab-pill-close" title="关闭标签" @click.stop="closeTableTab(t.key)">×</span>
-              </el-button>
-              <el-button size="small" type="warning" plain :disabled="busy" @click="confirmReorderIdsFromToolbar">
-                确认重排 id
-              </el-button>
-            </div>
-            <div class="open-table-tabs-right" v-else>
-              <span class="mini-tip">从左侧选择表</span>
+            <div class="app-status-bar" role="status" aria-live="polite">
+              <span class="app-status-bar-label">USE</span>
+              <span class="app-status-bar-value mono">{{ state.currentTable?.trim() || "（未选择）" }}</span>
             </div>
           </div>
 
@@ -4185,6 +4350,14 @@ onUnmounted(() => {
         <div><strong>Perf EXE：</strong>{{ runtimeArtifacts.perfPath }} (mtime={{ runtimeArtifacts.perfModified }})</div>
         <div><strong>Runtime Report EXE：</strong>{{ runtimeArtifacts.runtimeReportPath }} (mtime={{ runtimeArtifacts.runtimeReportModified }})</div>
         <div><strong>Core DLL：</strong>{{ runtimeArtifacts.dllPath }} (mtime={{ runtimeArtifacts.dllModified }})</div>
+        <div v-if="runtimeArtifacts.cliBackendPluginPath">
+          <strong>CLI backend（plugin）：</strong>{{ runtimeArtifacts.cliBackendPluginPath }} (mtime={{
+            runtimeArtifacts.cliBackendPluginModified
+          }})
+        </div>
+        <div v-if="runtimeArtifacts.newdbCliBackendPathEnv">
+          <strong>NEWDB_CLI_BACKEND_PATH：</strong><span class="mono">{{ runtimeArtifacts.newdbCliBackendPathEnv }}</span>
+        </div>
         <div v-if="runtimeArtifacts.runtimeStatsSchemaVersion">
           <strong>Runtime stats schema：</strong>{{ runtimeArtifacts.runtimeStatsSchemaVersion }}
         </div>
@@ -4484,6 +4657,8 @@ onUnmounted(() => {
             perf={{ runtimeArtifacts.perfPath }}\n
             report={{ runtimeArtifacts.runtimeReportPath }}\n
             dll={{ runtimeArtifacts.dllPath }}\n
+            cli_backend={{ runtimeArtifacts.cliBackendPluginPath ?? "" }}\n
+            NEWDB_CLI_BACKEND_PATH={{ runtimeArtifacts.newdbCliBackendPathEnv ?? "" }}\n
             stats_schema={{ runtimeArtifacts.runtimeStatsSchemaVersion ?? "" }}\n
             git={{ runtimeArtifacts.backendGitCommit ?? "" }}\n
             profile={{ runtimeArtifacts.buildProfile ?? "" }}\n

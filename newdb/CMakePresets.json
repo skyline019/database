@@ -1,0 +1,70 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 16, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "NEWDB_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "full-shared",
+      "inherits": "base",
+      "displayName": "Full shared C API (default; links newdb_shell)",
+      "cacheVariables": {
+        "NEWDB_BUILD_SHARED": "ON",
+        "NEWDB_SHARED_SLIM": "OFF"
+      }
+    },
+    {
+      "name": "slim-shared",
+      "inherits": "base",
+      "displayName": "Slim shared C API (newdb_core + c_api_slim only)",
+      "cacheVariables": {
+        "NEWDB_BUILD_SHARED": "ON",
+        "NEWDB_SHARED_SLIM": "ON"
+      }
+    },
+    {
+      "name": "plugin-shared",
+      "inherits": "base",
+      "displayName": "Plugin C API (newdb_shared + newdb_cli_backend; set NEWDB_CLI_BACKEND_PATH at runtime)",
+      "cacheVariables": {
+        "NEWDB_BUILD_SHARED": "ON",
+        "NEWDB_SHARED_SLIM": "OFF",
+        "NEWDB_C_API_PLUGIN_BACKEND": "ON",
+        "NEWDB_BUILD_CLI_BACKEND_PLUGIN": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "full-shared-rel",
+      "configurePreset": "full-shared",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "slim-shared-rel",
+      "configurePreset": "slim-shared",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "plugin-shared-rel",
+      "configurePreset": "plugin-shared",
+      "configuration": "RelWithDebInfo"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "full-shared-rel",
+      "configurePreset": "full-shared",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

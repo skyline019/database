@@ -10,7 +10,8 @@
     "test:e2e:undo-redo": "powershell -ExecutionPolicy Bypass -File ./scripts/e2e_undo_redo_stack.ps1",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:build:plugin": "powershell -ExecutionPolicy Bypass -File ./scripts/build_tauri_plugin_bundle.ps1"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",

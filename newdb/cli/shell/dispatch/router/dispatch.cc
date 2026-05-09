@@ -8,12 +8,14 @@
 #include "cli/shell/dispatch/router/dispatch_routing.h"
 #include "cli/shell/dispatch/shared/dispatch_internal.h"
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_ops.h"
+#include "cli/shell/state/shell_state_facade.h"
 
 bool process_command_line(ShellState& st, const char* input_line) {
-    std::string& current_table = st.session.table_name;
-    std::string& current_file = st.session.data_path;
-    const char* log_file = st.log_file_path.c_str();
+    ShellStateFacade f(st);
+    std::string& current_table = f.table_name();
+    std::string& current_file = f.data_path();
+    const char* log_file = f.log_file_path().c_str();
     std::string line;
     if (input_line != nullptr) {
         line = input_line;
@@ -26,18 +28,18 @@ bool process_command_line(ShellState& st, const char* input_line) {
     }
     const char* line_cstr = line.c_str();
 
-    logging_bind_shell(&st);
-    const std::string eff_data = effective_data_path(st);
-    append_session_log_line(log_file, line_cstr, st.encrypt_log);
+    f.bind_logging();
+    const std::string eff_data = f.effective_data_path();
+    append_session_log_line(log_file, line_cstr, f.encrypt_log());
 
     struct ShellHeapGuardClear {
-        ShellState* st;
+        ShellStateFacade* f;
         ~ShellHeapGuardClear() {
-            if (st != nullptr) {
-                st->session_heap_guard.reset();
+            if (f != nullptr) {
+                f->reset_session_heap_guard();
             }
         }
-    } shell_heap_clear{&st};
+    } shell_heap_clear{&f};
 
     bool session_handled = false;
     const bool keep_going = handle_session_commands(line_cstr, log_file, session_handled);

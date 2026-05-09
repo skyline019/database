@@ -1,6 +1,7 @@
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>
 #include <newdb/session.h>
+#include <newdb/session_apply_table.h>
 
 #include "test_util.h"
 
@@ -130,4 +131,22 @@ TEST(Session, MutableHeapReturnsTableWhenLoaded) {
     newdb::HeapTable* hp = s.mutable_heap(nullptr);
     ASSERT_NE(hp, nullptr);
     EXPECT_EQ(hp->rows.size(), 1u);
+}
+
+TEST(Session, ApplyTableStemResolvesAndLoadsSchema) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_sess_apply");
+    std::filesystem::create_directories(dir);
+    const std::string bin = (dir / "t.bin").string();
+    const std::string attr = newdb::schema_sidecar_path_for_data_file(bin);
+    newdb::TableSchema sch;
+    sch.primary_key = "id";
+    ASSERT_TRUE(newdb::save_schema_text(attr, sch).ok);
+    ASSERT_TRUE(newdb::io::create_heap_file(bin.c_str(), {newdb::Row{1, {}, {}}}).ok);
+
+    newdb::Session s;
+    ASSERT_TRUE(newdb::session_apply_table_stem_and_reload_schema(s, dir.string(), "t").ok);
+    EXPECT_EQ(s.table_name, "t");
+    EXPECT_EQ(s.data_path, bin);
+    ASSERT_TRUE(s.ensure_loaded().ok);
+    EXPECT_EQ(s.table.rows.size(), 1u);
 }

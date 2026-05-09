@@ -5,10 +5,10 @@
 
 #include "cli/shell/diag/demo_diag.h"
 #include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
 
-void demo_verbose(const ShellState& st, const char* fmt, ...) {
-    if (!st.verbose) {
+void demo_verbose(const ShellStateFacade& f, const char* fmt, ...) {
+    if (!f.verbose()) {
         return;
     }
     char buf[4096];

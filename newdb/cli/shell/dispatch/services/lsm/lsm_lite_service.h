@@ -6,7 +6,7 @@
 
 #include <newdb/row.h>
 
-struct ShellState;
+#include "cli/shell/state/shell_state_fwd.h"
 
 struct LsmFindResult {
     bool found{false};

@@ -1,7 +1,11 @@
 #include "cli/shell/dispatch/router/dispatch.h"
-#include "cli/modules/common/logging/logging.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
+#include "cli/shell/state/shell_state_owner.h"
+
+#include <newdb/schema.h>
+#include "cli/modules/txn/coordinator/txn_manager.h"
 #include "test_util.h"
+#include "shell_state_test_support.h"
 
 #include <gtest/gtest.h>
 
@@ -74,29 +78,31 @@ static bool parse_segment_row(const std::string& line, SegmentRow& out) {
 
 struct DemoHarness {
     fs::path dir;
-    ShellState st;
+    ShellStateOwner own;
+    ShellStateFacade f;
 
-    explicit DemoHarness(const std::string& prefix) {
+    explicit DemoHarness(const std::string& prefix)
+        : own(make_shell_state_for_test()), f(own.shell()) {
         dir = newdb::test::unique_temp_subdir(prefix);
         fs::create_directories(dir);
-        st.data_dir = dir.string();
-        st.log_file_path = (dir / "demo_log.bin").string();
-        st.session.table_name.clear();
-        st.session.data_path.clear();
-        st.session.schema = newdb::TableSchema{};
-        logging_bind_shell(&st);
-        st.txn.set_workspace_root(st.data_dir);
+        f.data_dir() = dir.string();
+        f.log_file_path() = (dir / "demo_log.bin").string();
+        f.table_name().clear();
+        f.data_path().clear();
+        f.schema() = newdb::TableSchema{};
+        f.bind_logging();
+        f.txn().set_workspace_root(f.data_dir());
     }
 
     std::string run(const std::string& cmd) {
         std::error_code ec;
-        const std::uintmax_t before = fs::file_size(st.log_file_path, ec);
+        const std::uintmax_t before = fs::file_size(f.log_file_path(), ec);
         const std::uintmax_t start = ec ? 0 : before;
 
-        const bool ok = process_command_line(st, cmd.c_str());
+        const bool ok = process_command_line(own.shell(), cmd.c_str());
         EXPECT_TRUE(ok) << "process_command_line returned false for cmd=" << cmd;
 
-        std::ifstream in(st.log_file_path, std::ios::binary);
+        std::ifstream in(f.log_file_path(), std::ios::binary);
         if (!in.good()) {
             return {};
         }
@@ -170,11 +176,11 @@ TEST(DemoLsmLite, FlushCreatesSegmentsAndUpdatesStats) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_memtable_flush_count, 1u);
     EXPECT_GE(stats.lsm_segment_count, 1u);
 
-    const std::string eff_data = resolve_table_file(h.st, "t1.bin");
+    const std::string eff_data = h.f.resolve_table_file( "t1.bin");
     EXPECT_GE(h.count_segments_on_disk(eff_data), 1u);
 }
 
@@ -191,13 +197,13 @@ TEST(DemoLsmLite, CompactionKeepsOnlyNewestTwoSegments) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_memtable_flush_count, 2u);
     EXPECT_GE(stats.lsm_compaction_count, 1u);
     EXPECT_GE(stats.lsm_segment_count, 1u);
     EXPECT_GE(stats.lsm_compaction_bytes_in, stats.lsm_compaction_bytes_out);
 
-    const std::string eff_data = resolve_table_file(h.st, "t1.bin");
+    const std::string eff_data = h.f.resolve_table_file( "t1.bin");
     EXPECT_GE(h.count_segments_on_disk(eff_data), 1u);
 }
 
@@ -210,7 +216,7 @@ TEST(DemoLsmLite, CompactionProducesL1SegmentNaming) {
     for (int i = 1; i <= 90; ++i) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
-    const std::string eff_data = resolve_table_file(h.st, "t1.bin");
+    const std::string eff_data = h.f.resolve_table_file( "t1.bin");
     const auto segs = h.list_segment_logs(eff_data);
     ASSERT_FALSE(segs.empty());
     bool saw_l1 = false;
@@ -251,7 +257,7 @@ TEST(DemoLsmLite, SegmentFilesHaveMonotonicSeqAndContainTombstones) {
     h.run("INSERT(3,u,1)");
     h.run("DELETE(3)");
 
-    const std::string eff_data = resolve_table_file(h.st, "t1.bin");
+    const std::string eff_data = h.f.resolve_table_file( "t1.bin");
     const auto segs = h.list_segment_logs(eff_data);
     ASSERT_FALSE(segs.empty());
 
@@ -294,7 +300,7 @@ TEST(DemoLsmLite, LaterTombstoneOverridesEarlierValueAcrossSegments) {
 
     const std::string out = h.run("FIND(5)");
     EXPECT_NE(out.find("not found"), std::string::npos) << out;
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_read_segments_scanned, 1u);
     EXPECT_GE(stats.lsm_read_segments_scanned_p95, 1u);
 }
@@ -311,9 +317,9 @@ TEST(DemoLsmLite, CompactionPhysicallyDeletesOldSegmentFiles) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const std::string eff_data = resolve_table_file(h.st, "t1.bin");
+    const std::string eff_data = h.f.resolve_table_file( "t1.bin");
     const auto segs = h.list_segment_logs(eff_data);
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
 
     // Stronger than previous test: segment_count must match on-disk count.
     ASSERT_GE(segs.size(), 1u);
@@ -334,7 +340,7 @@ TEST(DemoLsmLite, L0CompactionTriggerCanDelayCompaction) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_memtable_flush_count, 2u);
     EXPECT_EQ(stats.lsm_compaction_count, 0u);
 }
@@ -360,7 +366,7 @@ TEST(DemoLsmLite, AsyncCompactionWorkersAndReapBudgetKeepCompacting) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_compaction_count, 1u);
     EXPECT_GE(stats.lsm_segment_count, 1u);
 }
@@ -383,7 +389,7 @@ TEST(DemoLsmLite, AsyncCompactionBackpressureCountsSkippedEnqueue) {
         h.run("INSERT(" + std::to_string(i) + ",u,1)");
     }
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_compaction_count, 1u);
     EXPECT_GE(stats.lsm_compaction_queue_pending, 0u);
     EXPECT_GE(stats.lsm_compaction_queue_inflight, 0u);
@@ -404,7 +410,7 @@ TEST(DemoLsmLite, SegmentCacheReportsHitsAndMisses) {
     h.run("FIND(40)");
     h.run("FIND(999999)");
 
-    const auto stats = h.st.txn.runtimeStats();
+    const auto stats = h.f.txn().runtimeStats();
     EXPECT_GE(stats.lsm_segment_cache_hits, 1u);
     EXPECT_GE(stats.lsm_segment_cache_misses, 1u);
 }

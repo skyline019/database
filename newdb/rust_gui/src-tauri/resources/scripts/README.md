@@ -12,6 +12,9 @@
 
 ## 1) 验证与质量门禁（scripts/ci）
 
+- `ci/plugin_backend_packaging.md`  
+  Track P：plugin 双产物（`newdb` + `newdb_cli_backend`）与 **`NEWDB_CLI_BACKEND_PATH`** 的发行目录与 shell 示例；详见 [C_API_PLUGIN_BACKEND.md](../docs/dev/C_API_PLUGIN_BACKEND.md)。
+
 - `ci/sync_validate_scripts.py`  
   校验（或 `--apply` 同步）`scripts/validate/` 到 `rust_gui/scripts/validate/` 与
   `rust_gui/src-tauri/resources/scripts/validate/`，避免 Tauri bundle 与主干契约漂移。

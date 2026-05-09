@@ -20,12 +20,18 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build native bridge (newdb.dll + demo/perf)
+      - name: Build native bridge (plugin C API + newdb_cli_backend + demo/perf)
         shell: pwsh
         working-directory: newdb
         run: |
-          cmake -S . -B build_gui_ci -G "Visual Studio 17 2022" -A x64 -DNEWDB_BUILD_TESTS=OFF -DNEWDB_BUILD_GUI=OFF -DNEWDB_BUILD_SHARED=ON
-          cmake --build build_gui_ci --config RelWithDebInfo --target newdb_shared newdb_demo newdb_perf newdb_runtime_report
+          cmake -S . -B build_gui_ci -G "Visual Studio 17 2022" -A x64 `
+            -DNEWDB_BUILD_TESTS=ON `
+            -DNEWDB_BUILD_GUI=OFF `
+            -DNEWDB_BUILD_SHARED=ON `
+            -DNEWDB_C_API_PLUGIN_BACKEND=ON `
+            -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON
+          cmake --build build_gui_ci --config RelWithDebInfo `
+            --target gtest_capi newdb_cli_backend newdb_shared newdb_demo newdb_perf newdb_runtime_report
           $out = Join-Path (Resolve-Path build_gui_ci).Path "RelWithDebInfo"
           powershell -ExecutionPolicy Bypass -File (Join-Path $env:GITHUB_WORKSPACE "newdb\\rust_gui\\scripts\\sync_runtime_binaries.ps1") `
             -BuildDir $out `

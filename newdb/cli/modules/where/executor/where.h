@@ -1,7 +1,7 @@
 #pragma once
 
 #include "cli/modules/where/parser/condition.h"
-#include "cli/modules/where/executor/stats/table_stats.h"
+#include "cli/modules/where/executor/stats/where_planning_stats.h"
 
 #include <newdb/heap_table.h>
 #include <newdb/schema.h>
@@ -112,7 +112,14 @@ std::size_t where_estimate_scan_rows(const newdb::HeapTable& tbl,
 std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& tbl,
                                                        const newdb::TableSchema& schema,
                                                        const std::vector<WhereCond>& conds,
-                                                       const TableStats* stats_hint);
+                                                       WherePlanningStatsRef stats);
+
+inline std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& tbl,
+                                                              const newdb::TableSchema& schema,
+                                                              const std::vector<WhereCond>& conds,
+                                                              const TableStats* stats_hint) {
+    return where_build_plan_candidates(tbl, schema, conds, WherePlanningStatsRef{stats_hint});
+}
 
 std::vector<std::size_t> query_with_index(const newdb::HeapTable& tbl,
                                           const newdb::TableSchema& schema,

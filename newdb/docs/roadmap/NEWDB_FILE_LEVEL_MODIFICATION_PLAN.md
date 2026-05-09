@@ -122,6 +122,8 @@
 
 ### 2.3 `newdb/cli/shell/state/shell_state.h`
 
+**耦合基线与扇面**：见 [`docs/dev/SHELL_STATE_LAYERING.md`](../dev/SHELL_STATE_LAYERING.md) 与 [`docs/dev/SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md)（当前仍直接包含该头的 TU 清单与原因）。
+
 **修改建议**：
 
 1. 强化 `HeapReadViewGuard` 的 RAII 保证：构造失败不残留旧 snapshot，析构总是恢复进入前状态。

@@ -3,6 +3,10 @@
 Schema name: `newdb.runtime_stats.v1`  
 Format: JSON Lines (`.jsonl`), one snapshot per line.
 
+**CI gate key list (single source for `validate_runtime_stats.py`):** [`contract/runtime_stats.v1.required.json`](contract/runtime_stats.v1.required.json). Optional tier tags: `stats_keys_cli_embed_layer` lists keys sourced from the CLI bridge sandwich (remainder are treated as engine-layer keys for parity tooling). Add a key there and in this document when promoting a counter to a required gate field. Optional JSON Schema for one line shape: [`contract/runtime_stats.v1.line.schema.json`](contract/runtime_stats.v1.line.schema.json).
+
+**`validate_runtime_stats.py` CLI（默认不变）**：无额外参数时仍校验完整 `required_stats_keys`。可选 `--stats-keys-tier engine` 仅要求并做类型检查的是 `required_stats_keys` 去掉 `stats_keys_cli_embed_layer` 后的集合；`--stats-keys-tier cli_embed` 仅针对 `stats_keys_cli_embed_layer` 子集。GUI / 夜间流水线可选用分层门禁；仓库 CI 仍以完整契约为主。
+
 ## Top-level fields
 
 - `schema_version` (string, required): must be `newdb.runtime_stats.v1`
@@ -10,6 +14,14 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `label` (string, required): snapshot label, e.g. `pressure_before`, `pressure_sample_1`, `pressure_after`
 - `run_id` (string, optional): run correlation id for windowed analysis
 - `stats` (object, required): runtime counters/status payload
+
+### Engine layer (`newdb_engine_runtime_stats_json`)
+
+POD / coordinator counters emitted only through [`runtime_stats_snapshot_json_write.cpp`](../../engine/src/json/runtime_stats_snapshot_json_write.cpp) (the `append_runtime_stats_snapshot_json_members_*` pipeline). See [RUNTIME_STATS_JSON_LAYERING.md](../../docs/dev/RUNTIME_STATS_JSON_LAYERING.md).
+
+### CLI embed layer (`newdb_cli_runtime_stats_json`)
+
+Keys whose values are sourced from the CLI bridge fragment [`_generated_runtime_json.inc`](../../cli/shell/c_api/_generated_runtime_json.inc) (isolation, WHERE metrics, heap decode slot counters, coordinator facade fields, etc.). See [RUNTIME_STATS_JSON_LAYERING.md](../../docs/dev/RUNTIME_STATS_JSON_LAYERING.md).
 
 ## `stats` object fields
 
@@ -118,8 +130,12 @@ Format: JSON Lines (`.jsonl`), one snapshot per line.
 - `table_storage_health_last_vacuum_lsn` / `table_storage_health_last_vacuum_elapsed_ms` (int >= 0)
 - `table_storage_health_tier` (`good` | `watch` | `degraded` | `critical`)：由最近一次存储健康快照的碎片率与 `dead_bytes` 阈值推导
 - `transaction_snapshot_lsn` / `statement_snapshot_lsn` (int >= 0)：读路径 MVCC 锚点 LSN（分别对应 Snapshot `BEGIN` 钉扎与语句级刷新）
-- `table_storage_health_tier` (`good` | `watch` | `degraded` | `critical`)：由最近一次存储健康快照的碎片率与 `dead_bytes` 阈值推导
-- `transaction_snapshot_lsn` / `statement_snapshot_lsn` (int >= 0)：读路径 MVCC 锚点 LSN（分别对应 Snapshot `BEGIN` 钉扎与语句级刷新）: 预留；当前为 0
+- `txn_snapshot_refresh_count` (int >= 0)：ReadCommitted / 语句级 snapshot 刷新计数
+- `txn_snapshot_pinned_count` (int >= 0)：Snapshot 跨语句钉扎计数（诊断）
+- `txn_readpath_disabled_count` (int >= 0)：`NEWDB_TXN_ISOLATION_READPATH=0` 跳过读路径 snapshot 的次数
+- `last_snapshot_source` (string)：`none|txn|statement|disabled`
+- `lock_key_range_count` (int >= 0)：首次成功的 `LockKeyKind::RangeWriteIntent` 预留次数
+- `lock_key_predicate_count` (int >= 0)：首次成功的 `LockKeyKind::PredicateWriteIntent` 预留次数
 - `wal_adaptive_enabled` (bool): adaptive WAL 开关状态
 - `group_commit_window_ms` (int >= 0): group commit 窗口毫秒
 - `group_commit_max_batch_commits` (int >= 0): group commit 最大批提交数

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newdb.local/schema/runtime_stats.v1.line.json",
+  "title": "newdb.runtime_stats.v1 JSONL line",
+  "type": "object",
+  "required": ["schema_version", "ts_ms", "label", "stats"],
+  "properties": {
+    "schema_version": { "const": "newdb.runtime_stats.v1" },
+    "ts_ms": { "type": "integer", "minimum": 0 },
+    "label": { "type": "string", "minLength": 1 },
+    "stats": { "type": "object", "minProperties": 1 }
+  },
+  "additionalProperties": true
+}

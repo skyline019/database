@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/write_conflict/lock_key.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
 #include "cli/modules/common/logging/logging.h"
@@ -34,8 +35,8 @@ void TxnCoordinator::recordWriteConflictSampleLockKey(const LockKey& lk,
     std::ostringstream oss;
     oss << "table=" << lk.table << ";lock=" << lk.to_storage_key() << ";holder=" << holder_txn
         << ";tag=" << (tag ? tag : "");
-    std::lock_guard<std::mutex> lk_mu(m_write_conflict_sample_mu);
-    m_write_conflict_last_sample = oss.str();
+    std::lock_guard<std::mutex> lk_mu(st_->m_write_conflict_sample_mu);
+    st_->m_write_conflict_last_sample = oss.str();
 }
 
 void TxnCoordinator::recordWriteConflictSample(const std::string& table_name,
@@ -53,16 +54,16 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
 }
 
 bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reason) {
-    if (m_state.load() != TxnState::Active) {
+    if (st_->m_state.load() != TxnState::Active) {
         return true;
     }
     if (lk.table.empty()) {
         return true;
     }
-    const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
+    const std::uint64_t txn = static_cast<std::uint64_t>(st_->m_txn_id.load());
     const std::string key = lk.to_storage_key();
-    const WriteConflictPolicy policy = m_write_conflict_policy.load(std::memory_order_relaxed);
-    const std::uint64_t wait_timeout_ms = m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
+    const WriteConflictPolicy policy = st_->m_write_conflict_policy.load(std::memory_order_relaxed);
+    const std::uint64_t wait_timeout_ms = st_->m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
     const auto wait_start = std::chrono::steady_clock::now();
     bool deadlock_reported = false;
     unsigned wait_backoff_round = 0;
@@ -74,12 +75,12 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
             if (it == g_write_intent_owner.end() || it->second == txn) {
                 g_write_intent_owner[key] = txn;
                 g_txn_wait_for_owner.erase(txn);
-                const auto ins = m_reserved_write_keys.insert(key);
+                const auto ins = st_->m_reserved_write_keys.insert(key);
                 if (ins.second) {
                     if (lk.kind == LockKeyKind::RangeWriteIntent) {
-                        m_lock_key_range_count.fetch_add(1, std::memory_order_relaxed);
+                        st_->m_lock_key_range_count.fetch_add(1, std::memory_order_relaxed);
                     } else if (lk.kind == LockKeyKind::PredicateWriteIntent) {
-                        m_lock_key_predicate_count.fetch_add(1, std::memory_order_relaxed);
+                        st_->m_lock_key_predicate_count.fetch_add(1, std::memory_order_relaxed);
                     }
                 }
                 const auto waited_ms = static_cast<std::uint64_t>(
@@ -87,18 +88,18 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
                         std::chrono::steady_clock::now() - wait_start)
                         .count());
                 if (waited_ms > 0) {
-                    m_lock_wait_ms_total.fetch_add(waited_ms, std::memory_order_relaxed);
+                    st_->m_lock_wait_ms_total.fetch_add(waited_ms, std::memory_order_relaxed);
                     {
-                        std::lock_guard<std::mutex> lk_samples(m_samples_mu);
-                        m_lock_wait_ms_samples.push_back(waited_ms);
-                        if (m_lock_wait_ms_samples.size() > 256) {
-                            m_lock_wait_ms_samples.erase(m_lock_wait_ms_samples.begin(),
-                                                         m_lock_wait_ms_samples.begin() + 64);
+                        std::lock_guard<std::mutex> lk_samples(st_->m_samples_mu);
+                        st_->m_lock_wait_ms_samples.push_back(waited_ms);
+                        if (st_->m_lock_wait_ms_samples.size() > 256) {
+                            st_->m_lock_wait_ms_samples.erase(st_->m_lock_wait_ms_samples.begin(),
+                                                         st_->m_lock_wait_ms_samples.begin() + 64);
                         }
                     }
-                    std::uint64_t old_max = m_lock_wait_max_ms.load(std::memory_order_relaxed);
+                    std::uint64_t old_max = st_->m_lock_wait_max_ms.load(std::memory_order_relaxed);
                     while (waited_ms > old_max &&
-                           !m_lock_wait_max_ms.compare_exchange_weak(
+                           !st_->m_lock_wait_max_ms.compare_exchange_weak(
                                old_max, waited_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
                     }
                 }
@@ -108,10 +109,10 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
             if (!deadlock_reported) {
                 std::uint64_t cycle_owner = 0;
                 if (detect_wait_cycle(txn, cycle_owner)) {
-                    m_lock_deadlock_detect_count.fetch_add(1, std::memory_order_relaxed);
-                    m_lock_deadlock_victim_count.fetch_add(1, std::memory_order_relaxed);
+                    st_->m_lock_deadlock_detect_count.fetch_add(1, std::memory_order_relaxed);
+                    st_->m_lock_deadlock_victim_count.fetch_add(1, std::memory_order_relaxed);
                     deadlock_reported = true;
-                    m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+                    st_->m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
                     recordWriteConflictSampleLockKey(lk, cycle_owner, "deadlock_victim");
                     g_txn_wait_for_owner.erase(txn);
                     if (reason != nullptr) {
@@ -122,7 +123,7 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
             }
         }
         if (policy != WriteConflictPolicy::Wait || wait_timeout_ms == 0) {
-            m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
             std::uint64_t holder = 0;
             {
                 std::lock_guard<std::mutex> lk_mu(g_write_intent_mu);
@@ -141,21 +142,21 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
         const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - wait_start);
         if (elapsed.count() >= static_cast<long long>(wait_timeout_ms)) {
-            m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
-            m_write_conflict_wait_timeout_count.fetch_add(1, std::memory_order_relaxed);
-            m_lock_wait_ms_total.fetch_add(static_cast<std::uint64_t>(elapsed.count()), std::memory_order_relaxed);
+            st_->m_write_conflict_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_write_conflict_wait_timeout_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_lock_wait_ms_total.fetch_add(static_cast<std::uint64_t>(elapsed.count()), std::memory_order_relaxed);
             std::uint64_t wait_ms = static_cast<std::uint64_t>(elapsed.count());
             {
-                std::lock_guard<std::mutex> lk_samples(m_samples_mu);
-                m_lock_wait_ms_samples.push_back(wait_ms);
-                if (m_lock_wait_ms_samples.size() > 256) {
-                    m_lock_wait_ms_samples.erase(m_lock_wait_ms_samples.begin(),
-                                                 m_lock_wait_ms_samples.begin() + 64);
+                std::lock_guard<std::mutex> lk_samples(st_->m_samples_mu);
+                st_->m_lock_wait_ms_samples.push_back(wait_ms);
+                if (st_->m_lock_wait_ms_samples.size() > 256) {
+                    st_->m_lock_wait_ms_samples.erase(st_->m_lock_wait_ms_samples.begin(),
+                                                 st_->m_lock_wait_ms_samples.begin() + 64);
                 }
             }
-            std::uint64_t old_max = m_lock_wait_max_ms.load(std::memory_order_relaxed);
+            std::uint64_t old_max = st_->m_lock_wait_max_ms.load(std::memory_order_relaxed);
             while (wait_ms > old_max &&
-                   !m_lock_wait_max_ms.compare_exchange_weak(
+                   !st_->m_lock_wait_max_ms.compare_exchange_weak(
                        old_max, wait_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
             }
             std::uint64_t holder = 0;
@@ -173,7 +174,7 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
             }
             return false;
         }
-        m_write_conflict_wait_count.fetch_add(1, std::memory_order_relaxed);
+        st_->m_write_conflict_wait_count.fetch_add(1, std::memory_order_relaxed);
         const unsigned ms =
             (std::min)(128u, 1u << (std::min)(wait_backoff_round, static_cast<unsigned>(7)));
         wait_backoff_round = (std::min)(wait_backoff_round + 1u, 24u);
@@ -183,49 +184,49 @@ bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reas
 
 
 void TxnCoordinator::setWriteConflictPolicy(const WriteConflictPolicy policy) {
-    m_write_conflict_policy.store(policy, std::memory_order_relaxed);
+    st_->m_write_conflict_policy.store(policy, std::memory_order_relaxed);
 }
 
 
 WriteConflictPolicy TxnCoordinator::writeConflictPolicy() const {
-    return m_write_conflict_policy.load(std::memory_order_relaxed);
+    return st_->m_write_conflict_policy.load(std::memory_order_relaxed);
 }
 
 
 void TxnCoordinator::setWriteConflictWaitTimeoutMs(const std::uint64_t ms) {
-    m_write_conflict_wait_timeout_ms.store(ms, std::memory_order_relaxed);
+    st_->m_write_conflict_wait_timeout_ms.store(ms, std::memory_order_relaxed);
 }
 
 
 std::uint64_t TxnCoordinator::writeConflictWaitTimeoutMs() const {
-    return m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
+    return st_->m_write_conflict_wait_timeout_ms.load(std::memory_order_relaxed);
 }
 
 
 void TxnCoordinator::setTxnIsolationLevel(const TxnIsolationLevel level) {
-    m_txn_isolation_level.store(level, std::memory_order_relaxed);
+    st_->m_txn_isolation_level.store(level, std::memory_order_relaxed);
 }
 
 
 TxnIsolationLevel TxnCoordinator::txnIsolationLevel() const {
-    return m_txn_isolation_level.load(std::memory_order_relaxed);
+    return st_->m_txn_isolation_level.load(std::memory_order_relaxed);
 }
 
 
 void TxnCoordinator::clearWriteIntents() {
-    if (m_reserved_write_keys.empty()) {
+    if (st_->m_reserved_write_keys.empty()) {
         return;
     }
-    const std::uint64_t txn = static_cast<std::uint64_t>(m_txn_id.load());
+    const std::uint64_t txn = static_cast<std::uint64_t>(st_->m_txn_id.load());
     std::lock_guard<std::mutex> lk(g_write_intent_mu);
     g_txn_wait_for_owner.erase(txn);
-    for (const auto& key : m_reserved_write_keys) {
+    for (const auto& key : st_->m_reserved_write_keys) {
         const auto it = g_write_intent_owner.find(key);
         if (it != g_write_intent_owner.end() && it->second == txn) {
             g_write_intent_owner.erase(it);
         }
     }
-    m_reserved_write_keys.clear();
+    st_->m_reserved_write_keys.clear();
 }
 
 

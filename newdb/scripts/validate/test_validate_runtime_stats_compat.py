@@ -10,10 +10,10 @@ import tempfile
 from pathlib import Path
 
 
-def _run_validator(jsonl_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_validator(jsonl_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     script = Path(__file__).with_name("validate_runtime_stats.py")
     return subprocess.run(
-        [sys.executable, str(script), str(jsonl_path)],
+        [sys.executable, str(script), *extra, str(jsonl_path)],
         text=True,
         capture_output=True,
         check=False,
@@ -101,6 +101,33 @@ def main() -> int:
         failed = _run_validator(bad_path)
         if failed.returncode == 0:
             raise SystemExit("expected invalid row to fail, but validator returned rc=0")
+
+        for tier in ("engine", "cli_embed"):
+            ok_tier = _run_validator(ok_path, "--stats-keys-tier", tier)
+            if ok_tier.returncode != 0:
+                raise SystemExit(
+                    f"expected compat row pass tier={tier}, rc={ok_tier.returncode}\n"
+                    f"stdout={ok_tier.stdout}\nstderr={ok_tier.stderr}"
+                )
+
+        cli_bad = _legacy_row()
+        cli_bad["stats"]["where_query_cache_lookups"] = -1
+        cli_bad_path = td_path / "cli_bad.jsonl"
+        cli_bad_path.write_text(json.dumps(cli_bad) + "\n", encoding="utf-8")
+        cli_failed = _run_validator(cli_bad_path, "--stats-keys-tier", "cli_embed")
+        if cli_failed.returncode == 0:
+            raise SystemExit("expected cli_embed tier to reject negative where_query_cache_lookups")
+
+        eng_bad = _legacy_row()
+        eng_bad["stats"]["txn_commit_count"] = -1
+        eng_bad_path = td_path / "eng_bad.jsonl"
+        eng_bad_path.write_text(json.dumps(eng_bad) + "\n", encoding="utf-8")
+        eng_failed = _run_validator(eng_bad_path, "--stats-keys-tier", "engine")
+        if eng_failed.returncode == 0:
+            raise SystemExit("expected engine tier to reject negative txn_commit_count")
+        eng_cli_ok = _run_validator(eng_bad_path, "--stats-keys-tier", "cli_embed")
+        if eng_cli_ok.returncode != 0:
+            raise SystemExit("expected cli_embed tier to ignore bad engine-only int")
 
     print("VALIDATE_RUNTIME_STATS_COMPAT_OK")
     return 0

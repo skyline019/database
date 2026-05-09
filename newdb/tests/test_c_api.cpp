@@ -7,6 +7,8 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <sstream>
+#include <string_view>
 
 TEST(CApi, VersionAndAbiAreExposed) {
     const std::string expected =
@@ -29,6 +31,7 @@ TEST(CApi, ErrorCodeStringsAreStable) {
     EXPECT_STREQ(newdb_error_code_string(NEWDB_ERR_INVALID_HANDLE), "invalid_handle");
     EXPECT_STREQ(newdb_error_code_string(NEWDB_ERR_LOG_IO), "log_io");
     EXPECT_STREQ(newdb_error_code_string(NEWDB_ERR_SESSION_TERMINATED), "session_terminated");
+    EXPECT_STREQ(newdb_error_code_string(NEWDB_ERR_BACKEND_UNAVAILABLE), "backend_unavailable");
 }
 
 TEST(CApi, LastErrorTracksInvalidArguments) {
@@ -157,6 +160,54 @@ TEST(CApi, SetAttrMismatchReturnsExecutionFailedWithCapiPrefix) {
     fs::remove_all(root);
 }
 
+namespace {
+[[nodiscard]] std::string trim_trailing_newlines(std::string s) {
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+[[nodiscard]] std::string last_line_starting_with(std::string_view tail, std::string_view prefix) {
+    std::string s(tail);
+    std::vector<std::string> lines;
+    std::istringstream iss(s);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        lines.push_back(std::move(line));
+    }
+    for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+        if (it->size() >= prefix.size() &&
+            std::string_view(*it).substr(0, prefix.size()) == prefix) {
+            return *it;
+        }
+    }
+    return {};
+}
+
+[[nodiscard]] std::string last_json_object_line_from_log_tail(std::string_view tail) {
+    std::string s(tail);
+    std::vector<std::string> lines;
+    std::istringstream iss(s);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        lines.push_back(std::move(line));
+    }
+    for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+        if (!it->empty() && (*it)[0] == '{') {
+            return *it;
+        }
+    }
+    return {};
+}
+} // namespace
+
 TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     namespace fs = std::filesystem;
     const fs::path root = fs::temp_directory_path() / "newdb_c_api_stats";
@@ -167,18 +218,22 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     ASSERT_NE(h1, nullptr);
     ASSERT_NE(h2, nullptr);
 
-    char out[8192] = {};
-    EXPECT_EQ(newdb_session_execute(h1, "CREATE TABLE(t1)", out, sizeof(out)), 1);
-    EXPECT_EQ(newdb_session_execute(h1, "USE(t1)", out, sizeof(out)), 1);
-    EXPECT_EQ(newdb_session_execute(h2, "USE(t1)", out, sizeof(out)), 1);
-    EXPECT_EQ(newdb_session_execute(h2, "TXNISOLATION read_committed", out, sizeof(out)), 1);
+    constexpr std::size_t kLargeOut = 512 * 1024;
+    std::vector<char> large_out(kLargeOut);
+    char* out = large_out.data();
 
-    EXPECT_EQ(newdb_session_execute(h1, "BEGIN(t1)", out, sizeof(out)), 1);
-    EXPECT_EQ(newdb_session_execute(h1, "INSERT(1,Alice,10)", out, sizeof(out)), 1);
+    std::memset(out, 0, kLargeOut);
+    EXPECT_EQ(newdb_session_execute(h1, "CREATE TABLE(t1)", out, kLargeOut), 1);
+    EXPECT_EQ(newdb_session_execute(h1, "USE(t1)", out, kLargeOut), 1);
+    EXPECT_EQ(newdb_session_execute(h2, "USE(t1)", out, kLargeOut), 1);
+    EXPECT_EQ(newdb_session_execute(h2, "TXNISOLATION read_committed", out, kLargeOut), 1);
 
-    std::memset(out, 0, sizeof(out));
-    EXPECT_EQ(newdb_session_runtime_stats(h2, out, sizeof(out)), 1);
-    const std::string stats_json(out);
+    EXPECT_EQ(newdb_session_execute(h1, "BEGIN(t1)", out, kLargeOut), 1);
+    EXPECT_EQ(newdb_session_execute(h1, "INSERT(1,Alice,10)", out, kLargeOut), 1);
+
+    std::memset(out, 0, kLargeOut);
+    EXPECT_EQ(newdb_session_runtime_stats(h2, out, kLargeOut), 1);
+    const std::string stats_json(trim_trailing_newlines(std::string(out)));
     EXPECT_NE(stats_json.find("\"txn_isolation\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_trigger_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"vacuum_execute_count\":"), std::string::npos);
@@ -234,9 +289,15 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     EXPECT_NE(stats_json.find("\"group_commit_window_ms\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"group_commit_max_batch_commits\":"), std::string::npos);
 
-    std::memset(out, 0, sizeof(out));
-    EXPECT_EQ(newdb_session_execute(h2, "SHOW TUNING JSON", out, sizeof(out)), 1);
-    const std::string tuning_json(out);
+    std::memset(out, 0, kLargeOut);
+    EXPECT_EQ(newdb_session_execute(h2, "SHOW TUNING JSON", out, kLargeOut), 1);
+    const std::string tuning_json(last_json_object_line_from_log_tail(out));
+    EXPECT_EQ(tuning_json, stats_json);
+
+    std::memset(out, 0, kLargeOut);
+    EXPECT_EQ(newdb_session_execute(h2, "SHOW STATUS JSON", out, kLargeOut), 1);
+    EXPECT_EQ(last_json_object_line_from_log_tail(out), stats_json);
+
     EXPECT_NE(tuning_json.find("\"txn_isolation\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"txn_isolation\":\"read_committed\""), std::string::npos);
     EXPECT_NE(tuning_json.find("\"vacuum_trigger_count\":"), std::string::npos);
@@ -267,10 +328,46 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     // strict assertions on core gate fields above and avoid tail-field
     // truncation sensitivity in fixed-size C API buffers.
 
-    EXPECT_EQ(newdb_session_execute(h1, "ROLLBACK", out, sizeof(out)), 1);
+    EXPECT_EQ(newdb_session_execute(h1, "ROLLBACK", out, kLargeOut), 1);
 
     newdb_session_destroy(h1);
     newdb_session_destroy(h2);
+    fs::remove_all(root);
+}
+
+TEST(CApi, ShowStorageFastpathTailMatchesEmitterContract) {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / "newdb_c_api_show_storage";
+    fs::create_directories(root);
+
+    newdb_session_handle h = newdb_session_create(root.string().c_str(), "users", "");
+    ASSERT_NE(h, nullptr);
+
+    constexpr std::size_t kBuf = 32 * 1024;
+    std::vector<char> buf(kBuf);
+    char* out = buf.data();
+
+    EXPECT_EQ(newdb_session_execute(h, "CREATE TABLE(t1)", out, kBuf), 1);
+    EXPECT_EQ(newdb_session_execute(h, "USE(t1)", out, kBuf), 1);
+
+    std::memset(out, 0, kBuf);
+    EXPECT_EQ(newdb_session_execute(h, "SHOW STORAGE", out, kBuf), 1);
+    const std::string line1 = last_line_starting_with(std::string(out), "[STORAGE]");
+    EXPECT_FALSE(line1.empty());
+    EXPECT_NE(line1.find("demodb.wal bytes="), std::string::npos);
+    EXPECT_NE(line1.find("demodb.wal_lsn="), std::string::npos);
+    EXPECT_NE(line1.find("total *.bin files="), std::string::npos);
+    EXPECT_NE(line1.find(root.string()), std::string::npos);
+
+    // Second call: workspace summary can change byte totals between invocations; only assert format.
+    std::memset(out, 0, kBuf);
+    EXPECT_EQ(newdb_session_execute(h, "SHOW STORAGE", out, kBuf), 1);
+    const std::string line2 = last_line_starting_with(std::string(out), "[STORAGE]");
+    EXPECT_FALSE(line2.empty());
+    EXPECT_NE(line2.find("demodb.wal bytes="), std::string::npos);
+    EXPECT_EQ(line1.substr(0, line1.rfind(" bytes=")), line2.substr(0, line2.rfind(" bytes=")));
+
+    newdb_session_destroy(h);
     fs::remove_all(root);
 }
 

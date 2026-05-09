@@ -32,9 +32,17 @@ struct DllSessionState {
     data_dir: String,
 }
 
+/// One `CONFIRM_REORDER` step: old row id -> new row id for `table` (session table name, may include schema).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IdRemapLayer {
+    table: String,
+    map: HashMap<String, String>,
+}
+
 struct AppState {
     st: Mutex<SessionState>,
     dll: Mutex<DllSessionState>,
+    id_remap_chain: Mutex<Vec<IdRemapLayer>>,
 }
 
 struct DllApi {
@@ -662,52 +670,85 @@ fn read_results_json(file_name: String) -> Result<String, String> {
     fs::read_to_string(&p).map_err(|e| format!("failed to read {}: {e}", p.display()))
 }
 
-fn resolve_newdb_dll() -> PathBuf {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
+/// Candidate search order for runtime DLL/SO next to the packaged GUI (shared with `newdb_cli_backend`).
+fn push_runtime_artifact_candidates(candidates: &mut Vec<PathBuf>, leaf: &str) {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Prefer dll beside the packaged exe.
-            candidates.push(dir.join("libnewdb.dll"));
-            candidates.push(dir.join("newdb.dll"));
-            // Common installer layout: binaries in a `bin/` folder.
-            candidates.push(dir.join("bin/libnewdb.dll"));
-            candidates.push(dir.join("bin/newdb.dll"));
-            candidates.push(dir.join("../bin/libnewdb.dll"));
-            candidates.push(dir.join("../bin/newdb.dll"));
-            // Bundled resources fallback.
-            candidates.push(dir.join("resources/libnewdb.dll"));
-            candidates.push(dir.join("resources/newdb.dll"));
-            candidates.push(dir.join("../resources/libnewdb.dll"));
-            candidates.push(dir.join("../resources/newdb.dll"));
-            // Common fallback when running from subfolders.
-            candidates.push(dir.join("../libnewdb.dll"));
-            candidates.push(dir.join("../newdb.dll"));
+            // `tauri dev`: exe is …/src-tauri/target/debug|release/<name>; runtime DLLs live in …/src-tauri/bin/.
+            candidates.push(dir.join("../../bin").join(leaf));
+            candidates.push(dir.join(leaf));
+            candidates.push(dir.join("bin").join(leaf));
+            candidates.push(dir.join("../bin").join(leaf));
+            candidates.push(dir.join("resources").join(leaf));
+            candidates.push(dir.join("../resources").join(leaf));
+            candidates.push(dir.join("..").join(leaf));
         }
     }
+    candidates.push(PathBuf::from(leaf));
+    candidates.push(PathBuf::from("bin").join(leaf));
+    // `npm run tauri:dev` cwd is often `rust_gui/`; binaries are under `src-tauri/bin/`.
+    candidates.push(PathBuf::from("src-tauri").join("bin").join(leaf));
+    candidates.push(PathBuf::from("../build_shared").join(leaf));
+    candidates.push(PathBuf::from("../build").join(leaf));
+    candidates.push(PathBuf::from("../../build_shared").join(leaf));
+}
 
-    // Fallback for dev-mode working directories.
-    candidates.push(PathBuf::from("libnewdb.dll"));
-    candidates.push(PathBuf::from("newdb.dll"));
-    candidates.push(PathBuf::from("../build_shared/libnewdb.dll"));
-    candidates.push(PathBuf::from("../build_shared/newdb.dll"));
-    candidates.push(PathBuf::from("../build/libnewdb.dll"));
-    candidates.push(PathBuf::from("../build/newdb.dll"));
-    candidates.push(PathBuf::from("../../build_shared/libnewdb.dll"));
-    candidates.push(PathBuf::from("../../build_shared/newdb.dll"));
-
-    for p in candidates {
-        if p.exists() {
-            return p;
+fn resolve_first_existing_leaf(leaves: &[&str]) -> Option<PathBuf> {
+    for leaf in leaves {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        push_runtime_artifact_candidates(&mut candidates, leaf);
+        for p in candidates {
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
-    PathBuf::from("libnewdb.dll")
+    None
+}
+
+fn resolve_newdb_dll() -> PathBuf {
+    resolve_first_existing_leaf(&["libnewdb.dll", "newdb.dll"])
+        .unwrap_or_else(|| PathBuf::from("libnewdb.dll"))
+}
+
+fn cli_backend_plugin_leaves() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["newdb_cli_backend.dll", "libnewdb_cli_backend.dll"]
+    } else if cfg!(target_os = "macos") {
+        &["libnewdb_cli_backend.dylib"]
+    } else {
+        &["libnewdb_cli_backend.so"]
+    }
+}
+
+/// `newdb_cli_backend` when copied beside the GUI (`sync_runtime_binaries.ps1`); used for plugin C API mode.
+fn resolve_cli_backend_bundled_path() -> Option<PathBuf> {
+    resolve_first_existing_leaf(cli_backend_plugin_leaves())
+}
+
+/// If `NEWDB_CLI_BACKEND_PATH` is unset/empty and a bundled backend exists, set it so `newdb_session_create` succeeds in plugin builds.
+fn ensure_newdb_cli_backend_env_from_bundle() {
+    if std::env::var("NEWDB_CLI_BACKEND_PATH")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(p) = resolve_cli_backend_bundled_path() else {
+        return;
+    };
+    let abs = fs::canonicalize(&p).unwrap_or(p);
+    if let Some(s) = abs.to_str() {
+        std::env::set_var("NEWDB_CLI_BACKEND_PATH", s);
+    }
 }
 
 fn runtime_candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // Prefer `src-tauri/bin` (sync target) for Windows DLL dependencies before `target/debug`.
+            dirs.push(dir.join("../../bin"));
             dirs.push(dir.to_path_buf());
             dirs.push(dir.join("bin"));
             dirs.push(dir.join("../bin"));
@@ -769,6 +810,7 @@ fn configure_runtime_loader_paths() {
 fn load_dll_api() -> Result<&'static DllApi, String> {
     DLL_API.get_or_try_init(|| {
         configure_runtime_loader_paths();
+        ensure_newdb_cli_backend_env_from_bundle();
         let lib_path = resolve_newdb_dll();
         let lib = unsafe { Library::new(&lib_path) }
             .map_err(|e| format!("load dll failed: {} ({e})", lib_path.display()))?;
@@ -1349,6 +1391,236 @@ fn stack_store_file_from_state(state: &State<'_, AppState>) -> Result<PathBuf, S
     Ok(stack_store_file_from_workspace(&st.data_dir))
 }
 
+/// Per-op table from the GUI stack; falls back to the sole `tables_touched` when the unit is single-table.
+fn effective_stack_op_table(op: &StackUndoOp, unit: &StackUndoUnit) -> Option<String> {
+    if let Some(ref t) = op.table {
+        let tt = t.trim();
+        if !tt.is_empty() {
+            return Some(tt.to_string());
+        }
+    }
+    if unit.tables_touched.len() == 1 {
+        let t = unit.tables_touched[0].trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+fn sync_session_table_for_stack_op(state: &State<'_, AppState>, op: &StackUndoOp, unit: &StackUndoUnit) {
+    let Some(tt) = effective_stack_op_table(op, unit) else {
+        return;
+    };
+    let app = state.inner();
+    if let Ok(mut st) = app.st.lock() {
+        st.current_table = tt;
+    }
+}
+
+fn effective_stack_table_for_rewrite(op: Option<&StackUndoOp>, unit: &StackUndoUnit) -> Option<String> {
+    if let Some(o) = op {
+        return effective_stack_op_table(o, unit);
+    }
+    if unit.tables_touched.len() == 1 {
+        let t = unit.tables_touched[0].trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+/// Logical heap row ids are integers; canonicalize so stack commands and JSON maps agree (e.g. `03` → `3`).
+fn normalize_heap_row_id_token(raw: &str) -> String {
+    let t = raw.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        return n.to_string();
+    }
+    t.to_string()
+}
+
+fn table_name_matches_for_remap(stack_table: &str, layer_table: &str) -> bool {
+    let a = stack_table.trim();
+    let b = layer_table.trim();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    if let Some((_, ta)) = a.rsplit_once('.') {
+        if ta.eq_ignore_ascii_case(b) || b.eq_ignore_ascii_case(ta) {
+            return true;
+        }
+    }
+    if let Some((_, tb)) = b.rsplit_once('.') {
+        if a.eq_ignore_ascii_case(tb) || tb.eq_ignore_ascii_case(a) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_stack_row_id_through_remaps(table: &str, id: &str, chain: &[IdRemapLayer]) -> String {
+    let mut cur = normalize_heap_row_id_token(id);
+    if cur.is_empty() {
+        return id.trim().to_string();
+    }
+    for layer in chain {
+        if !table_name_matches_for_remap(table, &layer.table) {
+            continue;
+        }
+        if let Some(next) = layer.map.get(&cur) {
+            cur = normalize_heap_row_id_token(next);
+        }
+    }
+    cur
+}
+
+fn starts_with_ascii_case_insensitive(hay: &str, needle: &str) -> bool {
+    hay.len() >= needle.len() && hay[..needle.len()].eq_ignore_ascii_case(needle)
+}
+
+fn rewrite_stack_line_row_ids(line: &str, table: &str, chain: &[IdRemapLayer]) -> String {
+    if table.trim().is_empty() || chain.is_empty() {
+        return line.to_string();
+    }
+    let t = line.trim();
+    // Longer prefixes first (e.g. DELETEPK before DELETE, FINDPK before FIND).
+    const PREFIXES: &[(&str, bool)] = &[
+        ("UPDATE(", true),
+        ("INSERT(", true),
+        ("DELETEPK(", false),
+        ("DELETE(", false),
+        ("FINDPK(", false),
+        ("FIND(", false),
+        ("SETATTR(", true),
+    ];
+    for &(prefix, multi) in PREFIXES {
+        if !starts_with_ascii_case_insensitive(t, prefix) {
+            continue;
+        }
+        let Some(inner_end) = t.rfind(')') else {
+            return line.to_string();
+        };
+        let inner = &t[prefix.len()..inner_end];
+        let (id_part, rest_comma) = if multi {
+            match inner.find(',') {
+                Some(i) => (inner[..i].trim(), &inner[i..]),
+                None => (inner.trim(), ""),
+            }
+        } else {
+            (inner.trim(), "")
+        };
+        if id_part.is_empty() {
+            return line.to_string();
+        }
+        let new_id = resolve_stack_row_id_through_remaps(table, id_part, chain);
+        let cmd = prefix.trim_end_matches('(');
+        return format!("{cmd}({new_id}{rest_comma})");
+    }
+    line.to_string()
+}
+
+fn rewrite_stack_command_line(
+    app: &AppState,
+    op: Option<&StackUndoOp>,
+    unit: &StackUndoUnit,
+    line: &str,
+) -> String {
+    let chain = match app.id_remap_chain.lock() {
+        Ok(c) => c,
+        Err(_) => return line.to_string(),
+    };
+    let mut table_opt = effective_stack_table_for_rewrite(op, unit);
+    if table_opt.is_none() {
+        if let Ok(st) = app.st.lock() {
+            let ct = st.current_table.trim().to_string();
+            if !ct.is_empty() {
+                table_opt = Some(ct);
+            }
+        }
+    }
+    let Some(table) = table_opt else {
+        return line.to_string();
+    };
+    let trimmed = line.trim();
+    let out = rewrite_stack_line_row_ids(trimmed, &table, &chain);
+    // If remap did not apply, try other touched tables (rare qualification mismatch).
+    if out == trimmed && !chain.is_empty() {
+        let mut tried = std::collections::HashSet::<String>::new();
+        tried.insert(table);
+        for t in &unit.tables_touched {
+            let tt = t.trim().to_string();
+            if tt.is_empty() || tried.contains(&tt) {
+                continue;
+            }
+            tried.insert(tt.clone());
+            let alt = rewrite_stack_line_row_ids(trimmed, &tt, &chain);
+            if alt != trimmed {
+                return alt;
+            }
+        }
+    }
+    out
+}
+
+fn ingest_reorder_map_from_engine_output(app: &AppState, output: &str) {
+    for raw in output.lines() {
+        let t = raw.trim();
+        let Some(json) = t.strip_prefix("[REORDER_MAP_JSON]") else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json.trim()) else {
+            continue;
+        };
+        let Some(table) = v.get("table").and_then(|x| x.as_str()).map(|s| s.trim().to_string()) else {
+            continue;
+        };
+        if table.is_empty() {
+            continue;
+        }
+        let mut map = HashMap::new();
+        if let Some(pairs) = v.get("pairs").and_then(|x| x.as_array()) {
+            for p in pairs {
+                let Some(arr) = p.as_array() else {
+                    continue;
+                };
+                if arr.len() < 2 {
+                    continue;
+                }
+                let old_s = match &arr[0] {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => continue,
+                };
+                let new_s = match &arr[1] {
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => continue,
+                };
+                let old_n = normalize_heap_row_id_token(&old_s);
+                let new_n = normalize_heap_row_id_token(&new_s);
+                if old_n.is_empty() {
+                    continue;
+                }
+                map.insert(old_n, new_n);
+            }
+        }
+        if map.is_empty() {
+            continue;
+        }
+        if let Ok(mut chain) = app.id_remap_chain.lock() {
+            chain.push(IdRemapLayer { table, map });
+        }
+        break;
+    }
+}
+
 fn parse_stack_payload_text(text: &str) -> (serde_json::Value, serde_json::Value, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
     let mut undo_units = serde_json::json!([]);
@@ -1380,41 +1652,83 @@ fn save_stack_units(
         fs::create_dir_all(parent)
             .map_err(|e| format!("failed to create stack dir {}: {e}", parent.display()))?;
     }
+    let id_chain = state
+        .inner()
+        .id_remap_chain
+        .lock()
+        .map_err(|_| "id_remap_chain lock poisoned".to_string())?;
+    let id_chain_json =
+        serde_json::to_value(&*id_chain).map_err(|e| format!("id_remap_chain serialize: {e}"))?;
     let payload = serde_json::json!({
-        "schema_version": "newdb.gui.undo_redo_stack.v1",
+        "schema_version": "newdb.gui.undo_redo_stack.v4",
         "updated_at_ms": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
         "undo_units": serde_json::from_str::<serde_json::Value>(&undo_units_json).unwrap_or(serde_json::json!([])),
         "redo_units": serde_json::from_str::<serde_json::Value>(&redo_units_json).unwrap_or(serde_json::json!([])),
+        "id_remap_chain": id_chain_json,
     });
     let line = serde_json::to_string(&payload).map_err(|e| format!("stack serialize failed: {e}"))?;
     fs::write(&p, format!("{line}\n")).map_err(|e| format!("failed to write {}: {e}", p.display()))?;
     Ok(())
 }
 
+fn last_stack_json_line_object(text: &str) -> Option<serde_json::Value> {
+    let mut last = None;
+    for ln in text.lines() {
+        let t = ln.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            last = Some(v);
+        }
+    }
+    last
+}
+
 #[tauri::command]
 fn load_stack_units(state: State<'_, AppState>) -> Result<String, String> {
     let p = stack_store_file_from_state(&state)?;
     if !p.exists() {
-        return Ok("{\"undo_units\":[],\"redo_units\":[],\"warnings\":[]}".to_string());
+        if let Ok(mut c) = state.inner().id_remap_chain.lock() {
+            c.clear();
+        }
+        return Ok("{\"undo_units\":[],\"redo_units\":[],\"id_remap_chain\":[],\"warnings\":[]}".to_string());
     }
     let text = fs::read_to_string(&p).map_err(|e| format!("failed to read {}: {e}", p.display()))?;
     let (undo_units, redo_units, warnings) = parse_stack_payload_text(&text);
+    let id_chain: Vec<IdRemapLayer> = last_stack_json_line_object(&text)
+        .and_then(|v| v.get("id_remap_chain").cloned())
+        .and_then(|x| serde_json::from_value(x).ok())
+        .unwrap_or_default();
+    let id_chain_json =
+        serde_json::to_value(&id_chain).map_err(|e| format!("id_remap_chain response: {e}"))?;
+    let meta = last_stack_json_line_object(&text);
+    let suspended_redo = meta
+        .as_ref()
+        .and_then(|v| v.get("suspended_redo_units").cloned())
+        .unwrap_or(serde_json::json!([]));
+    if let Ok(mut g) = state.inner().id_remap_chain.lock() {
+        *g = id_chain;
+    }
     Ok(
         serde_json::json!({
             "undo_units": undo_units,
             "redo_units": redo_units,
+            "legacy_suspended_redo_units": suspended_redo,
+            "id_remap_chain": id_chain_json,
             "warnings": warnings
         })
         .to_string(),
     )
 }
 
-fn stack_undo_unit_with_runner<F>(unit: &StackUndoUnit, mut run: F) -> StackExecResult
+fn stack_undo_unit_with_runner<F, B>(unit: &StackUndoUnit, mut before_op: B, mut run: F) -> StackExecResult
 where
-    F: FnMut(String) -> Result<CommandExecResult, String>,
+    F: FnMut(Option<&StackUndoOp>, String) -> Result<CommandExecResult, String>,
+    B: FnMut(&StackUndoOp),
 {
     let begin = std::time::Instant::now();
     let mut repair_action = "none".to_string();
@@ -1427,7 +1741,7 @@ where
     if !savepoint.is_empty() && !is_internal_unit {
         let cmd = format!("ROLLBACK TO {savepoint}");
         executed_commands.push(cmd.clone());
-        match run(cmd.clone()) {
+        match run(None, cmd.clone()) {
             Ok(r) if r.ok => {
                 return StackExecResult {
                     ok: true,
@@ -1452,13 +1766,15 @@ where
             repair_action = "soft_fail".to_string();
             continue;
         };
-        match run_compound_command(backward, &mut run, &mut executed_commands) {
+        before_op(op);
+        let mut run_line = |line: String| run(Some(op), line);
+        match run_compound_command(backward, &mut run_line, &mut executed_commands) {
             Ok(()) => {
                 applied_ops += 1;
             }
             Err(failed_cmd) => {
                 executed_commands.push("ROLLBACK".to_string());
-                let _ = run("ROLLBACK".to_string());
+                let _ = run(Some(op), "ROLLBACK".to_string());
                 return StackExecResult {
                     ok: false,
                     applied_ops,
@@ -1483,9 +1799,10 @@ where
     }
 }
 
-fn stack_redo_unit_with_runner<F>(unit: &StackUndoUnit, mut run: F) -> StackExecResult
+fn stack_redo_unit_with_runner<F, B>(unit: &StackUndoUnit, mut before_op: B, mut run: F) -> StackExecResult
 where
-    F: FnMut(String) -> Result<CommandExecResult, String>,
+    F: FnMut(Option<&StackUndoOp>, String) -> Result<CommandExecResult, String>,
+    B: FnMut(&StackUndoOp),
 {
     let begin = std::time::Instant::now();
     let mut applied_ops = 0usize;
@@ -1494,13 +1811,15 @@ where
         if op.forward.trim().is_empty() {
             continue;
         }
-        match run_compound_command(&op.forward, &mut run, &mut executed_commands) {
+        before_op(op);
+        let mut run_line = |line: String| run(Some(op), line);
+        match run_compound_command(&op.forward, &mut run_line, &mut executed_commands) {
             Ok(()) => {
                 applied_ops += 1;
             }
             Err(failed_cmd) => {
                 executed_commands.push("ROLLBACK".to_string());
-                let _ = run("ROLLBACK".to_string());
+                let _ = run(Some(op), "ROLLBACK".to_string());
                 return StackExecResult {
                     ok: false,
                     applied_ops,
@@ -1526,12 +1845,28 @@ where
 
 #[tauri::command]
 fn stack_undo_unit(state: State<'_, AppState>, unit: StackUndoUnit) -> Result<StackExecResult, String> {
-    Ok(stack_undo_unit_with_runner(&unit, |cmd| execute_command_ex(state.clone(), cmd)))
+    Ok(stack_undo_unit_with_runner(
+        &unit,
+        |op| sync_session_table_for_stack_op(&state, op, &unit),
+        |maybe_op, cmd| {
+            let app = state.inner();
+            let cmd2 = rewrite_stack_command_line(app, maybe_op, &unit, &cmd);
+            execute_command_ex(state.clone(), cmd2)
+        },
+    ))
 }
 
 #[tauri::command]
 fn stack_redo_unit(state: State<'_, AppState>, unit: StackUndoUnit) -> Result<StackExecResult, String> {
-    Ok(stack_redo_unit_with_runner(&unit, |cmd| execute_command_ex(state.clone(), cmd)))
+    Ok(stack_redo_unit_with_runner(
+        &unit,
+        |op| sync_session_table_for_stack_op(&state, op, &unit),
+        |maybe_op, cmd| {
+            let app = state.inner();
+            let cmd2 = rewrite_stack_command_line(app, maybe_op, &unit, &cmd);
+            execute_command_ex(state.clone(), cmd2)
+        },
+    ))
 }
 
 #[tauri::command]
@@ -1760,9 +2095,12 @@ fn pitr_recover_to_time(state: State<'_, AppState>, ts_ms: u64) -> Result<TimedE
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{
         make_command_exec_result, parse_capi_error_code, parse_stack_payload_text, should_stop_script_on_output,
-        stack_redo_unit_with_runner, stack_undo_unit_with_runner, strip_capi_error_line, StackUndoOp, StackUndoUnit,
+        stack_redo_unit_with_runner, stack_undo_unit_with_runner, strip_capi_error_line, IdRemapLayer, StackUndoOp,
+        StackUndoUnit, rewrite_stack_line_row_ids,
     };
 
     #[test]
@@ -1835,6 +2173,66 @@ mod tests {
     }
 
     #[test]
+    fn remap_chain_rewrites_row_ids_for_stack_commands() {
+        let mut m = HashMap::new();
+        m.insert("5".to_string(), "1".to_string());
+        m.insert("7".to_string(), "2".to_string());
+        let chain = vec![IdRemapLayer {
+            table: "users".to_string(),
+            map: m,
+        }];
+        assert_eq!(
+            rewrite_stack_line_row_ids("DELETE(5)", "users", &chain),
+            "DELETE(1)"
+        );
+        assert_eq!(
+            rewrite_stack_line_row_ids("UPDATE(7,name,x)", "users", &chain),
+            "UPDATE(2,name,x)"
+        );
+        let mut m1 = HashMap::new();
+        m1.insert("5".to_string(), "1".to_string());
+        let mut m2 = HashMap::new();
+        m2.insert("1".to_string(), "10".to_string());
+        let chain2 = vec![
+            IdRemapLayer {
+                table: "users".to_string(),
+                map: m1,
+            },
+            IdRemapLayer {
+                table: "users".to_string(),
+                map: m2,
+            },
+        ];
+        assert_eq!(
+            rewrite_stack_line_row_ids("DELETE(5)", "users", &chain2),
+            "DELETE(10)"
+        );
+        assert_eq!(
+            rewrite_stack_line_row_ids("DELETEPK(5)", "users", &chain),
+            "DELETEPK(1)"
+        );
+        assert_eq!(
+            rewrite_stack_line_row_ids("FINDPK(7)", "users", &chain),
+            "FINDPK(2)"
+        );
+        // DELETEPK must not match the shorter DELETE( prefix.
+        assert_eq!(
+            rewrite_stack_line_row_ids("DELETEPK(9)", "users", &chain),
+            "DELETEPK(9)"
+        );
+        let mut m3 = HashMap::new();
+        m3.insert("3".to_string(), "2".to_string());
+        let ch3 = vec![IdRemapLayer {
+            table: "users".to_string(),
+            map: m3,
+        }];
+        assert_eq!(
+            rewrite_stack_line_row_ids("UPDATE(03,name,x)", "users", &ch3),
+            "UPDATE(2,name,x)"
+        );
+    }
+
+    #[test]
     fn parse_stack_payload_tolerates_bad_lines() {
         let text = r#"{"undo_units":[{"unitId":"u1"}],"redo_units":[]}
 not-json
@@ -1860,7 +2258,7 @@ not-json
             }],
         };
         let mut called: Vec<String> = Vec::new();
-        let r = stack_undo_unit_with_runner(&unit, |cmd| {
+        let r = stack_undo_unit_with_runner(&unit, |_| {}, |_op, cmd| {
             called.push(cmd.clone());
             Ok(make_command_exec_result("[OK]".to_string()))
         });
@@ -1882,7 +2280,7 @@ not-json
             }],
         };
         let mut called: Vec<String> = Vec::new();
-        let r = stack_undo_unit_with_runner(&unit, |cmd| {
+        let r = stack_undo_unit_with_runner(&unit, |_| {}, |_op, cmd| {
             called.push(cmd.clone());
             Ok(make_command_exec_result("[OK]".to_string()))
         });
@@ -1913,7 +2311,7 @@ not-json
             ],
         };
         let mut idx = 0usize;
-        let r = stack_redo_unit_with_runner(&unit, |cmd| {
+        let r = stack_redo_unit_with_runner(&unit, |_| {}, |_op, cmd| {
             idx += 1;
             if idx == 2 {
                 return Ok(make_command_exec_result(
@@ -2088,6 +2486,9 @@ fn set_workspace(state: State<'_, AppState>, data_dir: String) {
     let mut st = app.st.lock().expect("state lock");
     let mut dll = app.dll.lock().expect("dll lock");
     st.data_dir = data_dir;
+    if let Ok(mut chain) = app.id_remap_chain.lock() {
+        chain.clear();
+    }
     if let Some(api) = api {
         reset_dll_session(api, &mut dll);
     }
@@ -2110,28 +2511,37 @@ fn list_tables(state: State<'_, AppState>) -> Vec<String> {
 #[tauri::command]
 fn execute_command(state: State<'_, AppState>, command: String) -> Result<String, String> {
     let app = state.inner();
-    let mut st = app.st.lock().expect("state lock");
-    // Prefer DLL persistent session so txn BEGIN/ROLLBACK works.
-    let out = if let Ok(api) = load_dll_api() {
-        let mut dll = app.dll.lock().expect("dll lock");
-        let h = ensure_dll_session(api, &st, &mut dll)?;
-        match execute_via_dll_session(api, h, &st, &command) {
-            Ok(s) => s,
-            Err(e) => {
-                if should_fallback_to_demo(&e) {
-                    run_demo_mdb(&st, &command)?
-                } else {
-                    e
-                }
+    let out = {
+        let mut st = app.st.lock().expect("state lock");
+        // Prefer DLL persistent session so txn BEGIN/ROLLBACK works.
+        let out_inner = if let Ok(api) = load_dll_api() {
+            let mut dll = app.dll.lock().expect("dll lock");
+            match ensure_dll_session(api, &st, &mut dll) {
+                Ok(h) => match execute_via_dll_session(api, h, &st, &command) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if should_fallback_to_demo(&e) {
+                            run_demo_mdb(&st, &command)?
+                        } else {
+                            e
+                        }
+                    }
+                },
+                // Plugin C API: missing NEWDB_CLI_BACKEND_PATH / LoadLibrary backend → session_create null.
+                Err(_) => run_demo_mdb(&st, &command)?,
             }
+        } else {
+            // Fallback to exe (stateless).
+            run_demo_mdb(&st, &command)?
+        };
+        // Persist selected table across command invocations.
+        if let Some(t) = parse_use_table(&command) {
+            st.current_table = t;
         }
-    } else {
-        // Fallback to exe (stateless).
-        run_demo_mdb(&st, &command)?
+        out_inner
     };
-    // Persist selected table across command invocations.
-    if let Some(t) = parse_use_table(&command) {
-        st.current_table = t;
+    if command.trim().eq_ignore_ascii_case("CONFIRM_REORDER") {
+        ingest_reorder_map_from_engine_output(app, &out);
     }
     Ok(out)
 }
@@ -2460,6 +2870,18 @@ fn build_drop_table_snapshot_inverse(state: State<'_, AppState>, table_name: &st
     Some((lines.join("\n"), snapshot_rows, truncated))
 }
 
+fn row_map_lookup_ci(row_map: &HashMap<String, String>, key: &str) -> Option<String> {
+    if let Some(v) = row_map.get(key) {
+        return Some(v.clone());
+    }
+    for (k, v) in row_map {
+        if k.eq_ignore_ascii_case(key) {
+            return Some(v.clone());
+        }
+    }
+    None
+}
+
 fn infer_inverse_backend(state: State<'_, AppState>, command: &str, op_type: Option<&str>) -> Option<(String, String)> {
     let t = command.trim();
     if t.is_empty() {
@@ -2617,7 +3039,7 @@ fn infer_inverse_backend(state: State<'_, AppState>, command: &str, op_type: Opt
             let find_out = execute_command(state.clone(), format!("FIND({id})")).ok()?;
             parse_find_row_map(&find_out, id)
         })?;
-        let old_val = row_map.get(attr).cloned().unwrap_or_default();
+        let old_val = row_map_lookup_ci(&row_map, attr).unwrap_or_default();
         return Some((
             format!("SETATTR({id},{attr},{old_val})"),
             "backend:snapshot_setattr".to_string(),
@@ -2650,7 +3072,7 @@ fn infer_inverse_backend(state: State<'_, AppState>, command: &str, op_type: Opt
     let mut ordered = Vec::new();
     ordered.push(id.clone());
     for attr in attr_order.iter().skip(1) {
-        ordered.push(row_map.get(attr).cloned().unwrap_or_default());
+        ordered.push(row_map_lookup_ci(&row_map, attr).unwrap_or_default());
     }
     if up.starts_with("DELETE(") || op == "data_delete" {
         return Some((format!("INSERT({})", ordered.join(",")), "backend:snapshot_delete".to_string()));
@@ -2677,6 +3099,41 @@ fn infer_inverse_command(
     })
 }
 
+fn run_script_via_demo_mdb(st: &mut SessionState, script: &str) -> Result<String, String> {
+    let mut last_use: Option<String> = None;
+    for line in script.lines() {
+        if let Some(t) = parse_use_table(line) {
+            last_use = Some(t);
+        }
+    }
+    if let Some(t) = last_use {
+        st.current_table = t;
+    }
+    let mut all = String::new();
+    for (line_no, line) in script.lines().enumerate() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if let Some(table) = parse_use_table(t) {
+            st.current_table = table;
+        }
+        let one = run_demo_mdb(&st, t)?;
+        if !all.is_empty() {
+            all.push('\n');
+        }
+        all.push_str(&one);
+        if should_stop_script_on_output(&one) {
+            all.push_str(&format!(
+                "\n[SCRIPT] stopped at line {} due to command error.\n",
+                line_no + 1
+            ));
+            break;
+        }
+    }
+    Ok(all)
+}
+
 #[tauri::command]
 fn run_script(state: State<'_, AppState>, script: String) -> Result<String, String> {
     let app = state.inner();
@@ -2684,72 +3141,45 @@ fn run_script(state: State<'_, AppState>, script: String) -> Result<String, Stri
     // Prefer DLL persistent session so txn blocks spanning lines work.
     let out = if let Ok(api) = load_dll_api() {
         let mut dll = app.dll.lock().expect("dll lock");
-        let h = ensure_dll_session(api, &st, &mut dll)?;
-        let mut all = String::new();
-        for (line_no, line) in script.lines().enumerate() {
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') {
-                continue;
-            }
-            if let Some(table) = parse_use_table(t) {
-                st.current_table = table;
-            }
-            let one = match execute_via_dll_session(api, h, &st, t) {
-                Ok(s) => s,
-                Err(e) => {
-                    if should_fallback_to_demo(&e) {
-                        run_demo_mdb(&st, t)?
-                    } else {
-                        e
+        match ensure_dll_session(api, &st, &mut dll) {
+            Ok(h) => {
+                let mut all = String::new();
+                for (line_no, line) in script.lines().enumerate() {
+                    let t = line.trim();
+                    if t.is_empty() || t.starts_with('#') {
+                        continue;
+                    }
+                    if let Some(table) = parse_use_table(t) {
+                        st.current_table = table;
+                    }
+                    let one = match execute_via_dll_session(api, h, &st, t) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if should_fallback_to_demo(&e) {
+                                run_demo_mdb(&st, t)?
+                            } else {
+                                e
+                            }
+                        }
+                    };
+                    if !all.is_empty() {
+                        all.push('\n');
+                    }
+                    all.push_str(&one);
+                    if should_stop_script_on_output(&one) {
+                        all.push_str(&format!(
+                            "\n[SCRIPT] stopped at line {} due to command error.\n",
+                            line_no + 1
+                        ));
+                        break;
                     }
                 }
-            };
-            if !all.is_empty() {
-                all.push('\n');
+                all
             }
-            all.push_str(&one);
-            if should_stop_script_on_output(&one) {
-                all.push_str(&format!(
-                    "\n[SCRIPT] stopped at line {} due to command error.\n",
-                    line_no + 1
-                ));
-                break;
-            }
+            Err(_) => run_script_via_demo_mdb(&mut st, &script)?,
         }
-        all
     } else {
-        let mut last_use: Option<String> = None;
-        for line in script.lines() {
-            if let Some(t) = parse_use_table(line) {
-                last_use = Some(t);
-            }
-        }
-        if let Some(t) = last_use {
-            st.current_table = t;
-        }
-        let mut all = String::new();
-        for (line_no, line) in script.lines().enumerate() {
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') {
-                continue;
-            }
-            if let Some(table) = parse_use_table(t) {
-                st.current_table = table;
-            }
-            let one = run_demo_mdb(&st, t)?;
-            if !all.is_empty() {
-                all.push('\n');
-            }
-            all.push_str(&one);
-            if should_stop_script_on_output(&one) {
-                all.push_str(&format!(
-                    "\n[SCRIPT] stopped at line {} due to command error.\n",
-                    line_no + 1
-                ));
-                break;
-            }
-        }
-        all
+        run_script_via_demo_mdb(&mut st, &script)?
     };
     Ok(out)
 }
@@ -3083,6 +3513,11 @@ struct RuntimeArtifactInfo {
     runtime_report_modified: String,
     dll_path: String,
     dll_modified: String,
+    /// Bundled `newdb_cli_backend` path when present (plugin preset); empty string if not synced.
+    cli_backend_plugin_path: String,
+    cli_backend_plugin_modified: String,
+    /// Effective `NEWDB_CLI_BACKEND_PATH` after optional auto-fill from bundle.
+    newdb_cli_backend_path_env: String,
     /// Contract label for `SHOW TUNING JSON` / JSONL stats (engine and GUI stay aligned).
     runtime_stats_schema_version: String,
     /// Best-effort: set `NEWDB_GIT_COMMIT` in CI pack scripts to populate.
@@ -3153,11 +3588,21 @@ fn format_modified_time(path: &Path) -> String {
 
 #[tauri::command]
 fn runtime_artifact_info() -> RuntimeArtifactInfo {
+    ensure_newdb_cli_backend_env_from_bundle();
     let gui_exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("unknown"));
     let demo = resolve_demo_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let perf = resolve_perf_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let runtime_report = resolve_runtime_report_bin().unwrap_or_else(|_| PathBuf::from("not-found"));
     let dll = resolve_newdb_dll();
+    let cli_backend = resolve_cli_backend_bundled_path();
+    let (cb_path, cb_mod) = match &cli_backend {
+        Some(p) => (
+            p.display().to_string(),
+            format_modified_time(p),
+        ),
+        None => (String::new(), "n/a".to_string()),
+    };
+    let newdb_cli_backend_path_env = std::env::var("NEWDB_CLI_BACKEND_PATH").unwrap_or_default();
     let backend_git_commit = std::env::var("NEWDB_GIT_COMMIT").unwrap_or_default();
     let build_profile = std::env::var("NEWDB_BUILD_PROFILE").unwrap_or_default();
     let gui_package_kind = if cfg!(debug_assertions) {
@@ -3176,6 +3621,9 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
         runtime_report_modified: format_modified_time(&runtime_report),
         dll_path: dll.display().to_string(),
         dll_modified: format_modified_time(&dll),
+        cli_backend_plugin_path: cb_path,
+        cli_backend_plugin_modified: cb_mod,
+        newdb_cli_backend_path_env,
         runtime_stats_schema_version: "newdb.runtime_stats.v1".to_string(),
         backend_git_commit,
         build_profile,
@@ -3375,6 +3823,7 @@ pub fn run() {
                 page_size: 12,
             }),
             dll: Mutex::new(DllSessionState::default()),
+            id_remap_chain: Mutex::new(Vec::new()),
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
@@ -3559,7 +4008,7 @@ pub fn e2e_undo_redo_check() -> Result<(), String> {
     fs::create_dir_all(&tmp).map_err(|e| format!("create e2e workspace failed: {e}"))?;
     let tmp_dir = tmp.to_string_lossy().to_string();
 
-    let mut st = SessionState {
+    let st = SessionState {
         data_dir: tmp_dir.clone(),
         current_table: String::new(),
         page_size: 12,
@@ -3657,7 +4106,7 @@ pub fn e2e_undo_redo_check() -> Result<(), String> {
         ],
     };
 
-    let undo_r = stack_undo_unit_with_runner(&unit, |cmd| {
+    let undo_r = stack_undo_unit_with_runner(&unit, |_| {}, |_op, cmd| {
         let up = cmd.to_uppercase();
         let table = if up.contains("101") { "users" } else { "orders" };
         execute_command_ex_for_e2e(api, h, &st, table, cmd)
@@ -3675,7 +4124,7 @@ pub fn e2e_undo_redo_check() -> Result<(), String> {
         ));
     }
 
-    let redo_r = stack_redo_unit_with_runner(&unit, |cmd| {
+    let redo_r = stack_redo_unit_with_runner(&unit, |_| {}, |_op, cmd| {
         let up = cmd.to_uppercase();
         let table = if up.contains("101") { "users" } else { "orders" };
         execute_command_ex_for_e2e(api, h, &st, table, cmd)

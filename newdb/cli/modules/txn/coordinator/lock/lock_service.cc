@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/common/util/constants.h"
@@ -36,9 +37,9 @@
 #endif
 
 Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
-    std::lock_guard<std::mutex> lk(m_lock_mutex);
-    if (m_lock_handles.find(file_path) != m_lock_handles.end()) {
-        m_file_lock_same_process_reuse_count.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(st_->m_lock_mutex);
+    if (st_->m_lock_handles.find(file_path) != st_->m_lock_handles.end()) {
+        st_->m_file_lock_same_process_reuse_count.fetch_add(1, std::memory_order_relaxed);
         return Result<bool>::Ok(true);
     }
 
@@ -48,7 +49,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         return raw != nullptr && raw[0] == '1' && raw[1] == '\0';
     }();
 
-    LockHandleState state{};
+    TxnCoordinatorState::LockHandleState state{};
     state.lock_file_path = lock_file;
     bool retried_stale = false;
 #if defined(_WIN32)
@@ -67,7 +68,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         }
         fs::remove(p, ec);
         if (!ec) {
-            m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
             retried_stale = true;
             return true;
         }
@@ -83,7 +84,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
                           FILE_ATTRIBUTE_NORMAL,
                           nullptr);
         if (h == INVALID_HANDLE_VALUE) {
-            m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
             return Result<bool>::Err("failed to open lock file: " + lock_file);
         }
         OVERLAPPED ov{};
@@ -96,7 +97,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         if (try_remove_stale_lock_marker()) {
             continue;
         }
-        m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+        st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
         return Result<bool>::Err(
             "lock is already held or lock acquisition failed (" +
             std::to_string(static_cast<unsigned long long>(err)) + "): " +
@@ -119,7 +120,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         }
         fs::remove(p, ec);
         if (!ec) {
-            m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_file_lock_stale_marker_count.fetch_add(1, std::memory_order_relaxed);
             retried_stale = true;
             return true;
         }
@@ -129,7 +130,7 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
     for (int attempt = 0; attempt < 2; ++attempt) {
         fd = ::open(lock_file.c_str(), O_CREAT | O_RDWR, 0644);
         if (fd < 0) {
-            m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
             return Result<bool>::Err("failed to open lock file: " + lock_file);
         }
         struct flock fl{};
@@ -145,22 +146,22 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         if (try_remove_stale_lock_marker()) {
             continue;
         }
-        m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
+        st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
         return Result<bool>::Err("lock is already held or lock acquisition failed: " + lock_file);
     }
     state.fd = fd;
 #endif
 
-    m_lock_handles[file_path] = state;
-    m_locked_files.push_back(file_path);
+    st_->m_lock_handles[file_path] = state;
+    st_->m_locked_files.push_back(file_path);
     return Result<bool>::Ok(true);
 }
 
 
 Result<bool> TxnCoordinator::releaseLock(const std::string& file_path) {
-    std::lock_guard<std::mutex> lk(m_lock_mutex);
-    const auto it_handle = m_lock_handles.find(file_path);
-    if (it_handle != m_lock_handles.end()) {
+    std::lock_guard<std::mutex> lk(st_->m_lock_mutex);
+    const auto it_handle = st_->m_lock_handles.find(file_path);
+    if (it_handle != st_->m_lock_handles.end()) {
 #if defined(_WIN32)
         const HANDLE h = static_cast<HANDLE>(it_handle->second.handle);
         if (h != nullptr && h != INVALID_HANDLE_VALUE) {
@@ -180,16 +181,16 @@ Result<bool> TxnCoordinator::releaseLock(const std::string& file_path) {
         }
 #endif
         std::remove(it_handle->second.lock_file_path.c_str());
-        m_lock_handles.erase(it_handle);
+        st_->m_lock_handles.erase(it_handle);
     } else {
         const std::string lock_file = file_path + ".lock";
         std::remove(lock_file.c_str());
     }
 
     // 从列表中移除
-    for (auto it = m_locked_files.begin(); it != m_locked_files.end(); ) {
+    for (auto it = st_->m_locked_files.begin(); it != st_->m_locked_files.end(); ) {
         if (*it == file_path) {
-            it = m_locked_files.erase(it);
+            it = st_->m_locked_files.erase(it);
         } else {
             ++it;
         }
@@ -200,8 +201,8 @@ Result<bool> TxnCoordinator::releaseLock(const std::string& file_path) {
 
 
 bool TxnCoordinator::isLocked(const std::string& file_path) const {
-    std::lock_guard<std::mutex> lk(m_lock_mutex);
-    return m_lock_handles.find(file_path) != m_lock_handles.end();
+    std::lock_guard<std::mutex> lk(st_->m_lock_mutex);
+    return st_->m_lock_handles.find(file_path) != st_->m_lock_handles.end();
 }
 
 // ========== WAL ==========

@@ -2,6 +2,7 @@
 
 #include <newdb/heap_storage.h>
 #include <newdb/mvcc.h>
+#include <newdb/read_path_policy.h>
 #include <newdb/row.h>
 #include <newdb/schema.h>
 

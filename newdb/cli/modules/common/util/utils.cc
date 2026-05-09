@@ -3,6 +3,48 @@
 #include <ctime>
 #include <cstring>
 
+namespace {
+int ascii_tolower(int c) {
+    return std::tolower(static_cast<unsigned char>(c));
+}
+} // namespace
+
+int strncasecmp_ascii(const char* a, const char* b, std::size_t n) {
+    for (std::size_t i = 0; i < n; ++i) {
+        const unsigned char ca = static_cast<unsigned char>(a[i]);
+        const unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (ca == 0 || cb == 0) {
+            return (ca == cb) ? 0 : (ca == 0 ? -1 : 1);
+        }
+        const int la = ascii_tolower(ca);
+        const int lb = ascii_tolower(cb);
+        if (la != lb) {
+            return la < lb ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+int strcasecmp_ascii(const char* a, const char* b) {
+    if (!a || !b) {
+        return a == b ? 0 : (a ? 1 : -1);
+    }
+    std::size_t i = 0;
+    for (;;) {
+        const unsigned char ca = static_cast<unsigned char>(a[i]);
+        const unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (ca == 0 || cb == 0) {
+            return (ca == cb) ? 0 : (ca == 0 ? -1 : 1);
+        }
+        const int la = ascii_tolower(ca);
+        const int lb = ascii_tolower(cb);
+        if (la != lb) {
+            return la < lb ? -1 : 1;
+        }
+        ++i;
+    }
+}
+
 std::string trim(const std::string& s) {
     std::size_t b = 0, e = s.size();
     while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;

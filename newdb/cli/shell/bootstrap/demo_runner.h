@@ -4,7 +4,7 @@
 
 #include <string>
 
-struct ShellState;
+#include "cli/shell/state/shell_state_fwd.h"
 
 // Common workspace init: log path, data_dir, flags, logging_bind_shell, txn root, session separator.
 void demo_init_session_logging(ShellState& app,

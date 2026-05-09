@@ -9,6 +9,12 @@
 namespace newdb {
 namespace wal_recovery {
 
+// WAL recovery pipeline (closed-loop stages; see `wal_manager_recover_support.cpp`):
+// 1) WalSegmentScanner / segment index — `WalManager::recover_build_segment_index`
+// 2) WalRecordReader — `read_record` per segment (`WalRecordReader` wrapper)
+// 3) WalRedoPlanner — committed txn aggregation + redo plan (`WalRedoPlanner`)
+// 4) WalRedoApplier — heap replay + apply stats (`WalRedoApplier`)
+
 /// Thin wrapper over `WalManager::read_record` for recovery tooling / tests (Reader stage).
 class WalRecordReader {
 public:

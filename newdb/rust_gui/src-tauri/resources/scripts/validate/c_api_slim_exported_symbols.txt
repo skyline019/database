@@ -1,0 +1,21 @@
+# Optional secondary manifest: slim and full `newdb_shared` both implement the same `c_api.h` entry
+# points; behavior differs (stubs vs CLI). For link-level checks, use `nm`/`objdump` on the built
+# `newdb` shared library. Symbol names match `c_api_expected_symbols.txt` when the same header
+# is used. Keep sorted for diffing.
+newdb_abi_version
+newdb_api_version_major
+newdb_api_version_minor
+newdb_api_version_patch
+newdb_check_schema_file
+newdb_error_code_string
+newdb_negotiate_abi
+newdb_session_append_runtime_snapshot
+newdb_session_create
+newdb_session_destroy
+newdb_session_execute
+newdb_session_last_error
+newdb_session_runtime_stats
+newdb_session_set_table
+newdb_session_where_plan_json
+newdb_sum
+newdb_version_string

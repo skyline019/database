@@ -1,8 +1,12 @@
 #include "cli/shell/dispatch/router/dispatch.h"
-#include "cli/modules/common/logging/logging.h"
 #include "cli/modules/where/executor/stats/table_stats.h"
-#include "cli/shell/state/shell_state.h"
+#include "cli/shell/state/shell_state_facade.h"
+#include "cli/shell/state/shell_state_owner.h"
+
+#include <newdb/schema.h>
+#include "cli/modules/txn/coordinator/txn_manager.h"
 #include "test_util.h"
+#include "shell_state_test_support.h"
 
 #include <gtest/gtest.h>
 
@@ -45,29 +49,31 @@ struct ScopedEnv {
 
 struct DemoHarness {
     fs::path dir;
-    ShellState st;
+    ShellStateOwner own;
+    ShellStateFacade f;
 
-    explicit DemoHarness(const std::string& prefix) {
+    explicit DemoHarness(const std::string& prefix)
+        : own(make_shell_state_for_test()), f(own.shell()) {
         dir = newdb::test::unique_temp_subdir(prefix);
         fs::create_directories(dir);
-        st.data_dir = dir.string();
-        st.log_file_path = (dir / "demo_log.bin").string();
-        st.session.table_name.clear();
-        st.session.data_path.clear();
-        st.session.schema = newdb::TableSchema{};
-        logging_bind_shell(&st);
-        st.txn.set_workspace_root(st.data_dir);
+        f.data_dir() = dir.string();
+        f.log_file_path() = (dir / "demo_log.bin").string();
+        f.table_name().clear();
+        f.data_path().clear();
+        f.schema() = newdb::TableSchema{};
+        f.bind_logging();
+        f.txn().set_workspace_root(f.data_dir());
     }
 
     std::string run(const std::string& cmd) {
         std::error_code ec;
-        const std::uintmax_t before = fs::file_size(st.log_file_path, ec);
+        const std::uintmax_t before = fs::file_size(f.log_file_path(), ec);
         const std::uintmax_t start = ec ? 0 : before;
 
-        const bool ok = process_command_line(st, cmd.c_str());
+        const bool ok = process_command_line(own.shell(), cmd.c_str());
         EXPECT_TRUE(ok) << "cmd=" << cmd;
 
-        std::ifstream in(st.log_file_path, std::ios::binary);
+        std::ifstream in(f.log_file_path(), std::ios::binary);
         if (!in.good()) {
             return {};
         }
@@ -97,7 +103,7 @@ TEST(ShowPlanTableStatsStaleShell, ShowPlanJsonMarksStaleWhenPersistedStatsFileM
     const std::string first = h.run("SHOW PLAN(name, =, Alice)");
     EXPECT_NE(first.find("\"table_stats_stale\":false"), std::string::npos) << first;
 
-    const std::string data_file = resolve_table_file(h.st, "sps.bin");
+    const std::string data_file = h.f.resolve_table_file("sps.bin");
     const std::string stats_path = table_stats_file_path_for_data_file(data_file);
     {
         std::ofstream wreck(stats_path, std::ios::out | std::ios::trunc);

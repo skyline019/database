@@ -1,6 +1,7 @@
 #include <waterfall/config.h>
 
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/common/util/constants.h"
@@ -83,80 +84,52 @@ bool detect_wait_cycle(const std::uint64_t start, std::uint64_t& cycle_owner) {
     }
 }
 
-TxnCoordinator::TxnCoordinator() {
-    // Staged write timing sampling knob (lower => more detail, higher => less overhead).
-    // Default to 8 so pressure tests will have enough samples for p95 attribution.
-    std::uint64_t every_n = 8;
-    if (const char* raw = std::getenv("NEWDB_WRITE_TIMING_EVERY_N")) {
-        try {
-            const std::uint64_t v = static_cast<std::uint64_t>(std::stoull(raw));
-            if (v > 0) every_n = v;
-        } catch (...) {
-        }
-    }
-    m_write_timing_sample_every_n.store(every_n, std::memory_order_relaxed);
-}
-
-
-TxnCoordinator::~TxnCoordinator() {
-    stopVacuumThread();
-    clearWriteIntents();
-    std::vector<std::string> locked_copy;
-    {
-        std::lock_guard<std::mutex> lk(m_lock_mutex);
-        locked_copy = m_locked_files;
-    }
-    for (const auto& f : locked_copy) {
-        (void)releaseLock(f);
-    }
-}
-
 // ========== ???? ==========
 
 
 Result<bool> TxnCoordinator::begin(const std::string& table_name) {
-    std::lock_guard<std::mutex> lk(m_txn_mutex);
+    std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
     
-    if (m_state.load() == TxnState::Active) {
+    if (st_->m_state.load() == TxnState::Active) {
         return Result<bool>::Err("??????");
     }
     
     // ?????????ID????????????begin ??????
     const std::int64_t next_txn_id = g_txn_id_seed.fetch_add(1, std::memory_order_relaxed) + 1;
-    m_txn_id.store(next_txn_id, std::memory_order_relaxed);
+    st_->m_txn_id.store(next_txn_id, std::memory_order_relaxed);
     
-    m_state.store(TxnState::Active);
-    m_txn_op_seq.store(0, std::memory_order_relaxed);
-    m_txn_records.clear();
-    m_savepoints.clear();
-    m_savepoints_lsn.clear();
-    m_last_undo_lsn = 0;
-    m_reserved_write_keys.clear();
+    st_->m_state.store(TxnState::Active);
+    st_->m_txn_op_seq.store(0, std::memory_order_relaxed);
+    st_->m_txn_records.clear();
+    st_->m_savepoints.clear();
+    st_->m_savepoints_lsn.clear();
+    st_->m_last_undo_lsn = 0;
+    st_->m_reserved_write_keys.clear();
     {
         std::lock_guard<std::mutex> wait_lk(g_write_intent_mu);
         g_txn_wait_for_owner.erase(static_cast<std::uint64_t>(next_txn_id));
     }
     
-    m_active_table = table_name;
+    st_->m_active_table = table_name;
     const std::string bin_file = resolveDataFilePath(table_name);
     auto lockResult = acquireLock(bin_file);
     if (lockResult.isErr()) {
-        m_txn_begin_lock_conflict_count.fetch_add(1, std::memory_order_relaxed);
-        m_state.store(TxnState::None);
+        st_->m_txn_begin_lock_conflict_count.fetch_add(1, std::memory_order_relaxed);
+        st_->m_state.store(TxnState::None);
         return lockResult;
     }
     writeWAL("TXN_BEGIN", table_name, "", "", "");
     flushWAL();
     {
-        std::lock_guard<std::mutex> wlk(m_wal_mutex);
-        if (wal_) {
+        std::lock_guard<std::mutex> wlk(st_->m_wal_mutex);
+        if (st_->wal_) {
             if (txnIsolationLevel() == TxnIsolationLevel::Snapshot) {
-                m_txn_read_view_lsn.store(wal_->current_lsn(), std::memory_order_relaxed);
+                st_->m_txn_read_view_lsn.store(st_->wal_->current_lsn(), std::memory_order_relaxed);
             } else {
-                m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+                st_->m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
             }
         } else {
-            m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+            st_->m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
         }
     }
 
@@ -169,40 +142,40 @@ Result<bool> TxnCoordinator::commit() {
     std::string committed_table;
     bool should_trigger_vacuum = false;
     {
-        std::lock_guard<std::mutex> lk(m_txn_mutex);
+        std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
         
-        if (m_state.load() != TxnState::Active) {
+        if (st_->m_state.load() != TxnState::Active) {
             return Result<bool>::Err("??????");
         }
         
-        writeWAL("TXN_COMMIT", m_active_table, "", "", "");
-        m_wal_group_commit_pending_commits.fetch_add(1, std::memory_order_relaxed);
+        writeWAL("TXN_COMMIT", st_->m_active_table, "", "", "");
+        st_->m_wal_group_commit_pending_commits.fetch_add(1, std::memory_order_relaxed);
         flushWAL();
-        m_txn_commit_count.fetch_add(1, std::memory_order_relaxed);
+        st_->m_txn_commit_count.fetch_add(1, std::memory_order_relaxed);
         
         std::vector<std::string> locked_copy;
         {
-            std::lock_guard<std::mutex> lk2(m_lock_mutex);
-            locked_copy = m_locked_files;
+            std::lock_guard<std::mutex> lk2(st_->m_lock_mutex);
+            locked_copy = st_->m_locked_files;
         }
         for (const auto& f : locked_copy) {
             (void)releaseLock(f);
         }
         
-        committed_table = m_active_table;
-        m_state.store(TxnState::Committed);
-        m_txn_op_seq.store(0, std::memory_order_relaxed);
+        committed_table = st_->m_active_table;
+        st_->m_state.store(TxnState::Committed);
+        st_->m_txn_op_seq.store(0, std::memory_order_relaxed);
         clearWriteIntents();
-        m_txn_records.clear();
-        m_locked_files.clear();
-        m_active_table.clear();
-        m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+        st_->m_txn_records.clear();
+        st_->m_locked_files.clear();
+        st_->m_active_table.clear();
+        st_->m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
 
-        if (m_vacuum_running.load()) {
-            const std::size_t threshold = m_vacuum_ops_threshold.load();
-            const std::size_t count = m_vacuum_op_counter.load();
+        if (st_->m_vacuum_running.load()) {
+            const std::size_t threshold = st_->m_vacuum_ops_threshold.load();
+            const std::size_t count = st_->m_vacuum_op_counter.load();
             if (threshold > 0 && count >= threshold && !committed_table.empty()) {
-                m_vacuum_op_counter.store(0);
+                st_->m_vacuum_op_counter.store(0);
                 should_trigger_vacuum = true;
             }
         }
@@ -216,16 +189,16 @@ Result<bool> TxnCoordinator::commit() {
             std::chrono::steady_clock::now() - commit_start)
             .count());
     {
-        std::lock_guard<std::mutex> lk(m_samples_mu);
-        m_commit_latency_ms_samples.push_back(elapsed_ms);
-        if (m_commit_latency_ms_samples.size() > 256) {
-            m_commit_latency_ms_samples.erase(m_commit_latency_ms_samples.begin(),
-                                              m_commit_latency_ms_samples.begin() + 64);
+        std::lock_guard<std::mutex> lk(st_->m_samples_mu);
+        st_->m_commit_latency_ms_samples.push_back(elapsed_ms);
+        if (st_->m_commit_latency_ms_samples.size() > 256) {
+            st_->m_commit_latency_ms_samples.erase(st_->m_commit_latency_ms_samples.begin(),
+                                              st_->m_commit_latency_ms_samples.begin() + 64);
         }
     }
-    std::uint64_t old_max = m_txn_commit_max_ms.load(std::memory_order_relaxed);
+    std::uint64_t old_max = st_->m_txn_commit_max_ms.load(std::memory_order_relaxed);
     while (elapsed_ms > old_max &&
-           !m_txn_commit_max_ms.compare_exchange_weak(
+           !st_->m_txn_commit_max_ms.compare_exchange_weak(
                old_max, elapsed_ms, std::memory_order_relaxed, std::memory_order_relaxed)) {
     }
     return Result<bool>::Ok(true);
@@ -233,9 +206,9 @@ Result<bool> TxnCoordinator::commit() {
 
 
 Result<bool> TxnCoordinator::rollback() {
-    std::lock_guard<std::mutex> lk(m_txn_mutex);
+    std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
     
-    if (m_state.load() != TxnState::Active) {
+    if (st_->m_state.load() != TxnState::Active) {
         return Result<bool>::Err("??????");
     }
     
@@ -288,77 +261,77 @@ Result<bool> TxnCoordinator::rollback() {
     };
 
     // ??????????????
-    for (auto it = m_txn_records.rbegin(); it != m_txn_records.rend(); ++it) {
+    for (auto it = st_->m_txn_records.rbegin(); it != st_->m_txn_records.rend(); ++it) {
         append_undo_record(*it);
     }
     
-    writeWAL("TXN_ROLLBACK", m_active_table, "", "", "");
+    writeWAL("TXN_ROLLBACK", st_->m_active_table, "", "", "");
     flushWAL();
     
     std::vector<std::string> locked_copy;
     {
-        std::lock_guard<std::mutex> lk2(m_lock_mutex);
-        locked_copy = m_locked_files;
+        std::lock_guard<std::mutex> lk2(st_->m_lock_mutex);
+        locked_copy = st_->m_locked_files;
     }
     for (const auto& f : locked_copy) {
         (void)releaseLock(f);
     }
     
-    m_state.store(TxnState::RolledBack);
-    m_txn_op_seq.store(0, std::memory_order_relaxed);
-    m_savepoints.clear();
-    m_savepoints_lsn.clear();
-    m_last_undo_lsn = 0;
+    st_->m_state.store(TxnState::RolledBack);
+    st_->m_txn_op_seq.store(0, std::memory_order_relaxed);
+    st_->m_savepoints.clear();
+    st_->m_savepoints_lsn.clear();
+    st_->m_last_undo_lsn = 0;
     clearWriteIntents();
-    m_txn_records.clear();
-    m_locked_files.clear();
-    m_active_table.clear();
-    m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
+    st_->m_txn_records.clear();
+    st_->m_locked_files.clear();
+    st_->m_active_table.clear();
+    st_->m_txn_read_view_lsn.store(0, std::memory_order_relaxed);
 
     return Result<bool>::Ok(true);
 }
 
 Result<bool> TxnCoordinator::savepoint(const std::string& name) {
-    std::lock_guard<std::mutex> lk(m_txn_mutex);
-    if (m_state.load() != TxnState::Active) {
+    std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
+    if (st_->m_state.load() != TxnState::Active) {
         return Result<bool>::Err("no active transaction");
     }
     if (name.empty()) {
         return Result<bool>::Err("empty savepoint");
     }
-    m_savepoints[name] = m_txn_op_seq.load(std::memory_order_relaxed);
-    m_savepoints_lsn[name] = m_last_undo_lsn;
-    writeWAL("SAVEPOINT_SET", m_active_table, name, "", "");
+    st_->m_savepoints[name] = st_->m_txn_op_seq.load(std::memory_order_relaxed);
+    st_->m_savepoints_lsn[name] = st_->m_last_undo_lsn;
+    writeWAL("SAVEPOINT_SET", st_->m_active_table, name, "", "");
     return Result<bool>::Ok(true);
 }
 
 Result<bool> TxnCoordinator::releaseSavepoint(const std::string& name) {
-    std::lock_guard<std::mutex> lk(m_txn_mutex);
-    if (m_state.load() != TxnState::Active) {
+    std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
+    if (st_->m_state.load() != TxnState::Active) {
         return Result<bool>::Err("no active transaction");
     }
-    const auto it = m_savepoints.find(name);
-    if (it == m_savepoints.end()) {
+    const auto it = st_->m_savepoints.find(name);
+    if (it == st_->m_savepoints.end()) {
         return Result<bool>::Err("savepoint not found");
     }
-    m_savepoints.erase(it);
-    m_savepoints_lsn.erase(name);
+    st_->m_savepoints.erase(it);
+    st_->m_savepoints_lsn.erase(name);
     return Result<bool>::Ok(true);
 }
 
 Result<bool> TxnCoordinator::rollbackToSavepoint(const std::string& name) {
-    std::lock_guard<std::mutex> lk(m_txn_mutex);
-    if (m_state.load() != TxnState::Active) {
+    std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
+    if (st_->m_state.load() != TxnState::Active) {
         return Result<bool>::Err("no active transaction");
     }
-    const auto it_sp = m_savepoints.find(name);
-    if (it_sp == m_savepoints.end()) {
+    const auto it_sp = st_->m_savepoints.find(name);
+    if (it_sp == st_->m_savepoints.end()) {
         return Result<bool>::Err("savepoint not found");
     }
     const std::uint64_t target_op_seq = it_sp->second;
     const std::uint64_t target_lsn = [&]() -> std::uint64_t {
-        const auto it2 = m_savepoints_lsn.find(name);
-        if (it2 == m_savepoints_lsn.end()) return 0;
+        const auto it2 = st_->m_savepoints_lsn.find(name);
+        if (it2 == st_->m_savepoints_lsn.end()) return 0;
         return it2->second;
     }();
     auto parse_attrs = [](const std::string& packed) {
@@ -378,7 +351,7 @@ Result<bool> TxnCoordinator::rollbackToSavepoint(const std::string& name) {
         return attrs;
     };
     std::uint64_t undone = 0;
-    for (auto it = m_txn_records.rbegin(); it != m_txn_records.rend(); ++it) {
+    for (auto it = st_->m_txn_records.rbegin(); it != st_->m_txn_records.rend(); ++it) {
         if (it->op_seq <= target_op_seq) break;
         const std::string data_file = resolveDataFilePath(it->table_name);
         try {
@@ -399,18 +372,18 @@ Result<bool> TxnCoordinator::rollbackToSavepoint(const std::string& name) {
             }
             ++undone;
         } catch (...) {
-            m_undo_chain_fallback_count.fetch_add(1, std::memory_order_relaxed);
+            st_->m_undo_chain_fallback_count.fetch_add(1, std::memory_order_relaxed);
         }
     }
-    m_rollback_partial_ops.fetch_add(undone, std::memory_order_relaxed);
-    m_rollback_savepoint_count.fetch_add(1, std::memory_order_relaxed);
-    while (!m_txn_records.empty() && m_txn_records.back().op_seq > target_op_seq) {
-        m_txn_records.pop_back();
+    st_->m_rollback_partial_ops.fetch_add(undone, std::memory_order_relaxed);
+    st_->m_rollback_savepoint_count.fetch_add(1, std::memory_order_relaxed);
+    while (!st_->m_txn_records.empty() && st_->m_txn_records.back().op_seq > target_op_seq) {
+        st_->m_txn_records.pop_back();
     }
-    m_txn_op_seq.store(target_op_seq, std::memory_order_relaxed);
-    m_last_undo_lsn = target_lsn;
-    writeWAL("TXN_ABORT_PARTIAL", m_active_table, std::to_string(target_lsn), "", "");
-    writeWAL("SAVEPOINT_ROLLBACK", m_active_table, name, "", "");
+    st_->m_txn_op_seq.store(target_op_seq, std::memory_order_relaxed);
+    st_->m_last_undo_lsn = target_lsn;
+    writeWAL("TXN_ABORT_PARTIAL", st_->m_active_table, std::to_string(target_lsn), "", "");
+    writeWAL("SAVEPOINT_ROLLBACK", st_->m_active_table, name, "", "");
     flushWAL();
     return Result<bool>::Ok(true);
 }
@@ -420,28 +393,28 @@ Result<bool> TxnCoordinator::rollbackToSavepoint(const std::string& name) {
 
 void TxnCoordinator::recordOperation(const std::string& operation, const std::string& table,
                                    const std::string& key, const std::string& old_val, const std::string& new_val) {
-    if (m_state.load() != TxnState::Active) {
+    if (st_->m_state.load() != TxnState::Active) {
         return;  // ????????
     }
     
     TxnRecord rec;
-    rec.txn_id = m_txn_id.load();
-    rec.state = m_state.load();
+    rec.txn_id = st_->m_txn_id.load();
+    rec.state = st_->m_state.load();
     rec.table_name = table;
     rec.operation = operation;
     rec.key = key;
     rec.old_value = old_val;
     rec.new_value = new_val;
     rec.timestamp = std::time(nullptr);
-    rec.op_seq = m_txn_op_seq.fetch_add(1, std::memory_order_relaxed) + 1;
+    rec.op_seq = st_->m_txn_op_seq.fetch_add(1, std::memory_order_relaxed) + 1;
     
-    m_txn_records.push_back(rec);
+    st_->m_txn_records.push_back(rec);
     
     // ???? WAL
     writeWAL(operation, table, key, old_val, new_val);
 
-    if (m_vacuum_running.load()) {
-        (void)m_vacuum_op_counter.fetch_add(1);
+    if (st_->m_vacuum_running.load()) {
+        (void)st_->m_vacuum_op_counter.fetch_add(1);
     }
 }
 

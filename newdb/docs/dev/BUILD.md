@@ -2,6 +2,36 @@
 
 本文描述 `newdb/CMakeLists.txt` 常用配置、MSVC 静态 CRT（`/MT`）、MinGW 全量链接与测试命令。
 
+## C API 产物矩阵（slim / plugin / full）
+
+- **默认（full embed）**：`-DNEWDB_BUILD_SHARED=ON`、`-DNEWDB_SHARED_SLIM=OFF`、且未开 plugin 时，`newdb_shared` 静态链入 `newdb_capi_adapter`（dispatch / bridge / txn / WHERE / sidecar；不含交互 REPL 单独 TU）。完整 C API，**不宣称**与 CLI 代码静态解耦。参见 [MODULE_BOUNDARIES.md](../architecture/MODULE_BOUNDARIES.md) §Shared library modes。
+- **瘦构建（slim）**：`-DNEWDB_SHARED_SLIM=ON` 时，共享库仅链 `newdb_core` 与 `engine/src/api/c/c_api_slim.cpp`（桩会话 API；不链 `newdb_capi_adapter`）。输出名仍为 `newdb`（Windows）或与平台一致的 `libnewdb`。
+- **Plugin（运行时 CLI backend）**：`-DNEWDB_C_API_PLUGIN_BACKEND=ON` 且 `-DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON` 时，`newdb_shared` **仅**链 `newdb_core`，会话侧能力由运行时加载的 `newdb_cli_backend` 提供（`NEWDB_CLI_BACKEND_PATH`）。详见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)。
+- **选型**：只要引擎校验 / ABI → slim；要与 GUI/脚本共享进程且不愿静态拉入 CLI → plugin；要开箱即用单 DLL → full embed。
+- **回归**：开启 `-DNEWDB_BUILD_TESTS=ON` 时会构建 `newdb_capi_slim_tests`（编译定义 `NEWDB_C_API_SLIM=1`），在进程内覆盖瘦 C API 的版本、`newdb_check_schema_file`、execute 错误文案与 runtime stats 桩 JSON。
+- **CMake Presets**（仓库 [`CMakePresets.json`](CMakePresets.json)）：`full-shared`（默认 embed）、`slim-shared`（`NEWDB_SHARED_SLIM=ON`）、`plugin-shared`（`NEWDB_C_API_PLUGIN_BACKEND=ON` + `NEWDB_BUILD_CLI_BACKEND_PLUGIN=ON`）。示例：`cmake --preset full-shared`，`cmake --build --preset full-shared-rel`；plugin：`cmake --preset plugin-shared`，`cmake --build --preset plugin-shared-rel`，运行前设置 **`NEWDB_CLI_BACKEND_PATH`**（见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)）。
+- **Windows + gtest DLL**：`newdb_capi_slim_tests` 与 `newdb_tests` 一样在 `NEWDB_GTEST_BUILD_SHARED_DLL=ON` 时 POST_BUILD 复制运行时 DLL 到可执行文件目录，便于 `ctest -R CApiSlim` 无需手改 `PATH`。从 Visual Studio「测试资源管理器」或直接在 IDE 里运行 `newdb_capi_slim_tests.exe` 时，请确认 exe 输出目录下已有复制的 `gtest*.dll`（与 POST_BUILD 一致），或将该目录加入 PATH；命令行回归仍以 **`ctest`** 为准。
+- **为何不在 CMake 里给 `gtest_discover_tests` 配统一 `ENVIRONMENT PATH=`**：discovered 测试条目与 `newdb_capi_slim_tests` 输出目录在多配置生成器 + GTest 发现模式下不一一对应；强行注入 `'PATH=' $<TARGET_FILE_DIR:...>` 仍可能在 IDE/CTest 混用场景遗漏。当前以 POST_BUILD 复制 DLL 与在上文 PATH 说明为准。
+- **GUI / 校验脚本**：`newdb/scripts/validate` 为运行时契约与校验脚本的 **canonical**；`rust_gui/scripts/validate` 与 `rust_gui/src-tauri/resources/scripts/validate` 为打包镜像，CI 通过 `scripts/validate/check_rust_gui_validate_mirror.py` 对齐。[`rust_gui/src/commandPolicy.ts`](../../rust_gui/src/commandPolicy.ts) 仅在 GUI 源码树维护一份，无打包副本时不要求镜像门禁。
+
+## CMake shell 积木目标（OBJECT）
+
+CLI/shell 按编译单元拆成若干 **`newdb_shell_*` OBJECT 库**，在 **`newdb_capi_adapter`** 里用 `$<TARGET_OBJECTS:…>` 聚合成静态适配层，再由默认 **`newdb_shared`** 链入（plugin/slim 模式除外）。名称与依赖装配以 **[MODULE_BOUNDARIES.md](../architecture/MODULE_BOUNDARIES.md)** 的 **Release assembly gates** 与 Mermaid 图为准。
+
+| CMake 目标 | 职责（一句） |
+|------------|----------------|
+| `newdb_shell_state` | Shell 状态、Facade、C API 桥与 runtime stats 等「脊骨」TU |
+| `newdb_shell_bootstrap_capi` | 非 REPL 引导、mdb 脚本、diag、export 等 C API 路径 |
+| `newdb_shell_bootstrap_repl` | 交互式 REPL（`demo_shell.cc`）；仅叠进 **`newdb_shell`**，不进 embed 适配层 |
+| `newdb_shell_dispatch` | `process_command_line`、路由与各 handler / support / services |
+| `newdb_shell_common` | logging、utils、table_view、import 等跨模块基础 |
+| `newdb_shell_catalog` | schema catalog |
+| `newdb_shell_where` | WHERE 解析与执行计划 / 统计 |
+| `newdb_shell_txn` | 事务协调器与各子服务 |
+| `newdb_shell_sidecar` | 索引 sidecar、可见性、存储健康等 |
+
+**Preset**：`CMakePresets.json` 中的 `full-shared`（默认 embed）、`slim-shared`、`plugin-shared` 与上文 C API 矩阵一致；plugin 运行前需设置 **`NEWDB_CLI_BACKEND_PATH`**（见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)）。
+
 ## 通用
 
 在仓库内 `newdb` 目录为工程根：
@@ -41,6 +71,7 @@ ctest --test-dir build -C RelWithDebInfo --output-on-failure `
 
 ```powershell
 python scripts/validate/validate_runtime_stats.py path\to\runtime_snapshot.jsonl
+# 可选分层（默认仍为完整 required_stats_keys）：--stats-keys-tier engine | cli_embed
 ```
 
 路线图与阶段说明见 [`OPTIMIZATION_PLAN_2026.md`](../roadmap/OPTIMIZATION_PLAN_2026.md)；性能与 Bench 门见 [`PERF_AND_CI_BUDGETS.md`](../ci/PERF_AND_CI_BUDGETS.md)（含 **PR / Nightly / Release** 矩阵、**Baseline JSONL 归档契约（v2）**（`capture_baseline.py --emit-archive-contract` / `--write-archive-manifest`）与 **`--max-wal-recovery-last-elapsed-ms`** 建议起点）。
@@ -121,7 +152,8 @@ ctest --test-dir "e:/db/DB/newdb/build-mingw" --output-on-failure
 
 ## 产品与 ABI（规划中）
 
-- **瘦 C API 动态库**：未来可能提供仅依赖 `newdb_core` 的共享库变体；当前 `newdb_shared` 仍通过 `newdb_demo_lib` 编排交互式 demo/CLI 能力。
+- **默认 C ABI 动态库**：`newdb_shared` 链接 **`newdb_core` + `newdb_capi_adapter`**（CLI/dispatch 闭包，不含交互式 REPL TU）。`newdb_demo` 链 **`newdb_shell`**（`newdb_demo_lib` 为其 ALIAS，`newdb_shell` = adapter + [`demo_shell.cc`](../../cli/shell/repl/demo_shell.cc)）。
+- **瘦 C ABI（可选）**：`-DNEWDB_SHARED_SLIM=ON` 时，`newdb_shared` **仅**链接 `newdb_core`，使用 [`c_api_slim.cpp`](../../engine/src/api/c/c_api_slim.cpp)；会话类 API（`execute`、完整 runtime stats、`where_plan_json` 等）为桩实现或受限行为，适合嵌入方只需版本/ABI/`newdb_check_schema_file` 等、且希望减小链接闭包；完整功能需默认 `OFF` 或另链 `newdb_capi_adapter`/`newdb_shell`/子进程 `newdb_demo`。
 
 ## 其他常用选项
 
@@ -129,6 +161,7 @@ ctest --test-dir "e:/db/DB/newdb/build-mingw" --output-on-failure
 |------|------|
 | `NEWDB_BUILD_TESTS` | 是否构建 `newdb_tests` 并注册 CTest（默认 `ON`） |
 | `NEWDB_BUILD_SHARED` | 是否构建 C ABI 共享库 `newdb`（`newdb_shared`；默认 `ON`） |
+| `NEWDB_SHARED_SLIM` | 仅 `newdb_core` + 瘦 C API，不链接 `newdb_capi_adapter`（默认 `OFF`；见上文） |
 | `NEWDB_BUILD_GUI` | 是否构建 Qt `newdb_gui`（默认 `OFF`） |
 | `NEWDB_ENABLE_COVERAGE` | GCC/Clang 覆盖率（默认 `OFF`） |
 

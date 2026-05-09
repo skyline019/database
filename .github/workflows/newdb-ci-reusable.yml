@@ -217,6 +217,11 @@ jobs:
           p.write_text("\n".join(json.dumps(x) for x in rows) + "\n", encoding="utf-8")
           PY
           python3 newdb/scripts/validate/validate_runtime_stats.py newdb/scripts/results/ci_sample_runtime_stats.jsonl
+          python3 newdb/scripts/validate/validate_runtime_stats.py --stats-keys-tier engine newdb/scripts/results/ci_sample_runtime_stats.jsonl
+          python3 newdb/scripts/validate/validate_runtime_stats.py --stats-keys-tier cli_embed newdb/scripts/results/ci_sample_runtime_stats.jsonl
+          python3 newdb/scripts/validate/check_runtime_stats_contract_parity.py
+          python3 newdb/scripts/validate/check_gui_runtime_stats_keys.py
+          python3 newdb/scripts/validate/check_rust_gui_validate_mirror.py
 
   linux-gcc:
     runs-on: ubuntu-latest
@@ -228,6 +233,15 @@ jobs:
           sudo apt-get update
           # libcrc32c-dev: absent on Ubuntu 24.04+ (noble); CRC32C is optional in newdb/CMakeLists.txt
           sudo apt-get install -y cmake ninja-build g++ pkg-config python3
+
+      - name: ShellState direct-include budget (shell_state.h)
+        run: python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+
+      - name: Bridge/dispatch include budget
+        run: >
+          python3 newdb/tools/count_bridge_dispatch_includes.py
+          --fail-if-bridge-above 5
+          --fail-if-dispatch-above 10
 
       - name: Configure (clean build dir)
         run: cmake -S newdb -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
@@ -260,9 +274,10 @@ jobs:
           --min-lsm-compaction-bytes-amp-efficiency 0.2
 
       - name: Validate runtime stats fixture (contract)
-        run: >
-          python3 newdb/scripts/validate/validate_runtime_stats.py
-          newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+        run: |
+          python3 newdb/scripts/validate/validate_runtime_stats.py newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          python3 newdb/scripts/validate/validate_runtime_stats.py --stats-keys-tier engine newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
+          python3 newdb/scripts/validate/validate_runtime_stats.py --stats-keys-tier cli_embed newdb/scripts/ci/fixtures/runtime_stats_bench_gate_minimal.jsonl
 
   # Release-oriented gate: same contract as PR linux-gcc but Release build + `ctest -L newdb` subset.
   linux-release-gate:
@@ -318,6 +333,54 @@ jobs:
           --min-page-cache-hit-ratio 0.0
           --max-memory-budget-reject-delta 1000000000
           --max-table-storage-health-fragmentation-ratio 0.95
+
+  # `newdb_shared` without `newdb_shell` (see docs/dev/CI_SLIM_FULL_MATRIX.md).
+  linux-release-slim-shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config python3
+
+      - name: Configure (Release + NEWDB_SHARED_SLIM)
+        run: >
+          cmake -S newdb -B build-slim -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DNEWDB_BUILD_SHARED=ON -DNEWDB_SHARED_SLIM=ON
+
+      - name: Build
+        run: cmake --build build-slim --parallel
+
+      - name: Test (newdb label)
+        run: ctest --test-dir build-slim -L newdb --output-on-failure
+
+  # Dynamic CLI backend: shared `newdb` loads `newdb_cli_backend` via NEWDB_CLI_BACKEND_PATH (see docs/dev/C_API_PLUGIN_BACKEND.md).
+  linux-c-api-plugin-backend-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config python3
+
+      - name: Configure (NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN)
+        run: >
+          cmake -S newdb -B build-plugin -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DNEWDB_C_API_PLUGIN_BACKEND=ON
+          -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON
+          -DNEWDB_BUILD_SHARED=ON
+
+      - name: Build
+        run: cmake --build build-plugin --parallel
+
+      - name: Plugin backend smoke (exports + dlopen)
+        run: >
+          ctest --test-dir build-plugin --output-on-failure
+          -R CliBackendPluginSmoke
 
   # Second-line gate: JSONL contract + storage/WAL recovery ceilings (see docs/ci/PERF_AND_CI_BUDGETS.md §3 / §4).
   linux-bench-gate-runtime-contract:
@@ -489,3 +552,27 @@ jobs:
           -BuildDir build_ci_windows
           -Generator "Visual Studio 17 2022"
           -BuildConfig RelWithDebInfo
+
+  # Same plugin-mode smoke as linux-c-api-plugin-backend-smoke (DLL load + exported symbols).
+  windows-c-api-plugin-backend-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN)
+        shell: pwsh
+        run: >
+          cmake -S newdb -B build-plugin-win -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_BUILD_TYPE=Release
+          -DNEWDB_C_API_PLUGIN_BACKEND=ON
+          -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON
+          -DNEWDB_BUILD_SHARED=ON
+          -DNEWDB_BUILD_TESTS=ON
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build-plugin-win --config Release --parallel
+
+      - name: Plugin backend smoke (exports + LoadLibrary)
+        shell: pwsh
+        run: ctest --test-dir build-plugin-win -C Release --output-on-failure -R CliBackendPluginSmoke

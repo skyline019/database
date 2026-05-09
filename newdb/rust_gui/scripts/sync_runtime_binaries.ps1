@@ -1,3 +1,7 @@
+# Syncs CMake-built EXEs/DLLs into `src-tauri/bin` for Tauri bundle + dev.
+# Optional: when the tree was built with NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN,
+# copies `newdb_cli_backend.dll` (from `newdb_cli_backend.dll` or MinGW `libnewdb_cli_backend.dll`) so the
+# GUI can auto-set NEWDB_CLI_BACKEND_PATH beside `libnewdb.dll`.
 param(
     # Default: MinGW / single-config tree next to `rust_gui/` (i.e. `newdb/build-mingw`).
     [string]$BuildDir = "..\build-mingw",
@@ -128,6 +132,15 @@ foreach ($name in $optional) {
     } else {
         Write-Host ("[SYNC][WARN] optional MinGW runtime not under build tree: {0} (OK if fully static-linked)" -f $name)
     }
+}
+
+$cliPlugin = Resolve-BuildArtifactPath -Root $BuildDir -LeafNames @("newdb_cli_backend.dll", "libnewdb_cli_backend.dll")
+if ($cliPlugin) {
+    $destCli = Join-Path $OutDir "newdb_cli_backend.dll"
+    Copy-Item -LiteralPath $cliPlugin -Destination $destCli -Force
+    Write-Host ("[SYNC] newdb_cli_backend.dll <= {0}" -f $cliPlugin)
+} else {
+    Write-Host "[SYNC][SKIP] newdb_cli_backend.dll (plugin backend) not in build tree — OK for default full_embed builds"
 }
 
 Write-Host ("[SYNC] output dir: {0}" -f $OutDir)

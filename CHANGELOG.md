@@ -10,6 +10,18 @@
 
 ## [未发布] - Unreleased
 
+### 相对 [GitHub `origin/main`](https://github.com/skyline019/database)（本批工作区）
+
+> 统计：`git diff origin/main --shortstat` 约 **98 files / +4722 −4467**（以实际推送为准）。下列为按模块归纳，便于与远端树 diff 对照。
+
+- **引擎 / C API**：`reorder_heap_ids_dense` 可选输出 **旧 id → 新 id** 映射；`CONFIRM_REORDER` 成功重写时由 CLI 打印 **`[REORDER_MAP_JSON]`** 供 GUI 摄入；会话句柄、C API 插件后端头文件、JSON 转义、runtime stats 快照等增量（见 `newdb/engine/`、`c_api*.cpp`）。
+- **CLI / Shell**：`workspace_handler` 与重排日志衔接；事务协调器、WAL/恢复、WHERE **plan_impl** 拆分为多编译单元与头文件（`plan_impl_support`、`plan_query_index`、`plan_scan_estimate`、`where_plan_catalog` 等）；**shell_state** 分层与 facade/ops 拆分；**crc32c** 从 `engine` 迁至 **waterfall**（`crc32c_compat`），引擎内删除重复实现。
+- **Rust GUI（Tauri）**：**撤销/重做** — 重做栈在新编辑下**保留**（不再因分叉清空）；持久化栈 **v4**（去掉 suspended/fork 字段；加载旧 v3 时 **legacy 暂存并入 redo**）；**id 重映射链** 在 undo/redo 执行前改写命令行；**整数 id 规范化**（`03`/`3`）、`DELETEPK`/`FINDPK`、缺表名时回退 **当前 USE**、多 `tables_touched` 回退尝试；事务内可逆操作**独立入栈**。**UI**：撤销/重做 **同区标签 + 淡出切换**；**USE 状态条**；表标签点击 **同步 USE**（含再次点击当前标签刷新）。`sync_runtime_binaries` / `build_tauri_plugin_bundle`、校验脚本镜像等。
+- **前端（Vue）**：`App.vue` / `styles.css` / `commandPolicy` 等与上述行为一致；网格 id 与逆向推断 **数值等价** 匹配。
+- **构建 / CI / 脚本**：根与 `newdb` 的 **GitHub Actions**、**CMakePresets**（如 `plugin-shared`）、`ci_bench_gate` / `sync_validate_scripts`、runtime stats **契约与 GUI 键** 校验脚本及文档补充。
+- **测试**：`test_page_io`（重排映射）、`gtest` / C API / shell 相关用例更新；新增/调整若干 **shell_state**、**c_api_slim**、插件冒烟等测试与支撑代码。
+- **文档**：`PROJECT_DATAFLOW_WHOLE`、`MODULE_BOUNDARIES`、`BUILD`、`RELEASE_PUBLISHING`、roadmap 与 **dev/** 下多篇新稿（C API 分层、shell 分层、CI 矩阵等）。
+
 ### 文档
 
 - 根目录 `readme.md` / `README.en.md` 改为 [`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md) 的截断版：仅保留仓库顶层结构与整体数据流（Mermaid），细节仍见原文。

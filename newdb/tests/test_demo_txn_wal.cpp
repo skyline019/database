@@ -1,6 +1,7 @@
 #include "cli/modules/txn/coordinator/txn_manager.h"
 
 #include <newdb/page_io.h>
+#include <newdb/wal_sync_mode.h>
 #include <newdb/wal_manager.h>
 
 #include "test_util.h"
@@ -63,6 +64,9 @@ bool run_wal_crash_point_and_expect_failure(const std::string& point) {
     if (!wm.open().ok) {
         return false;
     }
+    // Default WAL sync is Full (fsync per flush). Under parallel `ctest`, many tests flushing
+    // concurrently can push this matrix past CI timeouts; injection points still hit fflush/write/rotate.
+    wm.set_sync_mode(newdb::WalSyncMode::Off);
     wm.set_segment_max_bytes(64); // ensure rotate path is reachable in matrix
 
     set_env_value("NEWDB_WAL_CRASH_POINT", point.c_str());
@@ -363,6 +367,7 @@ TEST(DemoTxnWal, WalCrashInjectionPointsReturnFailure) {
     std::filesystem::create_directories(dir);
     newdb::WalManager wm("demodb", dir.string());
     ASSERT_TRUE(wm.open().ok);
+    wm.set_sync_mode(newdb::WalSyncMode::Off);
     set_env_value("NEWDB_WAL_CRASH_POINT", "commit_before_write");
     newdb::Row after;
     after.id = 3;

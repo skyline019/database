@@ -7,6 +7,7 @@ This document defines the second-stage module boundaries for `newdb`.
 - `cli/app` -> `cli/shell/*` -> `cli/modules/*` -> `engine/include/newdb/*`
 - `engine/src/*` can depend on `engine/include/newdb/*` and other engine implementation units.
 - `cli/*` must not include engine private implementation headers.
+- **`waterfall/`** provides page/CRC utilities (`crc32c_compat` when system `libcrc32c` is absent); **`newdb_core`** links **`waterfall`** as a **PIC-enabled** static archive so Linux shared libraries (`libnewdb.so`, `libnewdb_cli_backend.so`) link cleanly.
 
 ## CLI Submodules
 
@@ -19,12 +20,24 @@ This document defines the second-stage module boundaries for `newdb`.
   - `cli/shell/dispatch/support`: parsing, validation, and hot-index glue used by handlers.
   - `cli/shell/dispatch/services`: background or cross-cutting dispatch services (lsm-lite, sidecar invalidation).
   - `cli/shell/dispatch/shared`: shared declarations used across dispatch units (e.g. `dispatch_internal.h`).
-- `cli/shell/state`: long-lived shell/session state and state helpers.
+- `cli/shell/state`: long-lived shell/session state and state helpers. **Implementation split** (compile-time decoupling, still one aggregate root):
+  - Public aggregate: `shell_state.h` (`ShellState` forward API + accessors).
+  - **pimpl**: `shell_state_impl.h` + `shell_state.cc` (fields / `Session` ownership).
+  - **Facade**: `shell_state_facade.{h,cc}` for read-oriented helpers without pulling the full aggregate header into every TU.
+  - **Ops**: `shell_state_ops.{h,cc}` for batch/bootstrap paths that used to bloat `shell_state.cc`.
+  - **Owner**: `shell_state_owner.h` for embedders (`demo_main.cc` avoids including `shell_state.h` directly).
+  - Include discipline / Wave notes: [`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md).
 - `cli/shell/diag`: diagnostic and verbose output.
 
 - `cli/modules/common/logging|util|view`: cross-cutting logging, small utilities, and table preview output.
 - `cli/modules/where/parser`: where/agg parser and parse helpers.
-- `cli/modules/where/executor`: where evaluation and aggregation execution.
+- `cli/modules/where/executor`: where evaluation and aggregation execution. **Planner TU split** under `executor/plan/`:
+  - `plan_impl.cc` — main query planning entrypoints.
+  - `plan_impl_support.{h,cc}` — shared helpers used by the planner.
+  - `plan_query_index.cc` — index/sidecar-aware planning slices.
+  - `plan_scan_estimate.{h,cc}` — scan row estimates / budget hints.
+  - `where_plan_catalog.{h,cc}` — catalog-facing plan metadata.
+  - Internal headers: `plan_impl_detail.h`, `plan_impl_internals.h` (keep cross-TU coupling narrow).
 - `cli/modules/txn/coordinator`: transaction coordinator and state machine.
 - `cli/modules/sidecar/eq|covering|page|visibility|common`: sidecar implementations by access pattern.
 

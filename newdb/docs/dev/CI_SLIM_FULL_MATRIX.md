@@ -51,4 +51,6 @@ On Windows MSVC, use `--config Release` with both `cmake --build` and `ctest -C 
 
 Workflow [`.github/workflows/newdb-ci-reusable.yml`](../../../.github/workflows/newdb-ci-reusable.yml): **`linux-release-slim-shared`** configures `-DNEWDB_SHARED_SLIM=ON` and runs `newdb`-labeled tests on the slim target; **`linux-c-api-plugin-backend-smoke`** and **`windows-c-api-plugin-backend-smoke`** configure `-DNEWDB_C_API_PLUGIN_BACKEND=ON -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON` and run `CliBackendPluginSmoke` (see [`C_API_PLUGIN_BACKEND.md`](C_API_PLUGIN_BACKEND.md)). Full Linux GCC / release gates remain the primary matrix.
 
+`DemoTxnWal.WalCrashInjection*`（含 strict matrix）在打开 WAL 后将 **`WalSyncMode::Off`**：并行 `ctest` 下默认 **Full** 同步会对 **fsync** 形成风暴，易在共享_runner 上触发超时；关闭 durable sync 仍覆盖注入点与 **`fflush`/write/rotate** 语义。
+
 Cross-reference: [`ENGINE_SESSION_HANDLE.md`](ENGINE_SESSION_HANDLE.md), [`CORE_SHELL_INCLUDE_BOUNDARY.md`](CORE_SHELL_INCLUDE_BOUNDARY.md).

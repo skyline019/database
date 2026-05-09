@@ -469,6 +469,8 @@ struct Status {
   \item \textbf{读路径预算}：引擎侧可选页缓存与内存预算（环境变量开关），降低重复解码与 sidecar 加载成本。
   \item \textbf{查询与存储可观测性}：\texttt{where} 路径集成表级统计（\texttt{*.tablestats}、\texttt{SHOW PLAN} JSON）；\texttt{table\_storage\_health} 与 \texttt{SHOW TUNING JSON} 中的存储健康字段形成运维闭环。
   \item \textbf{CLI 分发结构}：\fpath{cli/shell/dispatch/} 拆分为 \texttt{router/}（入口与 phase-2 前缀快路径）、\texttt{registry/}（命令表与快照）、\texttt{handlers/}、\texttt{support/}、\texttt{services/}、\texttt{shared/}，降低单文件膨胀风险。
+  \item \textbf{ShellState / WHERE plan 源码解耦（非 GUI）}：\texttt{ShellState} 侧采用 Facade、Ops、pimpl 与 Owner 分层（\fpath{cli/shell/state/}），配合 include 收敛门禁（\fpath{docs/dev/SHELL_STATE_INCLUDE_AUDIT.md}）；\texttt{where/executor/plan/} 将查询计划拆为多编译单元（\texttt{plan\_impl\_support}、\texttt{plan\_query\_index}、\texttt{plan\_scan\_estimate}、\texttt{where\_plan\_catalog} 等），降低单 TU 体量。
+  \item \textbf{\fpath{waterfall/} 与 CRC32C}：页式存储与通用工具库；CRC32C 兼容实现集中于 \texttt{crc32c\_compat}（系统无 \texttt{libcrc32c} 时编入）。CMake 对静态库 \texttt{waterfall} 启用 \texttt{POSITION\_INDEPENDENT\_CODE}，以便链入 \texttt{libnewdb.so} / \texttt{libnewdb\_cli\_backend.so}。总览见 \fpath{docs/architecture/PROJECT_DATAFLOW_WHOLE.md}（§2.0、§2.2.2）。
   \item \textbf{GUI 运维化}：Rust GUI 提供事务栈、回看、崩溃矩阵与趋势看板入口，形成“执行-验证-复盘”链路；顶栏菜单按功能分组，并暴露 \texttt{SHOW TUNING JSON}、\texttt{SHOW STORAGE}、\texttt{SHOW PLAN}/\texttt{EXPLAIN WHERE} 等与会话调优相关的命令入口。
   \item \textbf{文档索引}：\fpath{newdb/docs/} 按主题分子目录（\texttt{api/}、\texttt{architecture/}、\texttt{dev/}、\texttt{ci/}、\texttt{txn/} 等），便于与 intro 交叉阅读。
 \end{itemize}

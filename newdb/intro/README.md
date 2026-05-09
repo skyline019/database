@@ -6,6 +6,8 @@
 
 - 模块边界与目录约定：`../docs/architecture/MODULE_BOUNDARIES.md`
 - **全仓库数据流总览**（含 `waterfall/`、`rust_gui/`、脚本与 CI）：`../docs/architecture/PROJECT_DATAFLOW_WHOLE.md`
+- **正式发布与制品布局**（GUI `bundle.resources`、`sync_runtime_binaries`、MSVC 多配置路径等）：`../docs/dev/RELEASE_PUBLISHING.md`
+- **C API 动态 CLI 后端（插件模式、`NEWDB_CLI_BACKEND_PATH`）**：`../docs/dev/C_API_PLUGIN_BACKEND.md`
 
 ---
 

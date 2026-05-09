@@ -37,6 +37,15 @@ database/                    # 仓库根
 
 ## 2. newdb 子模块全表（按目录）
 
+### 2.0 `waterfall/`（页式存储与通用基础库）
+
+| 子路径 | 职责 | 备注 |
+|--------|------|------|
+| `storage/` | `Page`、`Record`、存储错误模型 | 被 `newdb_core` 堆/I-O 路径链接 |
+| `utils/` | `arena`、错误辅助；**`crc32c_compat.cc`** | 若 **未**检测到系统 **`libcrc32c`**（PkgConfig），则编入兼容实现，避免引擎侧重复一份 CRC32C |
+| `include/waterfall/` | 对外头（endian shim、配置等） | 消费者仅依赖该 **PUBLIC** include 目录 |
+| **CMake** | 静态库 **`waterfall`** | **`POSITION_INDEPENDENT_CODE ON`**：保证 `libwaterfall.a` 可链入 **`libnewdb.so` / `libnewdb_cli_backend.so`** 等共享对象（Linux `-fPIC`） |
+
 ### 2.1 `newdb/engine`（存储引擎）
 
 | 子路径 | 职责 | 典型数据载体 |
@@ -53,7 +62,7 @@ database/                    # 仓库根
 | `src/mvcc/snapshot/` | 可见性与快照 | `snapshot_lsn`、读路径 |
 | `src/lsm/` | LSM-lite 协作（与 CLI 服务配合） | 层键、压缩提示 |
 | `src/cache/` | 页缓存、内存预算 | `page_cache_*`、`memory_budget_*` 计数 |
-| `src/util/` | CRC 等杂项 | 校验和 |
+| `src/util/` | 引擎内杂项工具 | **页级 CRC32C 兼容实现已下沉至 `waterfall/utils/crc32c_compat.cc`**（见 §2.0） |
 
 ### 2.2 `newdb/cli`（命令与编排层）
 
@@ -68,13 +77,13 @@ database/                    # 仓库根
 | `cli/shell/dispatch/support/` | 参数解析、热索引 | 中间结构 |
 | `cli/shell/dispatch/services/` | LSM、sidecar 失效等跨切服务 | 失效事件、队列 |
 | `cli/shell/dispatch/shared/` | 共享内部声明 | `dispatch_internal.h` |
-| `cli/shell/state/` | `ShellState`、会话、WHERE 上下文 | 长生命周期状态 |
+| `cli/shell/state/` | `ShellState`、会话、WHERE 上下文（**Facade / Ops / pimpl 分层**，见 §2.2.2） | 长生命周期状态 |
 | `cli/shell/diag/` | 诊断输出 | 文本 |
 | `cli/modules/common/` | 日志、工具、表格视图 | 格式化行 |
 | `cli/modules/catalog/` | 模式目录 | schema 文件 |
 | `cli/modules/import_export/` | IMPORTDIR、EXPORT CSV/JSON | 文件路径、流 |
 | `cli/modules/where/parser/` | WHERE 条件解析 | `WhereCond` 链 |
-| `cli/modules/where/executor/` | 执行、计划、策略、缓存、**table_stats** | 命中行集、计划 JSON、`*.tablestats` |
+| `cli/modules/where/executor/` | 执行、计划（**`plan/` 多编译单元**，§2.2.2）、策略、缓存、**table_stats** | 命中行集、计划 JSON、`*.tablestats` |
 | `cli/modules/txn/coordinator/` | 事务、锁、WAL 服务、恢复、vacuum、写冲突、**runtime stats** | `TxnRuntimeStats`、调优 JSON |
 | `cli/modules/sidecar/*` | 等值索引、覆盖投影、页索引、可见性 checkpoint、**index_catalog** | sidecar 文件、缓存 |
 | `cli/modules/storage/` | **table_storage_health** 度量 | 碎片率、tier |
@@ -85,6 +94,17 @@ database/                    # 仓库根
 - **装配图与 STATIC 预研结论**：[MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)（Mermaid、「Release assembly gates」）。
 - **目标名与 preset 速查**：[BUILD.md](../dev/BUILD.md) 中「CMake shell 积木目标」「C API 产物矩阵」。
 - **Plugin**：`newdb_shared` 可仅链引擎核，CLI 侧由 **`newdb_cli_backend`** + 环境变量 **`NEWDB_CLI_BACKEND_PATH`** 运行时加载；发行目录示例见 [plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)。
+
+### 2.2.2 源码级解耦（数据库栈，非 rust_gui）
+
+下列变更收紧 **编译单元边界** 与 **依赖方向**，不改变默认「full embed」下对外能力；详情见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)、[`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md)。
+
+| 主题 | 做法 | 典型路径 |
+|------|------|----------|
+| **`ShellState` 分层** | 聚合根仍是一个 `ShellState`，但实现拆成 **pimpl（`shell_state_impl.h`）**、**门面（`shell_state_facade.{h,cc}`）**、**批量/运维操作（`shell_state_ops.{h,cc}`）**、**Owner（`shell_state_owner.h` + `shell_state.cc`）**；测试与 runtime stats 构造优先通过 **Facade / Owner**，减少 **直接 `#include "cli/shell/state/shell_state.h"`** 的 TU 数量 | `cli/shell/state/` |
+| **WHERE 计划管线拆分** | 原 **`plan_impl`** 相关逻辑拆成多 TU：**`plan_impl.cc`**（主干）、**`plan_impl_support.{h,cc}`**、**`plan_query_index.cc`**、**`plan_scan_estimate.{h,cc}`**、**`where_plan_catalog.{h,cc}`**，头文件 **`plan_impl_detail.h` / `plan_impl_internals.h`** 收敛内部依赖 | `cli/modules/where/executor/plan/` |
+| **工作区与重排** | **`workspace_handler`** 与 **`CONFIRM_REORDER`** / **`[REORDER_MAP_JSON]`** 输出衔接（供上层消费逻辑行 id 映射） | `cli/shell/dispatch/handlers/workspace/` 等 |
+| **CRC32C 归属** | 引擎内重复 CRC 实现删除，统一由 **`waterfall`** 在缺系统库时提供 **`crc32c_compat`** | `waterfall/utils/crc32c_compat.cc`、`waterfall/CMakeLists.txt` |
 
 ### 2.3 `newdb/tools`、`newdb/tests`、`newdb/rust_gui`、`newdb/scripts`
 
@@ -609,7 +629,7 @@ CLI **不得** include `engine/src/**`；合法流动为：
 
 ### 12.2 `ShellState`：CLI 聚合根
 
-**定义**：`cli/shell/state/shell_state.h` 中 `struct ShellState`。
+**定义**：`cli/shell/state/shell_state.h` 中 `struct ShellState`（对外声明）；**字段实现**主要在 **`ShellState::Impl`**（`shell_state_impl.h`），由 **`shell_state.cc` / `shell_state_ops.cc`** 修改，读侧推荐 **`ShellStateFacade`**（见 [`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md) 各 Wave 说明）。
 
 **子结构 / 成员（节选）**：
 
@@ -676,7 +696,7 @@ CLI **不得** include `engine/src/**`；合法流动为：
 - **扫描上限**：环境变量如 `NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS` 与 `where_heap_scan_budget_binding_events` 观测绑定。
 - **查询临时内存**：`query_with_index` 对候选 slot / 条件解析等热路径估算 `query_temp_reserved_bytes`，并通过 `MemoryRegistry` 的 `QueryTemp` kind 进入 `mem_query_temp_*` 与 `mem_global_*` 观测。
 
-**耦合**：`where.h` **include** `heap_table.h`、`schema.h`、`table_stats.h`、`condition.h`；与 **sidecar** 通过 `plan_impl` 调用（编译期依赖 sidecar 目标）；与 `MemoryRegistry` 通过 query temp 预留形成运行期弱耦合。
+**耦合**：`where.h` **include** `heap_table.h`、`schema.h`、`table_stats.h`、`condition.h`；与 **sidecar** 通过 **`plan_impl` 管线**（多文件：`plan_impl.cc`、`plan_impl_support`、`plan_query_index`、`plan_scan_estimate`、`where_plan_catalog` 等，目录 `cli/modules/where/executor/plan/`）调用 sidecar 目标；与 `MemoryRegistry` 通过 query temp 预留形成运行期弱耦合。
 
 ### 12.5 表级统计 `TableStats`
 

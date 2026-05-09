@@ -115,6 +115,44 @@
 
 ---
 
+## 4.5 数据库栈源码解耦（非 GUI）
+
+本节记录 **引擎 / CLI / waterfall** 侧的编译边界收紧（与 `rust_gui` 无关）：目的是降低 TU 耦合、重复实现与链接故障（Linux PIC），不改变默认 full-embed 行为。
+
+### 4.5.1 `ShellState`：聚合根与头文件收敛
+
+- **设计点**：保持 **单一聚合根** `ShellState`，把字段与重逻辑挪入 **pimpl**，对外暴露 **访问器**；读路径与测试优先 **`ShellStateFacade` / `ShellStateOwner`**，减少 `"cli/shell/state/shell_state.h"` 的翻译单元扇出。
+- **作用/行为**：缩短增量编译范围；降低 `Session` / `HeapTable` 相关 include 污染；门禁脚本可对 **include 计数** 设上限（见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)）。
+- **对应文件**：
+  - `newdb/cli/shell/state/shell_state.h`、`shell_state_impl.h`、`shell_state.cc`
+  - `newdb/cli/shell/state/shell_state_facade.{h,cc}`、`shell_state_ops.{h,cc}`、`shell_state_owner.h`
+  - `newdb/docs/dev/SHELL_STATE_INCLUDE_AUDIT.md`
+
+### 4.5.2 WHERE：`plan_impl` 管线多编译单元
+
+- **设计点**：将查询计划、索引选择、扫描估计、目录元数据等从单一巨石 TU 拆成 **多个 `.cc`** + **内部头**，保留 **`query_with_index`** 等对外入口仍在 `plan_impl.cc`（及其内部头）。
+- **作用/行为**：并行编译更友好；职责边界在文件级可读；侧链修改更少触发全量重编。
+- **对应文件**：
+  - `newdb/cli/modules/where/executor/plan/plan_impl.cc`
+  - `newdb/cli/modules/where/executor/plan/plan_impl_support.{h,cc}`
+  - `newdb/cli/modules/where/executor/plan/plan_query_index.cc`
+  - `newdb/cli/modules/where/executor/plan/plan_scan_estimate.{h,cc}`
+  - `newdb/cli/modules/where/executor/plan/where_plan_catalog.{h,cc}`
+  - `plan_impl_detail.h`、`plan_impl_internals.h`
+
+### 4.5.3 `waterfall`：CRC32C 归属与链入共享库
+
+- **设计点**：**CRC32C** 兼容实现集中在 **`waterfall/utils/crc32c_compat.cc`**（系统未提供 **`libcrc32c`** 时编入）；引擎侧删除重复实现；**`waterfall` 静态库启用 `POSITION_INDEPENDENT_CODE`**，以便链入 **`libnewdb.so` / `libnewdb_cli_backend.so`**。
+- **作用/行为**：单一真源；避免 Linux 下 “recompile with -fPIC” 静态库链接失败。
+- **对应文件**：`waterfall/CMakeLists.txt`、`waterfall/utils/crc32c_compat.cc`
+
+### 4.5.4 工作区命令与逻辑 id 重排
+
+- **设计点**：**`workspace_handler`** 与 **`CONFIRM_REORDER`** 输出衔接；引擎重排后可由 CLI 打出 **`[REORDER_MAP_JSON]`** 供上层（如 GUI）维护 id 映射。
+- **对应文件**：`newdb/cli/shell/dispatch/handlers/workspace/`（handler 实现）、引擎堆重排与 CLI 日志路径（见根目录 `CHANGELOG.md` 引擎条目）。
+
+---
+
 ## 5. 测试体系与回归防线（Testing）
 
 ### 5.1 C++：CLI 脚本语义回归
@@ -194,7 +232,7 @@
 ## 9.1 WHERE 规划与 sidecar 失效集中入口（优化路线）
 
 - **设计点**：可选 **`NEWDB_QUERY_USE_TABLE_STATS`** 下的 **`TableStats`** NDV 提示；sidecar 写后失效通过 **`sidecar_invalidate_all_indexes_for_data_file`** 统一触发。
-- **对应实现**：`cli/modules/where/executor/stats/table_stats.{h,cc}`、`cli/modules/where/executor/plan/plan_impl.cc`、`cli/modules/sidecar/common/index_catalog.{h,cc}`、`cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc`。
+- **对应实现**：`cli/modules/where/executor/stats/table_stats.{h,cc}`；**计划管线**除 **`plan_impl.cc` 主干**外，还包括 **`plan_impl_support`**、`plan_query_index`、`plan_scan_estimate`、`where_plan_catalog`（见 §4.5.2）；`cli/modules/sidecar/common/index_catalog.{h,cc}`、`cli/shell/dispatch/services/sidecar/sidecar_invalidate_service.cc`。
 
 ## 10. 事务/WAL 回归与故障矩阵
 

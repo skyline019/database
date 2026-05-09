@@ -15,21 +15,23 @@
 
 \subsubsection{A. 交互与状态层（Vue）}
 \begin{itemize}
-  \item \texttt{App.vue} 承担主状态机：表格页、MDB 编辑器、日志窗、CLI 窗、事务栈、设置弹窗。
+  \item \texttt{App.vue} 承担主状态机：表格页、MDB 编辑器、日志窗、CLI 窗、\textbf{撤销/重做事务栈面板}（分页、同区标签切换）、\textbf{USE 状态条}、设置弹窗。
   \item 关键状态分组已较完整：数据态（table/page/sort）、运行态（busy/runtime dashboard）、UI 态（modal/折叠/侧栏/主题）。
   \item 日志由“整段文本”升级为“逐行分类渲染”，支持 \texttt{cmd/error/success/meta/session} 五类高亮。
 \end{itemize}
 
 \subsubsection{B. 原生桥接层（Tauri / Rust）}
 \begin{itemize}
-  \item \texttt{lib.rs} 暴露命令式接口：执行命令、分页查询、runtime dashboard 读取、settings 持久化、CLI 终端管理。
+  \item \texttt{lib.rs} 暴露命令式接口：执行命令（\texttt{execute\_command\_ex}）、分页查询、runtime dashboard、settings 持久化、CLI 终端管理，以及撤销/重做栈（\texttt{save\_stack\_units}/\texttt{load\_stack\_units}、\texttt{stack\_undo\_unit}/\texttt{stack\_redo\_unit}）。
   \item \texttt{UiSettings} 已使用 \texttt{serde(default)}，保证旧配置升级时缺字段不崩溃。
   \item 二进制/资源路径解析覆盖 dev 与 bundle 双场景，容错能力优于早期版本。
 \end{itemize}
 
 \subsubsection{C. 资源与交付层（脚本）}
 \begin{itemize}
-  \item \texttt{sync\_runtime\_binaries.ps1} 统一同步 \texttt{newdb\_demo}/\texttt{newdb\_perf}/\texttt{newdb\_runtime\_report}/\texttt{libnewdb.dll}/\texttt{libgtest\_capi.dll} 与脚本、results 种子文件；构建产物支持在构建根、\texttt{bin/}、以及 MSVC 多配置子目录（\texttt{Release/} 等）中自动解析。
+  \item \texttt{sync\_runtime\_binaries.ps1} 统一同步 \texttt{newdb\_demo}/\texttt{newdb\_perf}/\texttt{newdb\_runtime\_report}/\texttt{libnewdb.dll}/\texttt{newdb\_cli\_backend.dll}（插件构建时）/\texttt{libgtest\_capi.dll} 与脚本、results 种子文件；构建产物支持在构建根、\texttt{bin/}、以及 MSVC 多配置子目录（\texttt{Release/}、\texttt{RelWithDebInfo/} 等）中自动解析。
+  \item \textbf{插件模式交付}：Tauri \texttt{bundle.resources} 往往要求 \texttt{bin/newdb\_cli\_backend.dll} 与 \texttt{libnewdb.dll} 并存；需在 CMake 中打开 \texttt{NEWDB\_C\_API\_PLUGIN\_BACKEND} 与 \texttt{NEWDB\_BUILD\_CLI\_BACKEND\_PLUGIN}，并在宿主进程启动前设置 \texttt{NEWDB\_CLI\_BACKEND\_PATH}（详见 \fpath{docs/dev/C_API_PLUGIN_BACKEND.md}、\fpath{docs/dev/RELEASE_PUBLISHING.md}）。
+  \item 一键打包可参考 \texttt{npm run tauri:build:plugin}（\texttt{scripts/build\_tauri\_plugin\_bundle.ps1}）及 CI 中的 \texttt{newdb-gui.yml} 矩阵。
   \item 若 GoogleTest 以 DLL 形态存在，脚本会优先从 \texttt{libgtest\_capi.dll} 同目录拷贝同伴 \texttt{gtest}/\texttt{gmock} DLL，便于打包自洽。
   \item GUI 在离线打包后可直接读取 trend/dashboard 所需资源，减少“本地有文件但 GUI 读不到”的环境差异。
 \end{itemize}
@@ -37,6 +39,7 @@
 \subsection{近期关键变更归档（本轮）}
 
 \begin{itemize}
+  \item \textbf{撤销/重做事务栈强化}（详见下一小节）：重做栈在新编辑下\textbf{保留}；持久化 schema \texttt{newdb.gui.undo\_redo\_stack.v4}；事务块内\textbf{可逆命令独立入栈}、无可逆载荷的命令\textbf{分批连带}；\texttt{CONFIRM\_REORDER} 后与 CLI 输出的 \texttt{[REORDER\_MAP\_JSON]} 联动维护 \texttt{id\_remap\_chain}；Rust 侧 \texttt{stack\_*\_unit\_with\_runner} 与会话表同步、命令重写解耦。
   \item \textbf{顶栏菜单分组}：下拉项使用不可点的分组标题（section）归类为“文件/编辑/表/数据/事务/工具与观测”，集中放置 \texttt{SHOW TUNING JSON}、\texttt{SHOW STORAGE}、\texttt{SHOW PLAN}/\texttt{EXPLAIN WHERE}、\texttt{PAGE}（含 keyset）等与会话调优相关的入口，减少功能散装。
   \item \textbf{运行时诊断键展示}：\fpath{src/commandPolicy.ts} 中 \texttt{RUNTIME\_TUNING\_DIAGNOSTIC\_GROUPS} 与 \fpath{scripts/validate/RUNTIME_STATS_SCHEMA.md} 对齐，导出诊断包前可对照 \texttt{table\_storage\_health\_*} 等字段。
   \item \textbf{日志可观测性}：新增会话分隔头（\texttt{[SESSION] ...}）并设为专属高亮类型。
@@ -53,14 +56,58 @@
 
 \subsection{事务栈能力（Undo/Redo）}
 
-Rust GUI 当前已不只是“命令面板”，而是具备事务历史编排能力的操作层：
+\textbf{边界说明：}本节描述的是 GUI 侧\textbf{交互命令历史栈}（正向 \texttt{forward} + 可选逆向脚本 \texttt{backward}），通过 \texttt{execute\_command\_ex}、\texttt{stack\_undo\_unit}、\texttt{stack\_redo\_unit} 驱动会话。\textbf{这与引擎 WAL 恢复中的 redo / 悬挂事务 undo 不是同一机制}；后者见 \fpath{docs/architecture/PROJECT_DATAFLOW_WHOLE.md} 与 WAL 章节。
+
+\subsubsection{数据模型与持久化}
 
 \begin{itemize}
-  \item \textbf{栈模型升级}：以 savepoint 级 \texttt{UndoUnit} 聚合命令明细 \texttt{UndoOp}，支持跨表事务回退；
-  \item \textbf{执行策略}：后端区分 soft/hard fail，失败时按策略修复或中止，避免半回退状态静默扩散；
-  \item \textbf{持久化恢复}：事务栈以 jsonl 持久化，启动时可恢复历史并对坏行容错；
-  \item \textbf{逆向推断增强}：针对 \texttt{UPDATE/DELETE/SETATTR} 等操作优先走结构化查询快照推断 inverse，降低文本解析误差；
-  \item \textbf{可观测性}：回看面板支持命中导航、会话分段、逆向来源展示，便于审计与复盘。
+  \item \textbf{前端态}：\texttt{UndoUnit}（\texttt{unitId}、\texttt{txnId}、\texttt{savepointName}、\texttt{tablesTouched}、\texttt{ops[]}）与 \texttt{UndoOp}（\texttt{forward}、\texttt{backward}、\texttt{table} 等），定义于 \fpath{src/App.vue}。
+  \item \textbf{Rust 载荷}：\texttt{StackUndoUnit} / \texttt{StackUndoOp}（\fpath{src-tauri/src/lib.rs}），由 Tauri 命令序列化传递。
+  \item \textbf{落盘路径}：工作区 \fpath{.newdb_gui/undo_redo_stack.jsonl}（每次保存写一行 JSON）。
+  \item \textbf{Schema v4}：字段 \texttt{schema\_version = newdb.gui.undo\_redo\_stack.v4}，包含 \texttt{undo\_units}、\texttt{redo\_units}、\texttt{id\_remap\_chain}、\texttt{updated\_at\_ms}。加载旧文件时，若存在 \texttt{suspended\_redo\_units}，作为 legacy \textbf{前缀并入}重做栈并打日志提示。
+  \item \textbf{深度上限}：撤销栈超过约 1000 条时丢弃最旧单元（前端 \texttt{pushHistoryUnit}）。
+\end{itemize}
+
+\subsubsection{事务块内的入栈规则（Vue）}
+
+\texttt{trackTxnCommand} 在 \texttt{BEGIN} 激活时：
+\begin{itemize}
+  \item \textbf{\texttt{BEGIN}}：分配 \texttt{txnId}，清空 pending；
+  \item \textbf{\texttt{SAVEPOINT}}：先将 pending 打成一批（\texttt{flushTxnPendingOpsAsUnit}），再切换当前 savepoint；
+  \item \textbf{\texttt{COMMIT}}：flush 后结束事务；
+  \item \textbf{\texttt{ROLLBACK}}：丢弃 pending 并结束事务（不入栈）；
+  \item \textbf{带逆向载荷的命令}（\texttt{undoPayloadPresent}）：先 flush 无可逆的 pending，再将\textbf{本步单独}压栈；
+  \item \textbf{无可逆载荷的命令}：进入 pending，在 savepoint/commit/下一条可逆命令前再打成\textbf{连带批次}（内部名如 \texttt{\_\_txn\_irrev\_\_}）。
+\end{itemize}
+内部 savepoint 名以 \texttt{\_\_} 开头（\texttt{\_\_single\_\_}、\texttt{\_\_commit\_\_} 等）：Rust 执行器将其视为 \textbf{internal}，避免误走真实数据库上的 \texttt{ROLLBACK TO savepoint}。
+
+\subsubsection{重做栈与“分叉”语义}
+
+\textbf{新历史只压入撤销栈；重做栈默认保留。}若重做与当前数据冲突，由后端命令失败体现，而不是在分叉时预先清空重做分支。
+
+\subsubsection{主键重排（\texttt{CONFIRM\_REORDER}）与 id 映射链}
+
+\begin{itemize}
+  \item 引擎/CLI 在真实重写后可打印一行 \texttt{[REORDER\_MAP\_JSON]\{...\}}（含 \texttt{table} 与 \texttt{pairs} 旧$\rightarrow$新 id）。
+  \item \texttt{lib.rs} 中 \texttt{ingest\_reorder\_map\_from\_engine\_output} 解析后 \texttt{push} 到 \texttt{id\_remap\_chain}（分层 \texttt{IdRemapLayer}）。
+  \item \texttt{stack\_undo\_unit}/\texttt{stack\_redo\_unit} 在下发命令前经 \texttt{rewrite\_stack\_command\_line} $\rightarrow$ \texttt{rewrite\_stack\_line\_row\_ids} 做行 id 改写；\texttt{normalize\_heap\_row\_id\_token} 统一整数写法（如 \texttt{03} 与 \texttt{3}）；若首选表未改写成功，可遍历 \texttt{tables\_touched} 尝试其它表限定。
+  \item 前端在重排成功后通常\textbf{重置事务录制 UI 状态}并持久化栈，但\textbf{保留}撤销/重做两栈内容。
+\end{itemize}
+
+\subsubsection{Rust 执行路径与解耦}
+
+\begin{itemize}
+  \item \texttt{stack\_undo\_unit\_with\_runner}/\texttt{stack\_redo\_unit\_with\_runner}：统一\textbf{逆序 backward / 顺序 forward}、复合命令拆分、计时与结果组装。
+  \item \textbf{每条 op 前}调用 \texttt{sync\_session\_table\_for\_stack\_op}：优先 \texttt{StackUndoOp.table}，否则在单表 \texttt{tables\_touched} 时回退，保证 USE 当前表与命令一致。
+  \item \textbf{非 internal 且 savepoint 非空}：撤销路径可先尝试 \texttt{ROLLBACK TO <savepoint>}；失败则 soft fail 并继续逐条 backward；单条失败时发 \texttt{ROLLBACK} 做 hard 修复。
+  \item 实际下发统一走 \texttt{execute\_command\_ex(rewrite\_stack\_command\_line(...))}，将\textbf{表同步、id 改写、执行}分层。
+\end{itemize}
+
+\subsubsection{逆向推断与可观测性（沿用）}
+
+\begin{itemize}
+  \item 针对 \texttt{UPDATE/DELETE} 等优先使用网格视图或后端快照推断 \texttt{backward}（\texttt{runCommand} / \texttt{inferBackwardPayloadByBackend}），降低纯文本启发式误差。
+  \item 栈面板支持分页、撤销/重做同区切换、最近一次执行追踪（\texttt{stackExecTraceByUnitId}）；回看面板仍支持命中导航与逆向来源展示。
 \end{itemize}
 
 \subsection{运维与验证闭环}

@@ -2,9 +2,13 @@
 
 本文档描述 [skyline019/database](https://github.com/skyline019/database) 仓库内**各顶层组件、newdb 子系统、外部进程与观测数据**之间的依赖与数据流向，便于 onboarding、排障与扩展设计时对照。
 
+**默认叙述口径（配图以此为准）**：**Plugin 双 DLL**——主共享库 **`libnewdb`**（`newdb_shared`）仅链 **`newdb_core`**（+ C API 装载器），**CLI / dispatch / `newdb_query`** 落在独立 **`newdb_cli_backend`**，由运行时 **`NEWDB_CLI_BACKEND_PATH`** 在首次会话创建前装载（详见 §3、§3.2、[C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)）。**单 DLL full_embed** 仍为正交代便捷预设（本地 demo、少搬运场景），与 Plugin **数据流等价**，差别仅在链接期是否静态并入 `newdb_capi_adapter`。
+
+**与 CMake 默认值的关系**：仓库 **`CMakeLists.txt`** 中 **`NEWDB_C_API_PLUGIN_BACKEND` 默认 OFF**（本地一键编出单 DLL 较省事）；**产品发行 / rust_gui 镜像包** 通常显式 **`ON` + `NEWDB_BUILD_CLI_BACKEND_PLUGIN=ON`**，与本文图示一致。
+
 **CLI 内模块/子模块的先后次序、责任链与写/WHERE 微观路径**见 [§11](#11-模块与子模块间流动详解)。**核心类型、启发式算法、编译/运行期耦合**见 [§12](#12-数据结构算法要点耦合与关联)；**各字段与 API 形参逐项解释**见 [§12.12](#1212-字段与形参释义手册)。
 
-> 模块边界与 include 规则见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；构建与测试命令见 [BUILD.md](../dev/BUILD.md)。**Shell / C API 适配层**的 CMake OBJECT 积木（`newdb_shell_*` → `newdb_capi_adapter` → 默认 `newdb_shared`）与 **plugin 双产物**说明见同目录装配图、[BUILD.md § CMake shell 积木](../dev/BUILD.md) 与 [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)。
+> 模块边界与 include 规则见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；构建与测试命令见 [BUILD.md](../dev/BUILD.md)。**Shell OBJECT 积木 → `newdb_capi_adapter` →（full_embed 链入主库 | plugin 链入 `newdb_cli_backend`）** 见 [BUILD.md § CMake shell 积木](../dev/BUILD.md)、[plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)。
 
 ---
 
@@ -51,26 +55,32 @@ database/                    # 仓库根
 | 子路径 | 职责 | 典型数据载体 |
 |--------|------|----------------|
 | `include/newdb/` | 对外 C/C++ API 声明（`c_api.h`、`heap_table.h`、`wal_manager.h` 等） | 类型、句柄、枚举 |
-| `src/api/c/` | C ABI 实现：`session_create/destroy/set_table/execute` | 命令文本 → 结果缓冲 |
-| `src/session/api` | 会话级 API 行为 | 会话状态、错误码 |
+| `src/api/c/` | C ABI：`c_api.cpp`（full）、**`c_api_slim.cpp`**（slim 产物） | 命令文本 → 结果缓冲 |
+| `src/session/api` | 会话句柄、`session_apply_table` | 会话状态、懒加载物化 |
 | `src/session/table_access` | 表加载、物化、历史 | `HeapTable`、快照 |
 | `src/heap/` | 堆文件页、行、waterfall 适配 | 页缓冲、行字节 |
 | `src/io/page/` | 页读写 | 块设备/文件偏移 |
 | `src/schema/`、`src/catalog/` | 表模式与目录 | `TableSchema`、元数据 |
 | `src/codec/` | 元组编解码 | 列值字节流 |
+| `src/json/` | `json_escape`、`runtime_stats_snapshot_json_write` | 导出 JSON 字符串 |
 | `src/wal/writer/`、`codec/`、`recovery/` | WAL 追加、编解码、恢复与段扫描 | `demodb.wal`、LSN、redo 记录 |
 | `src/mvcc/snapshot/` | 可见性与快照 | `snapshot_lsn`、读路径 |
 | `src/lsm/` | LSM-lite 协作（与 CLI 服务配合） | 层键、压缩提示 |
-| `src/cache/` | 页缓存、内存预算 | `page_cache_*`、`memory_budget_*` 计数 |
+| `src/cache/` | 页缓存、内存预算门面 | `page_cache_*`、`memory_budget_*` |
+| `src/memory/` | **`MemoryRegistry`** 全局 admit/evict | `mem_*` 与侧车/QueryTemp 闭环 |
+| `include/newdb/wal_sync_mode.h` | **`WalSyncMode`**（与 `wal_manager.h` 拆文件） | fsync 策略枚举 |
+| `include/newdb/txn_runtime_stats_snapshot.h` | **`TxnRuntimeStats` POD**（与 CLI 共享形状） | JSON/C API 契约平面 |
 | `src/util/` | 引擎内杂项工具 | **页级 CRC32C 兼容实现已下沉至 `waterfall/utils/crc32c_compat.cc`**（见 §2.0） |
 
 ### 2.2 `newdb/cli`（命令与编排层）
 
 | 子路径 | 职责 | 典型数据载体 |
 |--------|------|----------------|
-| `cli/app/` | `newdb_demo` 入口、参数 | argv、workspace 路径 |
-| `cli/shell/bootstrap/` | 进程启动、工作区引导 | 环境、`--data-dir` |
-| `cli/shell/repl/` | 交互行读取与执行 | 用户行文本 |
+| `cli/app/` | **`demo_main.cc`**：`newdb_demo` 入口；持有 **`ShellStateOwner`** | argv、`ShellState&` |
+| `cli/shell/bootstrap/` | **`demo_runner.cc`** / **`demo_cli.*`**：日志绑定、**`recoverFromWAL`**、mdb/import/batch | workspace、`ShellStateFacade` |
+| `cli/shell/repl/` | **`demo_shell`**：交互行读取与执行 | 用户行文本 |
+| `cli/shell/c_api/` | **`c_api_cli_bridge`**、runtime JSON builder、`show_storage_log` | C API ↔ dispatch |
+| `cli/shell/state/` | **`ShellState`（pimpl）**、**`shell_state_owner`**、**`shell_state_facade`**、**`shell_state_ops`**、**`shell_state_heap_read_guard`**、`shell_state_lsm`/`sidecar` bundles | 会话聚合根、堆 guard |
 | `cli/shell/dispatch/router/` | `process_command_line`、phase-2 路由 | 动词 → 处理器 |
 | `cli/shell/dispatch/registry/` | 命令表、快照注册源 | 命令名 → 处理分支 |
 | `cli/shell/dispatch/handlers/*` | DDL/DML/查询/事务/会话/IO/工作区 | 解析后的参数、日志行 |
@@ -90,14 +100,14 @@ database/                    # 仓库根
 
 ### 2.2.1 CMake：shell OBJECT 与 `newdb_capi_adapter`
 
-- **默认（full embed）**：`cli/` 下 shell、dispatch、txn、WHERE、sidecar 等按 TU 拆成 **`newdb_shell_*` OBJECT** 库，由静态目标 **`newdb_capi_adapter`** 用 `$<TARGET_OBJECTS:…>` 聚合成一整块，再与 **`newdb_core`** 一起链入 **`newdb_shared`**（`libnewdb`）。交互式 REPL 独占 TU 在 **`newdb_shell_bootstrap_repl`**，仅叠进 **`newdb_shell`**，供 **`newdb_demo`** 等可执行文件链接。
-- **装配图与 STATIC 预研结论**：[MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)（Mermaid、「Release assembly gates」）。
-- **目标名与 preset 速查**：[BUILD.md](../dev/BUILD.md) 中「CMake shell 积木目标」「C API 产物矩阵」。
-- **Plugin**：`newdb_shared` 可仅链引擎核，CLI 侧由 **`newdb_cli_backend`** + 环境变量 **`NEWDB_CLI_BACKEND_PATH`** 运行时加载；发行目录示例见 [plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)。
+- **本文默认发行形态（plugin）**：`-DNEWDB_C_API_PLUGIN_BACKEND=ON -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON` 时，`newdb_shared` **不**静态链接 `newdb_capi_adapter`；**`newdb_cli_backend`**（共享库）**`PRIVATE` 链接 `newdb_capi_adapter`**（进而 **`newdb_core` + `newdb_query`**）。宿主进程只须分发 **两个** 共享对象 + 设置 **`NEWDB_CLI_BACKEND_PATH`**（绝对路径为佳）。打包示例：[plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)。
+- **对照（full embed，单 DLL 便利）**：`newdb_capi_adapter` 在**链接期** `PRIVATE` 进入 `newdb_shared`，无第二 DLL；适合 demo/工具链一体化。
+- **装配图**：[MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)；**目标名与 preset**：[BUILD.md](../dev/BUILD.md)。
+- **OBJECT 积木**：`cli/` 下 shell、dispatch、txn、WHERE、sidecar 等拆成 **`newdb_shell_*` OBJECT**，由 **`newdb_capi_adapter`** `$<TARGET_OBJECTS:…>` 聚合；REPL 独占 TU 在 **`newdb_shell_bootstrap_repl`** → **`newdb_shell`** → **`newdb_demo`**。
 
 ### 2.2.2 源码级解耦（数据库栈，非 rust_gui）
 
-下列变更收紧 **编译单元边界** 与 **依赖方向**，不改变默认「full embed」下对外能力；详情见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)、[`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md)。
+下列变更收紧 **编译单元边界** 与 **依赖方向**，不改变 **full_embed 与 plugin** 下对外能力（仅链接/装载位置不同）；详情见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)、[`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md)。
 
 | 主题 | 做法 | 典型路径 |
 |------|------|----------|
@@ -112,7 +122,7 @@ database/                    # 仓库根
 |------|------|------------|
 | `tools/perf`、`concurrent_perf`、`smoke`、`report` | 压测、冒烟、**runtime_report** | 读引擎 + 写 JSON/控制台 |
 | `tests/*.cpp` | 单测、集成测、`gtest_c_api` | 内存堆、临时目录、断言 |
-| `rust_gui`（Vue + Tauri） | 通过 **DLL `libnewdb` + `newdb_demo` 子进程`** 驱动 | 命令字符串、分页参数、日志流；表菜单 / 数据视图 **「确认重排 id」** 经确认对话框下发 **`CONFIRM_REORDER`**；`sync_runtime_binaries.ps1` 同步 `src-tauri/bin` 与 `resources/scripts` |
+| `rust_gui`（Vue + Tauri） | **默认**：进程内加载 **`libnewdb` + `newdb_cli_backend`**（与 **`NEWDB_CLI_BACKEND_PATH`**）；可选 **`newdb_demo` 子进程** | `sync_runtime_binaries.ps1` 同步 `src-tauri/bin`；命令字符串经 **`newdb_session_execute`**；**`CONFIRM_REORDER`** 等仍走同一 dispatch |
 | `scripts/ci|validate|soak|bench` | 门禁、统计 schema、趋势 rollup | `*.jsonl`、dashboard JSON |
 
 ### 2.4 文档与 intro
@@ -124,77 +134,220 @@ database/                    # 仓库根
 
 ---
 
-## 3. 编译与链接依赖图（Mermaid）
+## 3. 编译与链接依赖图（默认 Plugin）
+
+下图 **粗线 = 编译期链接**，**虚线 = 运行期 dlopen/LoadLibrary**。**Waterfall → `newdb_core`** 省略重复画出（见 §2.0）。
+
+### 3.0 总览：Plugin 预设下的产物关系
 
 ```mermaid
 flowchart TB
-  subgraph repo["仓库根 database"]
-    WF[waterfall]
+  subgraph repo["database"]
+    WF[waterfall STATIC]
   end
 
-  subgraph newdb["newdb/"]
-    ENG[newdb_core engine]
-    CAP[newdb_capi_adapter STATIC]
-    SH[newdb_shell REPL_plus_embed]
-    DEM[newdb_demo]
-    DLL[newdb_shared libnewdb]
-    TOOLS[newdb_perf / smoke / runtime_report]
-    TESTS[newdb_tests]
-    GCAPI[gtest_capi DLL]
+  subgraph engines["引擎与查询静态库"]
+    ENG[newdb_core STATIC]
+    QRY[newdb_query STATIC]
   end
 
-  subgraph gui["rust_gui"]
-    TAURI[Tauri + Vue]
-    BIN[src-tauri/bin 同步产物]
+  subgraph adapter["CLI 适配静态聚合"]
+    CAP["newdb_capi_adapter STATIC OBJECT"]
+  end
+
+  subgraph backends["Plugin：第二共享库"]
+    BE["newdb_cli_backend SHARED"]
+  end
+
+  subgraph maindll["主共享库"]
+    DLL["newdb_shared SHARED libnewdb"]
+  end
+
+  subgraph tools_exe["工具与测试仍链完整 CLI"]
+    SH[newdb_shell STATIC]
+    DEM[newdb_demo EXE]
+    TOOLS["newdb_perf smoke concurrent_perf runtime_report"]
+    TESTS[newdb_tests EXE]
+  end
+
+  subgraph gui["rust_gui 宿主"]
+    TAURI[Tauri + Vue EXE]
+    BIN[src-tauri/bin]
   end
 
   WF --> ENG
-  ENG --> CAP
-  CAP --> DLL
-  ENG --> SH
-  SH --> DEM
+  QRY --> ENG
+  CAP --> ENG
+  CAP --> QRY
+  BE --> CAP
+
+  DLL --> ENG
+  DLL -.运行时 NEWDB_CLI_BACKEND_PATH.-> BE
+
+  SH --> CAP
+  DEM --> SH
   ENG --> TOOLS
-  SH --> TESTS
-  ENG --> GCAPI
-  DLL --> TAURI
-  BIN --> TAURI
-  DEM -.子进程/可选.-> TAURI
+  TESTS --> SH
+
+  TAURI --> DLL
+  TAURI --> BIN
+  DEM -.可选子进程.-> TAURI
 ```
 
-**说明（默认 full embed）**：`newdb_shared` 链 **`newdb_core` + `newdb_capi_adapter`**（后者内部折叠全部 `newdb_shell_*` OBJECT，不含 REPL-only TU）。`newdb_tests` / **`newdb_demo`** 通过 **`newdb_shell`** 拉入 REPL 与同一适配闭包。**Plugin** 时 `newdb_shared` 与 `newdb_capi_adapter` 解耦，见 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md) 与 [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)。
+**读图要点**
 
-### 3.1 扩展：`newdb_shared` 三种链接形态（对照）
+| 边 | 含义 |
+|----|------|
+| **`BE` → `CAP`** | **`target_link_libraries(newdb_cli_backend PRIVATE newdb_capi_adapter)`**：backend **静态并入**全部 shell/query/dispatch，运行时作为 **独立 .so/.dll** 与主库进程共生。 |
+| **`DLL` → `ENG`** | **`NEWDB_C_API_PLUGIN_BACKEND=ON`** 时 **`newdb_shared` PRIVATE `newdb_core`**，**不**链接 `newdb_capi_adapter`。 |
+| **`DLL` -.-> `BE`** | **`c_api.cpp`** 中 **`cli_dll_load_unlocked`**：`LoadLibraryA` / **`dlopen(RTLD_NOW)`**，再 **`GetProcAddress` / `dlsym`** 解析 **`newdb_cli_backend_*`**（§3.2.2）。 |
+| **`newdb_demo` / `newdb_tests`** | 仍链接 **`newdb_shell` → `newdb_capi_adapter`**，与 GUI **进程内 plugin** 路径独立（集成测不走 dlopen）。 |
 
-与 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)「Shared library modes」表一致；下图强调 **主 DLL 与 CLI 代码的静态/运行时关系**（省略 `waterfall` → `newdb_core` 边以聚焦 C API 边界）。
+**GTest**：**`gtest_capi`** 仅依赖 FetchContent GTest；**`newdb_tests`** 另链 **`GTest::gtest_main`**（图中略）。
+
+### 3.1 对照：`newdb_shared` 三种链接形态
+
+与 [MODULE_BOUNDARIES.md](./MODULE_BOUNDARIES.md)「Shared library modes」一致；**首推 Plugin**，下列按 **发行优先级** 排列。
 
 ```mermaid
 flowchart TB
-  subgraph defEmbed [默认_full_embed]
+  subgraph plugMode ["① Plugin 默认叙述 NEWDB_C_API_PLUGIN_BACKEND"]
+    E2[newdb_core]
+    Sh2[newdb_shared]
+    BE2[newdb_cli_backend]
+    CAP2[newdb_capi_adapter]
+    Q2[newdb_query]
+    Sh2 -->|"PRIVATE link"| E2
+    BE2 --> CAP2
+    CAP2 --> E2
+    CAP2 --> Q2
+    Q2 --> E2
+    Sh2 -.runtime_dlopen.-> BE2
+  end
+  subgraph defEmbed ["② full_embed 单 DLL 便利"]
     E0[newdb_core]
     C0[newdb_capi_adapter]
     Sh0[newdb_shared]
-    E0 --> C0
-    C0 --> Sh0
+    Q0[newdb_query]
+    Sh0 -->|"PRIVATE"| C0
+    C0 --> E0
+    C0 --> Q0
+    Q0 --> E0
   end
-  subgraph slimMode [NEWDB_SHARED_SLIM]
+  subgraph slimMode ["③ NEWDB_SHARED_SLIM 瘦 C API"]
     E1[newdb_core]
-    Slim[c_api_slim_TU]
+    Slim[c_api_slim TU]
     Sh1[newdb_shared]
-    E1 --> Slim
-    Slim --> Sh1
-  end
-  subgraph plugMode [Plugin_backend]
-    E2[newdb_core]
-    Sh2[newdb_shared]
-    BE[newdb_cli_backend]
-    E2 --> Sh2
-    Sh2 -->|runtime_dlopen| BE
+    Sh1 --> Slim
+    Slim --> E1
   end
 ```
 
-- **full embed**：`newdb_capi_adapter` 在**链接期**进入 `newdb_shared`；会话/命令能力进程内可用，无第二 DLL。  
-- **slim**：`newdb_shared` 仅引擎 + 瘦 C API；无 `newdb_capi_adapter`、无完整 runtime stats / 完整 `execute` 等（见 [CI_SLIM_FULL_MATRIX.md](../dev/CI_SLIM_FULL_MATRIX.md)）。  
-- **plugin**：`newdb_shared` 仍只含 `newdb_core`，**会话侧符号**在 **`newdb_cli_backend`** 中；主库在 `newdb_session_create` 前按路径 **动态加载** backend（失败则 `NULL`）。
+- **① plugin**：主库只含 **`newdb_core`**；**`newdb_cli_backend`** **编译期**链接 **`newdb_capi_adapter` + `newdb_query`**；运行期主库 **dlopen** backend，**`newdb_session_create`** 失败则返回 **`NULL`**（须设置 **`NEWDB_CLI_BACKEND_PATH`**）。  
+- **② full embed**：**`newdb_capi_adapter`** **链接期**进入 **`newdb_shared`**，无第二 DLL。  
+- **③ slim**：仅引擎 + **`c_api_slim`**；与 **`NEWDB_C_API_PLUGIN_BACKEND` 互斥**（不可同时 slim + plugin）。详情见 [CI_SLIM_FULL_MATRIX.md](../dev/CI_SLIM_FULL_MATRIX.md)。
+
+### 3.2 Plugin 装载与命令路径（详细图）
+
+#### 3.2.1 发行目录与进程边界（推荐布局）
+
+```mermaid
+flowchart TB
+  subgraph disk["部署目录示例 shared_bundle 或安装前缀 bin/"]
+    F1["libnewdb.so / newdb.dll"]
+    F2["libnewdb_cli_backend.so / newdb_cli_backend.dll"]
+    F3["宿主 rust_gui 或自有 EXE"]
+    README["README_PLUGIN.txt 等"]
+  end
+
+  subgraph proc["同一宿主进程地址空间"]
+    EXE[宿主可执行文件]
+    MAIN[F1 映射：C API + 引擎]
+    BACK[F2 映射：CLI 适配层]
+  end
+
+  F3 --> EXE
+  EXE --> MAIN
+  MAIN -.dlopen LoadLibrary.-> BACK
+  F1 -.文件.-> MAIN
+  F2 -.文件.-> BACK
+  README -.随包分发.-> F1
+```
+
+- Windows：backend 与主 DLL **同目录** 或 **`PATH`**；Linux：**`LD_LIBRARY_PATH`** / **`RUNPATH`**，且 **`NEWDB_CLI_BACKEND_PATH` 建议绝对路径**（见 [C_API_PLUGIN_BACKEND.md](../dev/C_API_PLUGIN_BACKEND.md)）。
+
+#### 3.2.2 `newdb_session_create`：装载 backend 与符号解析（实现：`engine/src/api/c/c_api.cpp`）
+
+```mermaid
+sequenceDiagram
+  participant Host as 宿主
+  participant Env as getenv NEWDB_CLI_BACKEND_PATH
+  participant Main as libnewdb c_api.cpp
+  participant OS as LoadLibrary dlopen
+  participant BE as newdb_cli_backend
+
+  Host->>Env: 启动前设置绝对路径
+  Host->>Main: newdb_session_create data_dir table log
+  Main->>Main: cli_dll_load 互斥锁
+  Main->>Env: 读取路径空则失败
+  Main->>OS: LoadLibraryA path Win32
+  Main->>OS: dlopen RTLD_NOW Unix
+  OS->>BE: 映射共享对象
+  BE-->>Main: mod handle
+  loop 必需导出符号 10 个
+    Main->>OS: GetProcAddress dlsym
+    OS-->>Main: fn_create destroy try_fastpath process_line apply_table log_path current_table runtime_stats_json 等
+  end
+  Main->>Main: 任一为 NULL 则 FreeLibrary dlclose 失败路径
+  Main->>BE: newdb_cli_backend_session_create(...)
+  BE-->>Main: ShellState bridge void*
+  Main-->>Host: newdb_session_t 非空或 NULL
+```
+
+**必须在 backend 中解析成功的 C 符号**（名称与 `c_api.cpp` 一致）：
+
+| 导出函数 | 角色 |
+|----------|------|
+| `newdb_cli_backend_session_create` | 构造 CLI/`ShellState` 桥 |
+| `newdb_cli_backend_session_destroy` | 销毁桥 |
+| `newdb_cli_backend_try_fastpath` | 可选快路径 |
+| `newdb_cli_backend_process_line` | **一行命令 → dispatch** |
+| `newdb_cli_backend_apply_table` | 切换表 |
+| `newdb_cli_backend_log_path` | 当前日志路径 |
+| `newdb_cli_backend_current_table` | 当前表名 |
+| `newdb_cli_backend_runtime_stats_json` | 运行时 JSON |
+| `newdb_cli_backend_runtime_snapshot_line` | 快照行 |
+| `newdb_cli_backend_where_plan_json` | WHERE 计划 JSON |
+
+（实现文件：**`cli/shell/c_api/cli_backend_exports.cc`**。）
+
+#### 3.2.3 一条命令：`newdb_session_execute`（Plugin）
+
+```mermaid
+sequenceDiagram
+  participant Host
+  participant Main as libnewdb
+  participant BE as newdb_cli_backend
+  participant Bridge as ShellState c_api_cli_bridge 内部
+  participant Router as process_command_line
+  participant Txn as TxnCoordinator WAL
+  participant Eng as Session HeapTable WalManager
+
+  Host->>Main: newdb_session_execute sess line out_buf
+  Main->>BE: fn_process_line bridge line
+  BE->>Bridge: 转入嵌入 CLI 会话
+  Bridge->>Router: dispatch handlers
+  Router->>Txn: DML 事务 WAL
+  Router->>Eng: 堆读写 MVCC
+  Eng-->>Router: 结果
+  Txn-->>Router: LSN 状态
+  Router-->>Bridge: 文本输出
+  Bridge-->>BE: 写入缓冲
+  BE-->>Main: 返回码
+  Main-->>Host: NEWDB_OK 或错误
+```
+
+**与 full_embed 的差异**：仅 **`Bridge` 所在模块** 在主 DLL **（embed）** 或 **backend DLL（plugin）**；**`Router` → `Txn` → `Eng` 数据平面相同**。
 
 ---
 
@@ -206,60 +359,72 @@ flowchart TB
 sequenceDiagram
   participant U as 用户
   participant G as rust_gui
-  participant D as newdb_demo.exe
-  participant L as libnewdb.dll C API
-  participant S as engine Session API
-  participant H as HeapTable + Page IO
+  participant D as newdb_demo
+  participant L as libnewdb C API
+  participant B as capi_cli_bridge + dispatch
+  participant S as Session API
+  participant H as HeapTable + page_io
   participant W as WalManager
 
   U->>G: 输入命令 / 菜单
-  alt 进程内_full_embed
-    G->>L: session_execute(line, buf)
-    L->>S: 静态链入 newdb_capi_adapter 再入 Session
-  else 进程内_plugin
-    G->>L: session_execute(line, buf)
-    L->>S: dlopen newdb_cli_backend 后同 Session 边界
+  alt 进程内_plugin 默认
+    G->>L: newdb_session_execute line buf
+    L->>L: session_create 时已 dlopen backend 见 §3.2
+    L->>B: fn_process_line → cli_bridge backend DLL 内
+    B->>S: process_command_line → Session lock_heap
+  else 进程内_full_embed
+    G->>L: newdb_session_execute line buf
+    L->>B: 主 DLL 静态 capi_adapter 桥接
+    B->>S: process_command_line → Session lock_heap
   else 子进程_demo
     G->>D: --exec-line / stdin 管道
-    D->>S: newdb_shell dispatch 到引擎
+    D->>B: demo_main ShellStateOwner → REPL / dispatch
+    B->>S: process_command_line → Session
   end
   S->>H: 读改堆页 / 迭代
   S->>W: 写路径追加 WAL、同步策略
   H-->>S: 行集 / 状态
   W-->>S: LSN / 恢复点
-  S-->>L: 结果文本 / 错误码
-  L-->>G: 缓冲输出
+  S-->>B: 结果 / 错误
+  B-->>L: 文本缓冲 / 状态码
+  L-->>G: newdb_session_execute 返回
   D-->>G: stdout/stderr
   G-->>U: 表格 / 日志面板
 ```
 
-**说明**：`full_embed` 与 **`plugin`** 对用户均为「进程内 DLL」；差别在 **`libnewdb` 是否静态包含 CLI 适配层**（plugin 下由独立 `newdb_cli_backend` + **`NEWDB_CLI_BACKEND_PATH`** 提供）。**slim** 形态下 `libnewdb` 不含完整 CLI/`execute` 链，GUI 需使用 **full** 或 **plugin** 构建产物。
+**说明**：**默认（plugin）** 与 **full_embed** 对用户均为进程内 **`libnewdb`**；差别仅在 **`capi_cli_bridge`/`dispatch` 代码位于 `newdb_cli_backend`（需环境变量）还是主 DLL 静态段**。**slim** 主库无完整执行链，GUI 须 **full_embed** 或 **plugin**。Rust 导出 **`newdb_session_execute`**（`rust_gui/src-tauri/src/lib.rs`）。
 
 ---
 
 ## 5. 持久化与恢复数据流（磁盘）
 
-**编译归属（默认 full embed）**：图中 **CLI** 指随 **`newdb_capi_adapter`** 与主 `libnewdb` 静态链接的 handler / txn / WAL 协调路径；**plugin** 形态下同一批 TU 位于 **`newdb_cli_backend`**，经 `NEWDB_CLI_BACKEND_PATH` 在运行时挂入，与引擎的 **WAL/堆** 关系不变。
+**编译归属（默认 plugin）**：图中 **CLI** 逻辑（handler / txn / WAL 协调）的 **目标代码** 始终在 **`newdb_capi_adapter`** 聚合体内；**plugin** 下该静态库被 **链入 `newdb_cli_backend`**，由主库 **`dlopen`** 后间接执行；**full_embed** 下则 **链入主 `libnewdb`**。磁盘上的 **WAL/堆/sidecar** 关系两种形态 **相同**。
 
 ```mermaid
 flowchart LR
   subgraph workspace["工作区目录 workspace"]
-    BIN["*.bin 堆表数据"]
-    ATTR["*.attr 等"]
+    BIN["*.bin 堆表"]
+    ATTR["*.attr"]
+    SCH["*.schema / schema sidecar"]
     WAL["demodb.wal"]
-    LSN["demodb.wal_lsn / walsync.conf"]
-    STATS["*.tablestats 可选统计"]
-    EQ["*.eqbloom 等 sidecar"]
+    SYNC["demodb.walsync.conf / wal_lsn"]
+    STATS["*.tablestats"]
+    EQ["*.eqidx / *.eqbloom 等"]
+    OTHER["covering / page idx / visibility …"]
   end
 
-  CLI[CLI handlers txn/wal] --> WAL
+  CLI[CLI txn coordinator + handlers] --> WAL
   CLI --> BIN
-  ENG[engine WalManager codec] --> WAL
+  CLI --> ATTR
+  ENG[engine WalManager codec recovery] --> WAL
   ENG --> BIN
-  REC[recovery wal_manager_recover_support] --> WAL
+  REC[TxnCoordinator recoverFromWAL + engine redo] --> WAL
   REC --> BIN
-  WHERE[where executor + table_stats] -.可选写入.-> STATS
-  SIDE[sidecar writers] --> EQ
+  WHERE[newdb_query executor + table_stats] -.可选写入.-> STATS
+  SIDE[sidecar builders] --> EQ
+  SIDE --> OTHER
+  ENG -.page_cache EqSidecar QueryTemp.-> MR[MemoryRegistry]
+  WHERE -.QueryTemp.-> MR
 ```
 
 **读路径**：打开表 → `HeapTable` + 可选 **page_cache**（引擎）→ MVCC 快照过滤 → WHERE/sidecar 加速命中。
@@ -280,17 +445,21 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  Q[查询命令 WHERE / PAGE / WHEREP]
-  P[plan_impl + policy]
+  Q[查询 WHERE COUNT WHEREP PAGE FIND 聚合…]
+  PAR[where/parser → WhereCond]
+  P[plan_impl 多 TU + policy]
   C[cache_impl]
-  ST[(TableStats 文件或内存)]
+  M[match_impl / query_with_index]
+  ST[(TableStats 磁盘或 hint)]
   EQ[equality_index_sidecar]
   CV[covering_index_sidecar]
   PG[page_index_sidecar]
   VS[visibility_checkpoint_sidecar]
   IC[index_catalog]
+  MR[MemoryRegistry QueryTemp]
 
-  Q --> P
+  Q --> PAR
+  PAR --> P
   P --> ST
   P --> C
   P --> EQ
@@ -299,7 +468,10 @@ flowchart TB
   P --> VS
   EQ --> IC
   CV --> IC
-  P -->|SHOW PLAN JSON| J[计划 JSON + table_stats_stale]
+  P --> M
+  M --> MR
+  M -->|行槽位 / 扫描| HT[HeapTable + MVCC]
+  P -->|SHOW PLAN JSON| J[计划 JSON + stale 标记]
 ```
 
 ---
@@ -308,23 +480,29 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-  RT[TxnRuntimeStats 等内存计数器]
+  COORD[TxnCoordinator stats_impl]
+  ENG[newdb_core 计数镜像 page_cache MemoryRegistry]
+  POD[txn_runtime_stats_snapshot.h 形状]
   J1["SHOW TUNING JSON"]
   RPT[newdb_runtime_report]
   PY[scripts/validate/*.py]
   JL["*.jsonl 趋势"]
   DB["runtime_trend_dashboard.json"]
 
-  RT --> J1
-  RT --> RPT
+  ENG -.镜像采样.-> COORD
+  COORD --> POD
+  POD --> J1
+  POD --> RPT
   RPT --> PY
   JL --> PY
   PY --> DB
-  PY -.可选_CLI_embed_子集.-> TIER[validate_runtime_stats tier]
+  PY -.可选 tier engine/cli_embed.-> TIER[validate_runtime_stats]
   subgraph gui2["rust_gui"]
-    DASH[Runtime Dashboard 模态]
+    DASH[Runtime Dashboard]
+    INV[Tauri invoke Python/工具]
   end
-  DB -.读取/展示.-> DASH
+  DB -.展示.-> DASH
+  PY -.校验脚本.-> INV
 ```
 
 `rust_gui` 通过 **镜像脚本**（`sync_runtime_binaries.ps1`）与 Tauri `invoke` 调用本机 Python/可执行文件参与校验；与引擎内部计数通过「导出 JSON / 日志」间接耦合。`validate_runtime_stats.py` 默认校验完整 **`required_stats_keys`**；可选 **`--stats-keys-tier engine|cli_embed`** 做契约子集门禁（与 [RUNTIME_STATS_SCHEMA.md](../../scripts/validate/RUNTIME_STATS_SCHEMA.md)、CI `runtime-stats-schema-gate` 一致）。
@@ -338,22 +516,25 @@ flowchart TB
   SRC[tests/*.cpp]
   SH[newdb_shell]
   CAPI[newdb_capi_adapter]
+  QRY[newdb_query]
   CORE[newdb_core]
   GT[GoogleTest FetchContent]
-  GCAP[gtest_capi + gtest_c_api.cpp]
+  GCAP[gtest_capi 仅包装 GTest]
   CTEST[CTest 注册]
 
   SRC --> SH
   SH --> CAPI
   CAPI --> CORE
+  CAPI --> QRY
+  QRY --> CORE
   SRC --> GT
   SRC --> CTEST
   GCAP --> GT
   GT -->|断言| SRC
 ```
 
-- **进程内（`newdb_tests`）**：链 **`newdb_shell`** → **`newdb_capi_adapter`** → **`newdb_core`** + `GTest::gtest_main`（与 `newdb_demo` 同一条 CLI 闭包，便于集成测复用 dispatch/txn/WHERE）。
-- **跨语言演示（`gtest_capi`）**：导出 C 接口包装 gtest，供 Python ctypes 等（见 `scripts/examples`）；与引擎业务数据流正交。
+- **进程内（`newdb_tests`）**：**`newdb_shell`** → **`newdb_capi_adapter`** → **`newdb_core`** + **`newdb_query`** + `GTest::gtest_main`（与 **`newdb_demo`** 同源 CLI/dispatch/WHERE 闭包）。
+- **跨语言演示（`gtest_capi`）**：仅链接 **FetchContent GTest** 的共享库包装层，**不**链接 `newdb_core`；供 Python ctypes 等（见 `scripts/examples`），与引擎业务数据流正交。
 
 ---
 
@@ -377,13 +558,13 @@ flowchart TB
 | **事务与 WAL** | BEGIN…COMMIT、写操作 | WAL 记录、LSN | `wal_service`、`wal_manager`、recovery |
 | **可见性** | 快照、读事务 | 过滤后的行集 | `mvcc`、`txn_manager` |
 | **观测** | 运行中事件 | JSON/JSONL、报告 | `stats_impl`、`runtime_report`、scripts |
-| **GUI** | 点击 / 脚本 | 命令、文件对话框 | Tauri、`libnewdb`（full_embed 或 **plugin** + `newdb_cli_backend`）、可选 `newdb_demo` 子进程 |
+| **GUI** | 点击 / 脚本 | 命令、文件对话框 | **默认**：Tauri + **`libnewdb`** + **`newdb_cli_backend`**（**`NEWDB_CLI_BACKEND_PATH`**）；对照：**full_embed** 单 DLL；可选 **`newdb_demo`** 子进程 |
 
 ---
 
 ## 11. 模块与子模块间流动详解
 
-本节在 §3–§10 的粗粒度图之上，按**真实调用顺序**与**数据载体**说明 `cli` 内各 handler、`modules/*`、`shell/state` 与 `engine` 之间如何衔接。实现以 `process_command_line`（`cli/shell/dispatch/router/dispatch.cc`）为准。
+本节在 §3–§10 的粗粒度图之上，按**真实调用顺序**与**数据载体**说明 `cli` 内各 handler、`modules/*`、`shell/state` 与 `engine` 之间如何衔接。实现以 `process_command_line`（`cli/shell/dispatch/router/dispatch.cc`）为准；入口侧 **`demo_main`** 用 **`ShellStateOwner`** 持有 `ShellState`，分发路径内用 **`ShellStateFacade`** 收窄对表名/数据路径/日志的访问并驱动 **`reset_session_heap_guard`** RAII。
 
 ### 11.1 命令入口：从 REPL 到两阶段分发
 
@@ -391,25 +572,30 @@ flowchart TB
 flowchart TB
   subgraph entry["进程入口"]
     APP["cli/app/demo_main"]
+    OWN["ShellStateOwner"]
     BOOT["shell/bootstrap/demo_runner"]
     REPL["shell/repl/demo_shell"]
   end
   subgraph dispatch["dispatch/router"]
     PCL["process_command_line"]
+    FAC["ShellStateFacade：bind_logging / eff path / heap guard reset"]
     P1["Phase-1：无需已加载 HeapTable"]
-    P2["Phase-2：需 get_cached_table → HeapTable&"]
+    P2["Phase-2：get_cached_table → HeapTable&"]
   end
   subgraph state["shell/state"]
-    SS["ShellState：session、WHERE 上下文、表缓存 guard"]
+    SS["ShellState：pimpl Session + txn + where_ctx + heap_guard_box"]
   end
   subgraph eng["engine（经 public API）"]
     SESS["Session / HeapTable"]
   end
 
+  APP --> OWN
+  OWN --> SS
   APP --> BOOT
   BOOT --> REPL
   REPL --> PCL
-  PCL --> SS
+  PCL --> FAC
+  FAC --> SS
   PCL -->|会话级命令先处理| P1
   PCL --> P2
   P2 --> SS
@@ -418,10 +604,11 @@ flowchart TB
 
 **控制流要点**
 
-1. `logging_bind_shell` 与 `append_session_log_line`：把当前行绑定到日志后端并写入会话日志文件（与业务模块正交）。
+1. **`ShellStateFacade::bind_logging`** 与 **`append_session_log_line`**：把当前行绑定到日志后端并写入会话日志文件（与业务模块正交）。
 2. **会话子通道**：`handle_session_commands` 若命中则直接返回，不进入 phase-1/2。
-3. **Phase-1 短路**：若 `shell_line_targets_phase2_only(line)` 为真（前缀如 `WHERE`/`PAGE`/`UPDATE`/`EXPORT` 等），**整段 phase-1 跳过**，直接进入 phase-2，避免无表时对 txn/DDL 链的空转。
+3. **Phase-1 短路**：若 `shell_line_targets_phase2_only(line)` 为真（前缀见 `dispatch_routing.cc` 中 **`kPhase2Prefixes`**，含 `WHERE`/`PAGE`/`QBAL`/`UPDATE`/`UPDATEWHERE`/`DELETEWHERE`/聚合与 attr 命令等），**整段 phase-1 跳过**，直接进入 phase-2，避免无表时对 txn/DDL 链的空转。
 4. **Phase-2 前置条件**：`get_cached_table` 失败则 phase-2 静默 no-op（保持与历史 shell 行为一致：无表时不报错直接返回）。
+5. **命令结束**：`process_command_line` 尾部 RAII **`ShellHeapGuardClear`** 调用 **`ShellStateFacade::reset_session_heap_guard`**，与 phase-2 内栈上 guard 配合释放本次行的堆访问句柄。
 
 ### 11.2 Phase-1：handler 链顺序与模块落点
 
@@ -454,17 +641,21 @@ flowchart LR
 
 ### 11.3 Phase-2：handler 链顺序与查询落点
 
+源码中为长度 **9** 的 **`phase2_handlers`** 数组（`dispatch.cc`）：聚合类命令已从单一 handler 拆成 **FIND**、**SUM/AVG**、**MIN/MAX** 三段，便于独立演进与测试。
+
 ```mermaid
 flowchart LR
   Q0["schema_key"]
   Q1["WHERE/COUNT/WHEREP"]
   Q2["UPDATE/DELETE"]
   Q3["SETATTR/RENATTR/DELATTR"]
-  Q4["FIND/SUM/AVG/MIN/MAX"]
-  Q5["PAGE"]
-  Q6["EXPORT"]
+  Q4["FIND / FINDPK"]
+  Q5["SUM/AVG"]
+  Q6["MIN/MAX"]
+  Q7["PAGE"]
+  Q8["EXPORT"]
 
-  Q0 --> Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6
+  Q0 --> Q1 --> Q2 --> Q3 --> Q4 --> Q5 --> Q6 --> Q7 --> Q8
 ```
 
 | 顺序 | Handler | 主要向下调用 |
@@ -473,9 +664,11 @@ flowchart LR
 | 2 | `handle_query_where_count_commands` | **`where/*`**（parser → executor → plan/policy/cache）、**sidecar**、`table_stats` |
 | 3 | `handle_dml_update_delete_commands` | `txn`、行级写、WAL、写冲突检测 |
 | 4 | `handle_dml_attr_commands` | 属性列、堆行更新 |
-| 5 | `handle_query_*_commands`（FIND/SUM…） | `where` 或表扫描聚合 |
-| 6 | `handle_query_page_command` | 页级扫描 + **page_index_sidecar** 等 |
-| 7 | `handle_export_command` | `import_export`、流式写出 |
+| 5 | `handle_query_find_commands` | `where` / PK 查找路径 |
+| 6 | `handle_query_sum_avg_commands` | 带可选 WHERE 的聚合 |
+| 7 | `handle_query_min_max_commands` | 极值扫描 |
+| 8 | `handle_query_page_command` | 页级扫描 + **page_index_sidecar** 等 |
+| 9 | `handle_export_command` | `import_export`、流式写出 |
 
 **典型载体**：`HeapTable& tbl`、WHERE 文本 → 解析树 → 候选行 id / 聚合标量；`SHOW PLAN` / `EXPLAIN WHERE` 为同一路径上的**观测侧输出**（计划 JSON + stale 标记）。
 
@@ -484,19 +677,20 @@ flowchart LR
 ```mermaid
 flowchart TB
   subgraph handlers["handlers/dml"]
-    DML["UPDATE/DELETE/INSERT 处理"]
+    DML["DML handlers + ShellState"]
   end
-  subgraph txn["modules/txn/coordinator"]
-    TM["txn_manager / core_impl"]
+  subgraph txn["txn/coordinator"]
+    TM["TxnCoordinator"]
     LS["lock_service"]
     WS["wal_service"]
-    WCF["write_conflict_service"]
-    ST["stats_impl → TxnRuntimeStats"]
+    WCF["write_conflict_service LockKey"]
+    ST["stats_impl TxnRuntimeStats POD"]
     VS["vacuum_service"]
   end
   subgraph engine["engine"]
     WM["WalManager"]
-    HT["HeapTable + page_io"]
+    HT["HeapTable page_io"]
+    MR["MemoryRegistry"]
   end
 
   DML --> TM
@@ -506,7 +700,9 @@ flowchart TB
   WS --> WM
   TM --> HT
   TM --> ST
-  VS -.异步或显式命令.-> HT
+  WM -.持久化同步配置.-> SYNC[demodb.walsync.conf]
+  HT -.PageCache EqSidecar.-> MR
+  VS -.compact_heap_file.-> HT
 ```
 
 **数据流摘要**：命令参数 → 事务状态机 →（必要时）**锁键** → **WAL 记录**追加 → 堆页/sidecar 就地更新 → 计数器进入 **runtime stats**；冲突时 `write_conflict_service` 在提交前短路。
@@ -515,11 +711,12 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  subgraph where_mod["modules/where"]
+  subgraph where_mod["newdb_query / modules/where"]
     PAR["parser → WhereCond"]
-    PLN["plan_impl"]
+    PLN["plan_impl 多 TU"]
     POL["policy_service"]
     CAC["cache_impl"]
+    MAT["match_impl query_with_index"]
     STA["table_stats"]
   end
   subgraph side["modules/sidecar"]
@@ -529,8 +726,9 @@ flowchart TB
     VC["visibility_checkpoint_sidecar"]
     IC["index_catalog"]
   end
-  subgraph heap["engine HeapTable"]
-    SCAN["行/页迭代 + MVCC"]
+  subgraph heap["engine"]
+    SCAN["HeapTable 行页迭代 + MVCC"]
+    MR["MemoryRegistry QueryTemp"]
   end
 
   PAR --> PLN
@@ -543,8 +741,10 @@ flowchart TB
   PLN --> VC
   EQ --> IC
   CV --> IC
-  PLN --> SCAN
-  CAC -.命中则缩短扫描.-> SCAN
+  PLN --> MAT
+  MAT --> MR
+  MAT --> SCAN
+  CAC -.命中缩短扫描.-> SCAN
 ```
 
 **流动说明**：`plan_impl` 汇聚「统计是否过期、缓存是否命中、哪类 sidecar 可剪枝」；**不可剪枝或 miss** 时仍回落到 `HeapTable` 全表/分页扫描。`*.tablestats` 为 **executor** 与磁盘之间的可选持久化层（见 §5）。
@@ -629,45 +829,45 @@ CLI **不得** include `engine/src/**`；合法流动为：
 
 ### 12.2 `ShellState`：CLI 聚合根
 
-**定义**：`cli/shell/state/shell_state.h` 中 `struct ShellState`（对外声明）；**字段实现**主要在 **`ShellState::Impl`**（`shell_state_impl.h`），由 **`shell_state.cc` / `shell_state_ops.cc`** 修改，读侧推荐 **`ShellStateFacade`**（见 [`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md) 各 Wave 说明）。
+**定义**：`cli/shell/state/shell_state.h` 中 **`class ShellState`（pimpl）**：对外仅暴露窄接口（`session()`、`txn()`、`where_ctx()`、`lsm()`、`sidecar()`、路径访问器等），**真实字段**在 **`ShellState::Impl`**（`shell_state_impl.h`，仅供 `shell_state.cc` / `shell_state_ops.cc` include）。LSM 与侧车调参置于 **`ShellLsmSidecarRuntime`**（`shell_state_lsm_sidecar_runtime_impl.h`），事务 + WHERE 运行时 bundle 置于 **`ShellTxnWhereRuntime`**，避免臃肿头文件。
 
-**子结构 / 成员（节选）**：
+**进程所有权**：**`ShellStateOwner`**（`shell_state_owner.h`）默认构造内嵌 **`Session`**；可选 **`ShellStateEngineBorrowedTag` + `newdb_engine_session_t*`** 构造路径把 `Session` **挂在引擎句柄上**（full C API / GUI DLL 场景）。
 
-| 成员 | 类型角色 | 关联模块 |
-|------|-----------|----------|
-| `session` | `newdb::Session` | 引擎会话、堆表句柄、`lock_heap` 与 `HeapAccess` |
-| `session_heap_guard` | `optional<Session::HeapAccess>` | 与 `process_command_line` RAII 同生命周期，保证 phase-2 内 `HeapTable*` 有效 |
-| `txn` | `TxnCoordinator` | 事务、WAL、锁、vacuum、写冲突、**统计汇总的挂载点** |
-| `where_ctx` | `WhereQueryContext` | WHERE 查询缓存 LRU、策略状态、原子计数器、`TableStats*` 提示 |
-| `lsm` | `LsmShellCache` | memtable / immutable / segment 元数据；与 dispatch services、txn 中的 LSM 路径配合 |
-| `sidecar` | `SidecarShellTuning` | 失效合并频率、同步/异步模式；写路径与 `sidecar_invalidate_service` |
-| `data_dir` / `log_file_path` 等 | 路径与 I/O 策略 | workspace、日志、**表文件解析** `resolve_table_file` |
+**子结构 / 访问方式（节选）**：
 
-**算法/不变式**：`get_cached_table` 在首次 phase-2 访问时 `emplace(lock_heap(...))`；`shell_invalidate_session_table` 必须在 `Session::invalidate` 前 `reset` guard，避免死锁（头文件注释）。
+| 访问器 / 成员桶 | 类型角色 | 关联模块 |
+|-----------------|----------|----------|
+| `session()` | `newdb::Session` | 引擎会话、堆表、`lock_heap` 与 `HeapAccess` |
+| `impl_->heap_guard_box_->session_heap_guard` | `optional<Session::HeapAccess>` | phase-2 **`get_cached_table`** 缓存；与 `process_command_line` 尾部 **`reset_session_heap_guard`** 配对 |
+| `txn()` | `TxnCoordinator` | 事务、WAL、锁、vacuum、写冲突、**统计挂载点** |
+| `where_ctx()` | `WhereQueryContext` | WHERE LRU、策略、`TableStats*` 提示 |
+| `lsm()` | `LsmShellCache` | memtable / segment 元数据（定义见 `shell_state_lsm.h`） |
+| `sidecar()` | `SidecarShellTuning` | 侧车失效频率/模式（`shell_state_sidecar.h`） |
+| `log_file_path()` / `data_dir()` 等 | 路径与 I/O | **`resolve_table_file(ShellState&, …)`**、`effective_data_path` |
 
-**耦合**：几乎所有 handler 接收 `ShellState&`，形成**中心状态与扇出**；修改 `ShellState` 布局会影响二进制兼容以外的全部 CLI 测试。
+**算法/不变式**：`get_cached_table`（`shell_state_ops.cc`）在首次需要时 **`emplace(lock_heap(log_file_path))`**；`shell_invalidate_session_table` 必须先 **`heap_guard_box_->session_heap_guard.reset()`** 再 **`session().invalidate()`**，避免持锁死锁。
+
+**耦合**：handler 仍以 **`ShellState&`** 为扇出中心；窄读写推荐 **`ShellStateFacade`**（见 [`SHELL_STATE_INCLUDE_AUDIT.md`](../dev/SHELL_STATE_INCLUDE_AUDIT.md)）。
 
 ### 12.3 事务协调器 `TxnCoordinator`
 
-**定义**：`cli/modules/txn/coordinator/txn_manager.h`。
+**定义**：`cli/modules/txn/coordinator/txn_manager.h`（**类声明**）；状态机实现隐藏在 **`TxnCoordinatorState`**（`std::unique_ptr` 成员 **`st_`**）。
 
-**核心数据结构**：
+**核心数据结构（头文件拆分）**：
 
-| 类型 | 作用 |
-|------|------|
-| `TxnState` | 无事务 / Active / Committed / RolledBack |
-| `TxnRecord` | 逻辑回滚日志项：表名、操作、键、新旧值、`wal_lsn`、`op_seq` |
-| `TxnRuntimeStats` | 大块扁平计数器：vacuum、WAL 恢复各阶段耗时与 checkpoint 后扫描/redo 计划指标、写冲突、文件锁、扩展写意向锁键、**LSM**、**page_cache / memory_budget / MemoryRegistry** 镜像字段、`table_storage_health_*`、`write_*_p95_ms` 等 |
-| `WriteConflictPolicy` / `TxnIsolationLevel` | 写冲突与隔离级别策略（与 `docs/txn/TXN_ISOLATION_AND_LOCKING.md` 对齐） |
-| `WriteTimingStage` | 写路径分段采样标签（heap、hot_index、sidecar_invalidate、wal、lsm…） |
-| `LockKey` / `LockKeyKind` | 扩展写意向锁键：主键、range write intent、predicate write intent、二级索引等，供同一 reservation map 进行冲突检测与观测 |
+| 类型 | 定义位置 | 作用 |
+|------|-----------|------|
+| `TxnState` / `TxnRecord` | **`txn_coordinator_types.h`** | 事务枚举与逻辑回滚日志项 |
+| `WriteConflictPolicy` / `TxnIsolationLevel` / `WriteTimingStage` | **`txn_coordinator_types.h`** | 冲突策略、隔离级别、写路径分段标签 |
+| **`TxnRuntimeStats`** | **`engine/include/newdb/txn_runtime_stats_snapshot.h`**（CLI 通过 **`txn_runtime_stats_types.h`** 间接包含） | **SHOW TUNING / JSONL / C API** 的扁平 POD；含 **`wal_recovery_undo_chain_fallback_txns`** 等恢复细分字段 |
+| `LockKey` / `LockKeyKind` | `write_conflict/lock_key.h` | range / predicate / 二级索引等写意向 |
 
-**子模块文件（概念映射）**：`core_impl`、`lock_service`、`wal_service`、`recovery_service`、`vacuum_service`、`write_conflict_service`、`stats_impl` 等实现类通过 `TxnCoordinator` 友元或内部指针协作（实现细节见各 `.cc`）。
+**子模块文件（概念映射）**：`core_impl`、`lock_service`、`wal_service`、`recovery_service`、`vacuum_service`、`write_conflict_service`、`stats_impl` 等实现 TU 仍挂 **`TxnCoordinator`** API；新增 API 如 **`tryReserveWriteKeysBatchSorted`**、**`releaseWriteIntentStorageKeysForCurrentTxn`** 见 `txn_manager.h`。
 
 **算法要点（摘要）**：
 
 - **WAL 先行**：`writeWAL` / `flushWAL` 与引擎 `WalManager` 协同；`recoverFromWAL` 触发扫描与 undo/redo 统计进入 `TxnRuntimeStats`。P2 拆分后，checkpoint 后扫描、redo planning pending txn、apply conflict/skip 等也进入 `wal_recovery_*` 指标族。
-- **写冲突**：`tryReserveWriteKey` 处理传统表 + 主键行写意图；`tryReserveWriteLockKey` 复用同一全局 reservation map 承载 range/predicate/secondary-index 写意图。策略 `Reject`/`Wait` 控制立即失败或等待；超时计入 `write_conflict_wait_timeout_count`，range/predicate 成功预留计入 `lock_key_range_count` / `lock_key_predicate_count`。
+- **写冲突**：`tryReserveWriteKey` / **`tryReserveWriteKeysBatchSorted`** 处理主键行写意图（批量路径在首次失败时释放本语句已抢到的预留）；`tryReserveWriteLockKey` 复用同一 reservation map 承载 range/predicate/secondary-index 写意图。策略 `Reject`/`Wait` 控制立即失败或等待；超时计入 `write_conflict_wait_timeout_count`，range/predicate 成功预留计入 `lock_key_range_count` / `lock_key_predicate_count`。
 - **Vacuum**：队列 + 冷却 + 可选 `measure_table_storage_health` 加权 **debt**（`stats_impl` 中 tier 推导）。
 - **快照读**：`syncHeapReadSnapshotForQuery`（`HeapReadViewGuard`）与 `transaction_snapshot_lsn` / `statement_snapshot_lsn` 字段反映读视图刷新。
 - **内存观测闭环**：`stats_impl` 同时镜像旧 `memory_budget_*` 字段与新 `mem_*` per-kind / global 字段；后者来自 `MemoryRegistry` 对 page cache、eq sidecar、WHERE query temp 的 admit/release/evict 计数。
@@ -686,7 +886,8 @@ CLI **不得** include `engine/src/**`；合法流动为：
 | `WhereQueryContext` | **每 shell** 查询缓存：`unordered_map` + **LRU 列表**（`kMaxQueryCacheEntries = 128`）；大量 `atomic` 计数器（cache hit、plan 分类、扫描行数、sidecar 磁盘读、heap scan budget、query temp reservation 等）；`WherePolicyState policy`；`const TableStats* query_stats_hint` |
 | `PlanCandidate` / `PlanCost` | `SHOW PLAN` / `EXPLAIN` / C API 用的轻量候选路径、估计行数与 `rationale` 人类可读排序原因 |
 | `query_with_index` | 主入口：解析后多条件 → 选路（sidecar / PK / fallback scan）→ 通过 `MemoryKind::QueryTemp` 预留临时内存 → 返回行 slot 向量 |
-| `where_build_plan_candidates` | 按估计代价升序生成候选集合（与 `where_estimate_scan_rows` 门控一致），候选携带 `rationale` 便于计划解释 |
+| `where_build_plan_candidates` | 按估计代价升序生成候选集合；重载接收 **`WherePlanningStatsRef`**（封装可选 `TableStats*`），与 `where_estimate_scan_rows` 门控一致 |
+| `build_candidate_slots` / **`where_predicate_fingerprint_for_write_intent`** / **`where_try_derive_closed_int_range`** | 计划槽位构建、谓词指纹（写冲突）、闭区间范围推导（range intent） |
 
 **算法要点（摘要）**：
 
@@ -743,8 +944,9 @@ CLI **不得** include `engine/src/**`；合法流动为：
 
 | 类型 / API | 位置（概念） | 算法 / 语义 |
 |-------------|----------------|-------------|
-| `WalOp` / `WalRecordHeader` / `WalDecodedRecord` | `include/newdb/wal_manager.h` | 变长 payload、LSN 单调、CRC；恢复时解码流 |
-| `WalSyncMode` | 同上 | `Full` / `Normal` / `Off` 控制 fsync 频率与吞吐 |
+| `WalOp` / `WalRecordHeader` / `WalDecodedRecord` | `include/newdb/wal_manager.h` | 变长 payload、LSN 单调、CRC；**`WalDecodedRecord` 含 PITR / 时间戳可选字段** |
+| `WalSyncMode` | **`include/newdb/wal_sync_mode.h`** | `Full` / `Normal` / `Off` 控制 fsync 频率与吞吐 |
+| **`TxnRuntimeStats`（引擎侧 POD）** | **`include/newdb/txn_runtime_stats_snapshot.h`** | 与 CLI `TxnCoordinator::runtimeStats()` 导出形状对齐 |
 | `PageCacheGlobalStats` / `page_cache_try_get` / `page_cache_put` | `include/newdb/page_cache.h` | 进程级 LRU（按 heap 路径 + 页号）；**可选**环境变量启用；向 `MemoryRegistry` 报告 PageCache kind 的 admit / eviction / reject |
 | `MemoryBudgetSnapshot` | `include/newdb/memory_budget.h` | 旧兼容视角：与页缓存上限统一语义；拒绝与驱逐计数 |
 | `MemoryRegistry` / `MemoryKind` | `include/newdb/memory_registry.h` | v2 closed loop：统一 global cap 与 per-kind cap；kind 包括 `PageCache`、`EqSidecar`、`QueryTemp`；支持 evictor 回调与 `memory_registry_totals()` 汇总 |
@@ -765,8 +967,8 @@ CLI **不得** include `engine/src/**`；合法流动为：
 
 | 源类型 / 模块 | 关联手段 | 目标 |
 |---------------|----------|------|
-| `ShellState::txn` | C++ 成员 + `writeWAL` 调用 | `newdb::WalManager`、堆文件 |
-| `ShellState::where_ctx` | 指针/引用传入 `query_with_index` | `HeapTable`、`TableStats*`、sidecar 读 |
+| `ShellState::txn()` | 访问器 + `writeWAL` 调用 | `newdb::WalManager`、堆文件 |
+| `ShellState::where_ctx()` | 指针/引用传入 `query_with_index` | `HeapTable`、`TableStats*`、sidecar 读 |
 | `TableStats::stats_schema_fp` | 文件 on disk | `TableSchema` 列集合指纹 |
 | `IndexDescriptor::data_lsn` | 文件头 + 运行时比较 | 当前表代际 |
 | `TxnRuntimeStats` | JSON 序列化 | Python 校验、GUI、文档 schema |
@@ -776,9 +978,52 @@ CLI **不得** include `engine/src/**`；合法流动为：
 
 以下引用为**仓库内真实路径与行号**（相对仓库根 `database/`）；若你本地移动过符号，请用符号名或 `rg` 重新对齐。节选仅覆盖与 §11–§12 叙述直接相关的片段。
 
-#### 分发：`process_command_line` 两阶段责任链
+#### 分发：`process_command_line` 门面与两阶段责任链
 
-```51:92:newdb/cli/shell/dispatch/router/dispatch.cc
+入口先用 **`ShellStateFacade`** 绑定日志、规范化行尾，并在 **`handle_session_commands`** 之后进入 phase-1 / phase-2；函数末尾 **`ShellHeapGuardClear`** 确保 **`reset_session_heap_guard`** 在行处理结束时运行。
+
+```14:52:newdb/cli/shell/dispatch/router/dispatch.cc
+bool process_command_line(ShellState& st, const char* input_line) {
+    ShellStateFacade f(st);
+    std::string& current_table = f.table_name();
+    std::string& current_file = f.data_path();
+    const char* log_file = f.log_file_path().c_str();
+    std::string line;
+    if (input_line != nullptr) {
+        line = input_line;
+    }
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) {
+        line.pop_back();
+    }
+    if (line.empty()) {
+        return true;
+    }
+    const char* line_cstr = line.c_str();
+
+    f.bind_logging();
+    const std::string eff_data = f.effective_data_path();
+    append_session_log_line(log_file, line_cstr, f.encrypt_log());
+
+    struct ShellHeapGuardClear {
+        ShellStateFacade* f;
+        ~ShellHeapGuardClear() {
+            if (f != nullptr) {
+                f->reset_session_heap_guard();
+            }
+        }
+    } shell_heap_clear{&f};
+
+    bool session_handled = false;
+    const bool keep_going = handle_session_commands(line_cstr, log_file, session_handled);
+    if (!keep_going) {
+        return false;
+    }
+    if (session_handled) {
+        return true;
+    }
+```
+
+```53:98:newdb/cli/shell/dispatch/router/dispatch.cc
     // Phase-1: commands that do not require a loaded HeapTable (txn, DDL, catalog, insert, ...).
     if (!shell_line_targets_phase2_only(line_cstr)) {
         const std::array<std::function<bool()>, 8> phase1_handlers = {
@@ -822,11 +1067,15 @@ CLI **不得** include `engine/src/**`；合法流动为：
             return true;
         }
     }
+
+    log_and_print(log_file, "[ERR] unknown command. Type HELP.\n");
+    return true;
+}
 ```
 
-`shell_line_targets_phase2_only` 与 phase-2 动词前缀表（与 handler 前缀对齐）：
+`shell_line_targets_phase2_only` 与 **`kPhase2Prefixes`**（含 **`UPDATEWHERE` / `DELETEWHERE` / `SETATTRMULTI`** 等，与 phase-2 handler 动词对齐）：
 
-```31:69:newdb/cli/shell/dispatch/router/dispatch_routing.cc
+```31:73:newdb/cli/shell/dispatch/router/dispatch_routing.cc
 bool shell_line_targets_phase2_only(const char* line) {
     if (line == nullptr) {
         return false;
@@ -851,10 +1100,13 @@ bool shell_line_targets_phase2_only(const char* line) {
         {"FIND(", 5},
         {"FINDPK", 6},
         {"QBAL", 4},
+        {"UPDATEWHERE", 11},
         {"UPDATE", 6},
+        {"DELETEWHERE", 11},
         {"DELETE(", 7},
         {"DELETEPK", 8},
         {"EXPORT", 6},
+        {"SETATTRMULTI", 12},
         {"SETATTR", 7},
         {"RENATTR", 7},
         {"DELATTR", 7},
@@ -869,100 +1121,143 @@ bool shell_line_targets_phase2_only(const char* line) {
 }
 ```
 
-#### `ShellState` 聚合、`get_cached_table`、读视图 RAII
+#### `ShellState`（pimpl）、`Impl` 布局、`get_cached_table`、读视图 RAII
 
-```20:87:newdb/cli/shell/state/shell_state.h
-struct ShellState {
-    enum class BenchmarkProfile : std::uint8_t {
-        NewdbDefault = 0,
-        LeveldbLike = 1,
-        InnodbLike = 2,
-        HybridBalanced = 3,
-    };
-    struct RuntimePolicy {
-        BenchmarkProfile profile{BenchmarkProfile::NewdbDefault};
-        bool initialized{false};
-    };
-    struct LsmEntry {
-        newdb::Row row;
-        bool deleted{false};
-        std::uint64_t seq{0};
-    };
-    struct LsmSegmentMeta {
-        std::string path;
-        std::uint32_t level{0};
-        int min_key{0};
-        int max_key{0};
-        std::uint64_t entry_count{0};
-        std::uint64_t max_seq{0};
-    };
+```37:114:newdb/cli/shell/state/shell_state.h
+class ShellState {
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
 
-    newdb::Session session;
-    std::optional<newdb::Session::HeapAccess> session_heap_guard;
-    TxnCoordinator txn;
-    std::string log_file_path{"demo_log.bin"};
+public:
+    ShellState();
+    explicit ShellState(ShellStateEngineBorrowedTag, newdb_engine_session_t* engine_host);
+    ~ShellState();
+    ShellState(ShellState&&) noexcept;
+    ShellState& operator=(ShellState&&) noexcept;
+    ShellState(const ShellState&) = delete;
+    ShellState& operator=(const ShellState&) = delete;
 
-    std::string data_dir;
+    [[nodiscard]] newdb::Session& session() noexcept;
+    [[nodiscard]] const newdb::Session& session() const noexcept;
 
-    int mirror_output_fd{-1};
+    void reset_session_heap_guard() noexcept;
 
-    bool encrypt_log{false};
+    [[nodiscard]] std::uint64_t bump_txn_stmt_savepoint_seq() noexcept;
 
-    bool verbose{false};
-    WhereQueryContext where_ctx;
+    TxnCoordinator& txn();
+    [[nodiscard]] const TxnCoordinator& txn() const;
+    WhereQueryContext& where_ctx();
+    [[nodiscard]] const WhereQueryContext& where_ctx() const;
 
-    struct LsmShellCache {
-        std::unordered_map<int, newdb::Row> hot_index_recent;
-        std::unordered_map<int, LsmEntry> lsm_memtable;
-        std::unordered_map<int, LsmEntry> lsm_immutable;
-        std::vector<LsmSegmentMeta> lsm_segments;
-        std::uint64_t lsm_memtable_bytes{0};
-        std::uint64_t lsm_seq{0};
-        std::string lsm_table_name;
-    } lsm;
+    LsmShellCache& lsm();
+    [[nodiscard]] const LsmShellCache& lsm() const;
+    SidecarShellTuning& sidecar();
+    [[nodiscard]] const SidecarShellTuning& sidecar() const;
 
-    struct SidecarShellTuning {
-        std::uint64_t sidecar_pending_writes{0};
-        std::uint64_t sidecar_invalidate_every_n{0};
-        std::uint8_t sidecar_invalidate_mode{0};
-    } sidecar;
+    [[nodiscard]] std::string& log_file_path() noexcept;
+    [[nodiscard]] const std::string& log_file_path() const noexcept;
+    [[nodiscard]] std::string& data_dir() noexcept;
+    [[nodiscard]] const std::string& data_dir() const noexcept;
 
-    RuntimePolicy runtime_policy{};
+    [[nodiscard]] int& mirror_output_fd() noexcept;
+    [[nodiscard]] int mirror_output_fd() const noexcept;
+
+    [[nodiscard]] bool& encrypt_log() noexcept;
+    [[nodiscard]] bool encrypt_log() const noexcept;
+
+    [[nodiscard]] bool& verbose() noexcept;
+    [[nodiscard]] bool verbose() const noexcept;
+
+    [[nodiscard]] ShellRuntimePolicy& runtime_policy() noexcept;
+    [[nodiscard]] const ShellRuntimePolicy& runtime_policy() const noexcept;
+
+    [[nodiscard]] std::uint64_t heap_decode_slot_calls() const noexcept;
+    [[nodiscard]] std::uint64_t heap_decode_slot_hits() const noexcept;
+    [[nodiscard]] std::uint64_t heap_decode_slot_misses() const noexcept;
+
+    [[nodiscard]] std::string& session_table_name() noexcept;
+    [[nodiscard]] const std::string& session_table_name() const noexcept;
+    [[nodiscard]] std::string& session_data_path() noexcept;
+    [[nodiscard]] const std::string& session_data_path() const noexcept;
+    [[nodiscard]] newdb::TableSchema& session_schema() noexcept;
+    [[nodiscard]] const newdb::TableSchema& session_schema() const noexcept;
+    [[nodiscard]] newdb::HeapTable& session_heap_table() noexcept;
+    [[nodiscard]] const newdb::HeapTable& session_heap_table() const noexcept;
+
+    [[nodiscard]] newdb::Status session_ensure_loaded();
+    void session_invalidate();
+
+    [[nodiscard]] bool emit_where_plan_json(const char* log_path,
+                                            const WhereCond* conds,
+                                            std::size_t cond_count,
+                                            std::string* out_json);
+
+    friend newdb::HeapTable* get_cached_table(ShellState& st);
+    friend void shell_invalidate_session_table(ShellState& st);
+    friend void reload_schema_from_data_path(ShellState& st, const std::string& data_path);
 };
 ```
 
-```121:133:newdb/cli/shell/state/shell_state.h
-inline newdb::HeapTable* get_cached_table(ShellState& st) {
-    if (!st.session_heap_guard.has_value() || !st.session_heap_guard.value()) {
-        st.session_heap_guard.emplace(st.session.lock_heap(st.log_file_path.c_str()));
+```34:44:newdb/cli/shell/state/shell_state_impl.h
+struct ShellState::Impl {
+    std::unique_ptr<newdb::Session> session_;
+    newdb_engine_session_t* engine_session_borrow_{nullptr};
+    std::unique_ptr<shell_state_detail::HeapGuardBox> heap_guard_box_;
+    std::unique_ptr<ShellTxnWhereRuntime> txn_where_;
+    std::unique_ptr<ShellLsmSidecarRuntime> lsm_sidecar_;
+    ShellStatePathsAndIoFlags paths_and_io_;
+    std::uint64_t txn_stmt_savepoint_seq{0};
+};
+```
+
+```25:33:newdb/cli/shell/state/shell_state_lsm.h
+struct LsmShellCache {
+    std::unordered_map<int, newdb::Row> hot_index_recent;
+    std::unordered_map<int, LsmEntry> lsm_memtable;
+    std::unordered_map<int, LsmEntry> lsm_immutable;
+    std::vector<LsmSegmentMeta> lsm_segments;
+    std::uint64_t lsm_memtable_bytes{0};
+    std::uint64_t lsm_seq{0};
+    std::string lsm_table_name;
+};
+```
+
+```60:73:newdb/cli/shell/state/shell_state_ops.cc
+newdb::HeapTable* get_cached_table(ShellState& st) {
+    ShellStateFacade f(st);
+    auto& g = st.impl_->heap_guard_box_->session_heap_guard;
+    if (!g.has_value() || !g.value()) {
+        g.emplace(f.session().lock_heap(f.log_file_path().c_str()));
     }
-    newdb::Session::HeapAccess& acc = st.session_heap_guard.value();
-    return acc ? &st.session.table : nullptr;
+    newdb::Session::HeapAccess& acc = g.value();
+    return acc ? &f.heap_table() : nullptr;
 }
 
-inline void shell_invalidate_session_table(ShellState& st) {
-    st.session_heap_guard.reset();
-    st.session.invalidate();
+void shell_invalidate_session_table(ShellState& st) {
+    st.impl_->heap_guard_box_->session_heap_guard.reset();
+    ShellStateFacade(st).session().invalidate();
 }
 ```
 
-```189:194:newdb/cli/shell/state/shell_state.h
+```9:16:newdb/cli/shell/state/shell_state_heap_read_guard.h
 struct HeapReadViewGuard {
     ShellState& st;
     newdb::HeapTable& tbl;
-    HeapReadViewGuard(ShellState& s, newdb::HeapTable& t) : st(s), tbl(t) { st.txn.syncHeapReadSnapshotForQuery(tbl); }
+    HeapReadViewGuard(ShellState& s, newdb::HeapTable& t) : st(s), tbl(t) {
+        st.txn().syncHeapReadSnapshotForQuery(tbl);
+    }
     ~HeapReadViewGuard() { tbl.clear_snapshot(); }
 };
 ```
 
-#### 事务类型与 `TxnCoordinator` 对外 API（节选）
+#### 事务枚举 / 记录 / 策略与 **`TxnRuntimeStats`（引擎共享 POD）**
 
-```26:46:newdb/cli/modules/txn/coordinator/txn_manager.h
+```8:47:newdb/cli/modules/txn/coordinator/txn_coordinator_types.h
 enum class TxnState {
     None,
     Active,
     Committed,
-    RolledBack
+    RolledBack,
 };
 
 struct TxnRecord {
@@ -977,11 +1272,32 @@ struct TxnRecord {
     std::uint64_t op_seq{0};
     std::uint64_t wal_lsn{0};
 };
+
+enum class WriteConflictPolicy {
+    Reject,
+    Wait,
+};
+
+enum class TxnIsolationLevel {
+    ReadCommitted,
+    Snapshot,
+};
+
+enum class WriteTimingStage : std::uint8_t {
+    HeapAppend = 0,
+    HotIndex = 1,
+    SidecarInvalidate = 2,
+    WalAppend = 3,
+    LsmTrack = 4,
+    LsmRotateCompact = 5,
+    LsmFlush = 6,
+    LsmCompaction = 7,
+};
 ```
 
-`TxnRuntimeStats` 为扁平可观测字段大结构；以下为**与源码一致的全文节选**（便于检索字段名；完整以头文件为准）：
+`TxnRuntimeStats` **单一权威定义**在引擎头 **`txn_runtime_stats_snapshot.h`**（CLI 经 **`txn_runtime_stats_types.h`** 转发）；与 **`SHOW TUNING JSON` / JSONL** 字段顺序一致：
 
-```48:246:newdb/cli/modules/txn/coordinator/txn_manager.h
+```9:157:newdb/engine/include/newdb/txn_runtime_stats_snapshot.h
 struct TxnRuntimeStats {
     std::uint64_t vacuum_trigger_count{0};
     std::uint64_t vacuum_execute_count{0};
@@ -997,11 +1313,9 @@ struct TxnRuntimeStats {
     std::uint64_t write_conflict_count{0};
     std::uint64_t write_conflict_wait_count{0};
     std::uint64_t write_conflict_wait_timeout_count{0};
-    /// Last sampled write-conflict line (`table=...;row=...;holder=...;tag=...`) for observability.
     std::string write_conflict_last_sample;
     std::uint64_t file_lock_acquire_fail_count{0};
     std::uint64_t file_lock_same_process_reuse_count{0};
-    /// Lock marker removed as stale (strict env + age); best-effort cross-process cleanup.
     std::uint64_t file_lock_stale_marker_count{0};
     std::uint64_t sidecar_invalidate_count{0};
     std::uint64_t sidecar_invalidate_fail_count{0};
@@ -1015,21 +1329,14 @@ struct TxnRuntimeStats {
     std::uint64_t wal_recovery_finalize_ms{0};
     std::uint64_t wal_recovery_records_scanned{0};
     std::uint64_t wal_recovery_dangling_txns{0};
-    /// WAL recovery redo phase (committed replay) wall time for the CLI coordinator path.
     std::uint64_t wal_recovery_redo_ms{0};
-    /// Count of CHECKPOINT_BEGIN records observed during the last `recoverFromWAL` scan pass.
     std::uint64_t wal_recovery_checkpoint_begin_count{0};
-    /// Count of CHECKPOINT_END records observed during the last `recoverFromWAL` scan pass.
     std::uint64_t wal_recovery_checkpoint_end_count{0};
-    /// WAL records with LSN after last complete checkpoint (CLI reconcile + `capture_recovery_scan_stats`).
     std::uint64_t wal_recovery_records_after_checkpoint{0};
-    /// Indexed WAL segments from segment scan (`WalRecoveryStats::indexed_segments`).
     std::uint64_t wal_recovery_segments_after_checkpoint{0};
-    /// Uncommitted txn count observed during redo planning (`dangling_by_txn.size()` in reconcile path).
     std::uint64_t wal_recovery_redo_plan_pending_txn_count{0};
-    /// Idempotent redo skips / conflicts (`strict` mode duplicates or guard collisions).
     std::uint64_t wal_recovery_apply_conflict_count{0};
-    /// Last successful coordinator WAL reconcile policy tag (may include `|heap_policy=...` when engine stats exist).
+    std::uint64_t wal_recovery_undo_chain_fallback_txns{0};
     std::string wal_recovery_policy;
     std::uint64_t wal_group_commit_count{0};
     std::uint64_t wal_group_commit_batch_commits{0};
@@ -1075,16 +1382,11 @@ struct TxnRuntimeStats {
     std::uint64_t lazy_materialize_rows_total{0};
     std::uint64_t lazy_materialize_max_rows{0};
     std::uint64_t lazy_materialize_elapsed_ms{0};
-    /// Last observed vacuum queue pressure heuristic (depth-based; phase 9).
     std::uint64_t vacuum_priority_score{0};
-    /// Last `measure_table_storage_health`-derived bonus added to file-size debt when
-    /// `NEWDB_VACUUM_QUEUE_USE_HEALTH=1` (0 when disabled or load failed).
     std::uint64_t vacuum_health_bonus_last{0};
-    /// Last vacuum enqueue score decomposition (see `compute_vacuum_score_breakdown` in vacuum_service.cc).
     std::uint64_t vacuum_score_file_bytes_term{0};
     std::uint64_t vacuum_score_health_bonus_term{0};
     std::uint64_t vacuum_score_wal_since_term{0};
-    /// Last successful `measure_table_storage_health` snapshot (vacuum enqueue path when health env on).
     std::uint64_t table_storage_health_logical_rows{0};
     std::uint64_t table_storage_health_physical_rows{0};
     std::uint64_t table_storage_health_tombstone_rows{0};
@@ -1094,65 +1396,40 @@ struct TxnRuntimeStats {
     double table_storage_health_fragmentation_ratio{0.0};
     std::uint64_t table_storage_health_last_vacuum_lsn{0};
     std::uint64_t table_storage_health_last_vacuum_elapsed_ms{0};
-    /// `good` | `watch` | `degraded` | `critical` — derived from last storage health snapshot (see `stats_impl.cc`).
     std::string table_storage_health_tier{"good"};
-    /// Last vacuum enqueue debt (file bytes + optional health bonus); see `triggerVacuum`.
     std::uint64_t compact_debt_bytes{0};
     std::uint64_t compact_debt_rows{0};
     double compact_debt_ratio{0.0};
     std::uint64_t compact_debt_priority{0};
-    /// Process-wide heap page cache (see `NEWDB_PAGE_CACHE_MAX_BYTES`); counters since process start.
     std::uint64_t page_cache_hits{0};
     std::uint64_t page_cache_misses{0};
     std::uint64_t page_cache_evictions{0};
     std::uint64_t page_cache_bytes_in_cache{0};
-    /// Configured process-wide page cache cap (`NEWDB_PAGE_CACHE_MAX_BYTES`, 0 = disabled / unlimited).
     std::uint64_t memory_budget_max_bytes{0};
-    /// Current bytes attributed to the page cache LRU (phase-1 stand-in for unified engine memory budget).
     std::uint64_t memory_budget_used_bytes{0};
-    /// Page cache refused `put` because one page exceeded `NEWDB_PAGE_CACHE_MAX_BYTES` (see `PageCacheGlobalStats`).
     std::uint64_t memory_budget_reject_count{0};
-    /// LRU eviction volume (see `PageCacheGlobalStats::bytes_evicted_total`).
     std::uint64_t memory_budget_bytes_evicted_total{0};
-    /// Eq sidecar loads skipped when on-disk index size + page-cache bytes would exceed memory budget cap.
     std::uint64_t memory_budget_sidecar_load_skipped_total{0};
-    /// Per-kind page cache bytes admitted into MemoryRegistry (Phase 5 v2 closed loop).
     std::uint64_t mem_page_cache_used_bytes{0};
-    /// Per-kind page cache LRU evictions reported back to the MemoryRegistry.
     std::uint64_t mem_page_cache_evictions{0};
-    /// Per-kind page cache `try_admit` rejects (oversized page or cap exhausted).
     std::uint64_t mem_page_cache_admit_rejects{0};
-    /// Per-kind equality sidecar bytes admitted (header + bucket slot estimate).
     std::uint64_t mem_sidecar_used_bytes{0};
-    /// Per-kind equality sidecar LRU evictions returned by registered evictor.
     std::uint64_t mem_sidecar_evictions{0};
-    /// Per-kind equality sidecar `try_admit` rejects (entry too large or cap exhausted).
     std::uint64_t mem_sidecar_admit_rejects{0};
-    /// Per-kind WHERE query temp bytes admitted (rough `logical_rows*sizeof(size_t)+conds*256` estimate).
     std::uint64_t mem_query_temp_used_bytes{0};
-    /// Per-kind WHERE query temp evictions (placeholder; reserved for future eviction hooks).
     std::uint64_t mem_query_temp_evictions{0};
-    /// Per-kind WHERE query temp `try_admit` rejects (caller fell back to no-op result).
     std::uint64_t mem_query_temp_admit_rejects{0};
-    /// Aggregate of per-kind used bytes (`page_cache + sidecar + query_temp`).
     std::uint64_t mem_global_used_bytes{0};
-    /// Sum of per-kind admit rejects (cross-kind global view of memory pressure).
     std::uint64_t mem_global_admit_rejects{0};
-    /// `BEGIN` snapshot / ReadCommitted statement refresh diagnostics (see `syncHeapReadSnapshotForQuery`).
     std::uint64_t txn_snapshot_refresh_count{0};
     std::uint64_t txn_snapshot_pinned_count{0};
     std::uint64_t txn_readpath_disabled_count{0};
     std::string last_snapshot_source{"none"};
-    /// Last LSN pinned for Snapshot isolation `BEGIN` (0 when none / ReadCommitted).
     std::uint64_t transaction_snapshot_lsn{0};
-    /// Last LSN used for statement-level read view refresh (ReadCommitted or Snapshot without txn pin).
     std::uint64_t statement_snapshot_lsn{0};
-    /// Successful first-time reservations of `LockKeyKind::RangeWriteIntent` keys (see `tryReserveWriteLockKey`).
     std::uint64_t lock_key_range_count{0};
-    /// Successful first-time reservations of `LockKeyKind::PredicateWriteIntent` keys.
     std::uint64_t lock_key_predicate_count{0};
 
-    // Write-path staged timing (p95/max of sampled operations).
     std::uint64_t write_heap_append_p95_ms{0};
     std::uint64_t write_heap_append_max_ms{0};
     std::uint64_t write_hot_index_p95_ms{0};
@@ -1172,32 +1449,9 @@ struct TxnRuntimeStats {
 };
 ```
 
-```248:270:newdb/cli/modules/txn/coordinator/txn_manager.h
-enum class WriteConflictPolicy {
-    Reject,
-    Wait,
-};
+`TxnCoordinator`：**实现隐藏在 `TxnCoordinatorState`**（`st_`），对外 API 节选（至隔离级别；其后含 VACUUM、runtime stats getter、`syncHeapReadSnapshotForQuery` 等）：
 
-enum class TxnIsolationLevel {
-    ReadCommitted,
-    Snapshot,
-};
-
-enum class WriteTimingStage : std::uint8_t {
-    HeapAppend = 0,
-    HotIndex = 1,
-    SidecarInvalidate = 2,
-    WalAppend = 3,
-    LsmTrack = 4,
-    LsmRotateCompact = 5,
-    LsmFlush = 6,
-    LsmCompaction = 7,
-};
-```
-
-`TxnCoordinator` 类声明较长；以下为 **`public` 段开头至隔离级别 API**（其后还有 VACUUM、统计 getter 等，见同文件）：
-
-```273:318:newdb/cli/modules/txn/coordinator/txn_manager.h
+```37:94:newdb/cli/modules/txn/coordinator/txn_manager.h
 class TxnCoordinator {
 public:
     TxnCoordinator();
@@ -1214,32 +1468,29 @@ public:
     Result<bool> releaseSavepoint(const std::string& name);
     Result<bool> recoverToLsn(std::uint64_t target_lsn);
     Result<bool> recoverToTime(std::uint64_t target_ts_ms);
-    TxnState getState() const { return m_state.load(); }
-    int64_t getTxnId() const { return m_txn_id.load(); }
-    bool inTransaction() const { return m_state.load() == TxnState::Active; }
+    TxnState getState() const;
+    int64_t getTxnId() const;
+    bool inTransaction() const;
 
-    // 文件锁（本进程内 TxnCoordinator 持有的 OS 锁句柄表；跨进程互斥不由此查询。）
     Result<bool> acquireLock(const std::string& file_path);
     Result<bool> releaseLock(const std::string& file_path);
-    // True iff this coordinator currently holds `acquireLock(file_path)` for the same `file_path`.
     bool isLocked(const std::string& file_path) const;
 
-    // WAL (Write-Ahead Log)
     void writeWAL(const std::string& operation, const std::string& table,
                    const std::string& key, const std::string& old_val, const std::string& new_val);
     void flushWAL();
     bool recoverFromWAL();
     void setWalSyncMode(newdb::WalSyncMode mode);
     newdb::WalSyncMode walSyncMode();
-    void setWalNormalSyncIntervalMs(std::uint64_t ms);
-    std::uint64_t walNormalSyncIntervalMs();
 
-    // 记录事务操作 (用于回滚)
     void recordOperation(const std::string& operation, const std::string& table,
                          const std::string& key, const std::string& old_val, const std::string& new_val);
     bool tryReserveWriteKey(const std::string& table_name, int id, std::string* reason = nullptr);
-    /// Extended write-intent reservation (range / predicate / secondary index). Uses the same global map as row PK.
+    bool tryReserveWriteKeysBatchSorted(const std::string& table_name,
+                                        std::vector<int> row_ids,
+                                        std::string* reason = nullptr);
     bool tryReserveWriteLockKey(const LockKey& lk, std::string* reason = nullptr);
+    void releaseWriteIntentStorageKeysForCurrentTxn(const std::vector<std::string>& storage_keys);
     void setWriteConflictPolicy(WriteConflictPolicy policy);
     WriteConflictPolicy writeConflictPolicy() const;
     void setWriteConflictWaitTimeoutMs(std::uint64_t ms);
@@ -1248,10 +1499,9 @@ public:
     TxnIsolationLevel txnIsolationLevel() const;
 ```
 
-#### WHERE：计划候选、查询上下文、主入口声明
+#### WHERE：计划候选、查询上下文、主入口声明（含 `WherePlanningStatsRef` 重载）
 
-```17:123:newdb/cli/modules/where/executor/where.h
-/// Lightweight cost bundle for `PlanCandidate` (extensible toward full optimizer).
+```19:149:newdb/cli/modules/where/executor/where.h
 struct PlanCost {
     double estimated_rows{0.0};
 };
@@ -1260,7 +1510,6 @@ struct PlanCandidate {
     std::string id;
     double estimated_cost{0.0};
     PlanCost cost;
-    /// Human-readable ranking hint for SHOW PLAN / C API (`where_plan_json`).
     std::string rationale;
 };
 
@@ -1280,7 +1529,6 @@ struct WherePolicyState {
 
 struct WhereQueryContext {
     static constexpr std::size_t kMaxQueryCacheEntries = 128;
-
     std::unordered_map<std::string, std::vector<std::size_t>> query_cache;
     std::list<std::string> query_cache_lru;
     std::unordered_map<std::string, std::list<std::string>::iterator> query_cache_lru_pos;
@@ -1293,67 +1541,53 @@ struct WhereQueryContext {
     std::atomic<std::uint64_t> plan_eq_sidecar_count{0};
     std::atomic<std::uint64_t> plan_id_pk_count{0};
     std::atomic<std::uint64_t> plan_fallback_count{0};
-    /// Completed WHERE index queries (each `query_with_index` call).
     std::atomic<std::uint64_t> query_count{0};
-    /// Heap rows decoded / examined on the hot path (per-query aggregate).
     std::atomic<std::uint64_t> query_rows_scanned_total{0};
-    /// Matching row slots returned (per-query aggregate).
     std::atomic<std::uint64_t> query_rows_returned_total{0};
-    /// Optional ANALYZE-style stats for `NEWDB_QUERY_USE_TABLE_STATS=1` planning hints.
     const TableStats* query_stats_hint{nullptr};
     std::atomic<std::uint64_t> estimated_scan_rows_total{0};
     std::atomic<std::uint64_t> estimated_scan_rows_samples{0};
-    /// Last completed `query_with_index`: count of index/scan shapes evaluated (observable truth).
     std::atomic<std::uint32_t> last_plan_candidates_considered{1};
-    /// Equality sidecar: bytes read from disk when loading `.eqidx` (not memory-cache hits).
     std::atomic<std::uint64_t> where_eq_sidecar_disk_bytes_read_total{0};
-    /// Equality sidecar: count of on-disk sidecar loads (each `try_lookup` miss path).
     std::atomic<std::uint64_t> where_eq_sidecar_disk_loads{0};
-    /// `NEWDB_WHERE_HEAP_SCAN_BUDGET_ROWS` tightened the scan cap below ratio-derived `scan_cap` (observability).
     std::atomic<std::uint64_t> where_heap_scan_budget_binding_events{0};
     WherePolicyState policy{};
-    /// Last completed `query_with_index` plan label (e.g. `fallback_scan`, `id_lookup`).
     std::string last_plan_id;
-    /// Bytes last reserved via `MemoryKind::QueryTemp` for the in-flight `query_with_index` call (observability).
     std::atomic<std::uint64_t> query_temp_reserved_bytes{0};
     mutable std::mutex mu;
 };
 
-bool row_match_condition(const newdb::Row& r,
-                         const newdb::TableSchema& schema,
-                         const std::string& attr,
-                         CondOp op,
-                         const std::string& value);
-
-bool parse_where_args_to_conds(const std::vector<std::string>& args,
-                               std::vector<WhereCond>& conds,
-                               std::string& err_msg);
-
-bool row_match_multi_conditions(const newdb::Row& r,
-                                const newdb::TableSchema& schema,
-                                const std::vector<WhereCond>& conds);
-
-bool parse_agg_args_with_optional_where(const std::vector<std::string>& args,
-                                        std::string& target_attr,
-                                        std::vector<WhereCond>& conds,
-                                        std::string& err_msg);
-
-/// Policy / SHOW PLAN: heuristic estimated rows scanned for `conds` (matches `query_with_index` gates).
 std::size_t where_estimate_scan_rows(const newdb::HeapTable& tbl,
                                      const newdb::TableSchema& schema,
                                      const std::vector<WhereCond>& conds,
                                      WhereQueryContext* ctx = nullptr);
 
-/// Lightweight alternative access paths for EXPLAIN / SHOW PLAN (sorted by ascending `estimated_cost`).
 std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& tbl,
                                                        const newdb::TableSchema& schema,
                                                        const std::vector<WhereCond>& conds,
-                                                       const TableStats* stats_hint);
+                                                       WherePlanningStatsRef stats);
+
+inline std::vector<PlanCandidate> where_build_plan_candidates(const newdb::HeapTable& tbl,
+                                                              const newdb::TableSchema& schema,
+                                                              const std::vector<WhereCond>& conds,
+                                                              const TableStats* stats_hint) {
+    return where_build_plan_candidates(tbl, schema, conds, WherePlanningStatsRef{stats_hint});
+}
 
 std::vector<std::size_t> query_with_index(const newdb::HeapTable& tbl,
                                           const newdb::TableSchema& schema,
                                           const std::vector<WhereCond>& conds,
                                           WhereQueryContext* ctx = nullptr);
+
+std::vector<std::size_t> build_candidate_slots(const newdb::HeapTable& tbl,
+                                               const newdb::TableSchema& schema,
+                                               const std::vector<WhereCond>& conds,
+                                               WhereQueryContext* ctx = nullptr);
+
+std::string where_predicate_fingerprint_for_write_intent(const std::vector<WhereCond>& conds);
+
+std::optional<WhereClosedIntRangeParts> where_try_derive_closed_int_range(const newdb::TableSchema& schema,
+                                                                          const std::vector<WhereCond>& conds);
 ```
 
 #### 表统计与侧车路径 API
@@ -1422,7 +1656,11 @@ bool index_descriptor_matches_runtime(const IndexDescriptor& d,
 
 #### 存储健康快照
 
-```10:28:newdb/cli/modules/storage/table_storage_health.h
+```9:28:newdb/cli/modules/storage/table_storage_health.h
+namespace newdb {
+
+struct HeapTable;
+
 struct TableStorageHealth {
     std::uint64_t logical_rows{0};
     std::uint64_t physical_rows{0};
@@ -1438,17 +1676,23 @@ struct TableStorageHealth {
 };
 
 TableStorageHealth measure_table_storage_health(const HeapTable& tbl);
+
+}  // namespace newdb
 ```
 
-#### 引擎：WAL 枚举与记录头、解码行载体
+#### 引擎：`WalSyncMode`、`WalOp`、记录头、解码行载体
 
-```26:61:newdb/engine/include/newdb/wal_manager.h
+`WalSyncMode` 已迁至独立头（`wal_manager.h` 通过 `#include <newdb/wal_sync_mode.h>` 转发）：
+
+```7:11:newdb/engine/include/newdb/wal_sync_mode.h
 enum class WalSyncMode : uint8_t {
-    Full = 0,   // fflush + fsync/_commit each flush
-    Normal = 1, // fflush always, fsync/_commit periodically
-    Off = 2     // fflush only
+    Full = 0,
+    Normal = 1,
+    Off = 2,
 };
+```
 
+```27:56:newdb/engine/include/newdb/wal_manager.h
 enum class WalOp : uint8_t {
     INSERT = 1,
     UPDATE = 2,
@@ -1468,12 +1712,12 @@ enum class WalOp : uint8_t {
 
 struct WalRecordHeader {
     uint32_t magic = 0x57414C30;      // "WAL0"
-    uint64_t lsn = 0;                  // Log Sequence Number
-    uint64_t txn_id = 0;               // Transaction ID
-    uint32_t payload_len = 0;          // Payload length
-    uint16_t checksum = 0;             // Header CRC16
-    uint8_t  type = 0;                 // WalOp
-    uint8_t  flags = 0;                // Reserved
+    uint64_t lsn = 0;
+    uint64_t txn_id = 0;
+    uint32_t payload_len = 0;
+    uint16_t checksum = 0;
+    uint8_t  type = 0;
+    uint8_t  flags = 0;
 #if defined(__GNUC__) || defined(__clang__)
 } __attribute__((packed));
 #else
@@ -1481,7 +1725,7 @@ struct WalRecordHeader {
 #endif
 ```
 
-```65:82:newdb/engine/include/newdb/wal_manager.h
+```60:84:newdb/engine/include/newdb/wal_manager.h
 struct WalDecodedRecord {
     uint64_t lsn{0};
     uint64_t txn_id{0};
@@ -1500,6 +1744,12 @@ struct WalDecodedRecord {
     bool has_savepoint_id{false};
     std::uint64_t undo_prev_lsn{0};
     bool has_undo_prev_lsn{false};
+    std::uint64_t pitr_target_lsn{0};
+    bool has_pitr_target_lsn{false};
+    std::uint64_t pitr_target_ts_ms{0};
+    bool has_pitr_target_ts_ms{false};
+    std::uint64_t record_ts_ms{0};
+    bool has_record_ts_ms{false};
 };
 ```
 
@@ -1523,7 +1773,7 @@ struct PageCacheGlobalStats {
 /// Returns cumulative counters since process start (thread-safe).
 [[nodiscard]] PageCacheGlobalStats page_cache_global_stats();
 
-/// Test hook: clear LRU entries, release PageCache bytes via MemoryRegistry, reset evictor-register flag, zero stats.
+/// Test hook: clear all cached pages, release their registry bytes, and zero global stats counters.
 void page_cache_reset_stats_for_test();
 
 /// When `NEWDB_PAGE_CACHE_MAX_BYTES` > 0, try to copy a cached page into `buf` (length `page_size`).
@@ -1562,7 +1812,7 @@ struct MemoryBudgetSnapshot {
 
 #### GUI 与运行时 JSON 的弱耦合（诊断键分组）
 
-```27:51:newdb/rust_gui/src/commandPolicy.ts
+```27:94:newdb/rust_gui/src/commandPolicy.ts
 export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; keys: readonly string[] }> = [
   {
     title: "WHERE / 计划观测",
@@ -1587,8 +1837,50 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
       "txn_snapshot_pinned_count",
       "txn_readpath_disabled_count",
       "last_snapshot_source",
+      "lock_key_range_count",
+      "lock_key_predicate_count",
     ],
   },
+  {
+    title: "PageCache / memory budget",
+    keys: [
+      "page_cache_hits",
+      "page_cache_misses",
+      "page_cache_bytes_in_cache",
+      "memory_budget_max_bytes",
+      "memory_budget_used_bytes",
+      "memory_budget_reject_count",
+      "memory_budget_bytes_evicted_total",
+      "memory_budget_sidecar_load_skipped_total",
+    ],
+  },
+  {
+    title: "WAL 恢复摘要",
+    keys: [
+      "wal_recovery_runs",
+      "wal_recovery_last_elapsed_ms",
+      "wal_recovery_redo_ms",
+      "wal_recovery_checkpoint_begin_count",
+      "wal_recovery_checkpoint_end_count",
+    ],
+  },
+  {
+    title: "表存储健康 (SHOW TUNING JSON)",
+    keys: [
+      "table_storage_health_logical_rows",
+      "table_storage_health_physical_rows",
+      "table_storage_health_tombstone_rows",
+      "table_storage_health_data_file_bytes",
+      "table_storage_health_live_bytes",
+      "table_storage_health_dead_bytes",
+      "table_storage_health_fragmentation_ratio",
+      "table_storage_health_last_vacuum_lsn",
+      "table_storage_health_last_vacuum_elapsed_ms",
+      "table_storage_health_tier",
+      "vacuum_health_bonus_last",
+    ],
+  },
+] as const;
 ```
 
 ---
@@ -1610,18 +1902,20 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 
 #### 12.12.2 `ShellState` 及嵌套成员
 
-| 成员 | 含义 |
+对外以 **`ShellState` 访问器** 为主（聚合字段在 **`ShellState::Impl`** / `ShellLsmSidecarRuntime` / `ShellTxnWhereRuntime` 内）。下表列出常用语义（与 §12.2 一致）：
+
+| 访问器 / 对象 | 含义 |
 |------|------|
-| `session` | 引擎 `Session`：持有当前 `HeapTable`、`data_path`、schema；`lock_heap` 产生 RAII 堆访问。 |
-| `session_heap_guard` | `optional<Session::HeapAccess>`：一次命令行内复用 `lock_heap` 结果；析构前必须按 `shell_invalidate_session_table` 顺序释放，以免与 `invalidate()` 死锁。 |
-| `txn` | `TxnCoordinator`：事务、WAL、锁、vacuum、运行时统计的挂载点。 |
-| `log_file_path` | 会话日志与部分锁/诊断路径的基准文件名（默认 `demo_log.bin`）。 |
-| `data_dir` | 非空时，`.bin` / `.attr` / sidecar 相对此目录解析（见 `resolve_table_file`）。 |
-| `mirror_output_fd` | ≥0 时向该 FD 镜像输出（Linux `send`）；`-1` 关闭。 |
-| `encrypt_log` | `true` 时使用旧式 XOR 帧写会话日志；默认 UTF-8 明文行。 |
-| `verbose` | 额外路径/加载错误等到 stderr。 |
-| `where_ctx` | 每条 shell 级 WHERE 缓存与原子计数器（见 §12.12.5）。 |
-| `runtime_policy` | [`ShellRuntimePolicy`](../../cli/shell/state/shell_state_benchmark.h)：内含 [`ShellBenchmarkProfile`](../../cli/shell/state/shell_state_benchmark.h)（`NewdbDefault` / `LeveldbLike` / `InnodbLike` / `HybridBalanced`）与 `initialized`（是否已按环境应用预设）。LSM 侧见 [`lsm_lite_service.cc`](../../cli/shell/dispatch/services/lsm/lsm_lite_service.cc)。 |
+| `session()` | 引擎 `Session`：`lock_heap` 产生 RAII 堆访问；表名/数据路径亦可经 `session_table_name()` / `session_data_path()` 收窄访问。 |
+| `impl_->heap_guard_box_->session_heap_guard`（内部） | `optional<Session::HeapAccess>`：**`get_cached_table`** 缓存；须与 **`reset_session_heap_guard`** / **`shell_invalidate_session_table`** 顺序一致，避免与 `invalidate()` 死锁。 |
+| `txn()` | `TxnCoordinator`：事务、WAL、锁、vacuum、运行时统计挂载点。 |
+| `log_file_path()` | 会话日志与部分锁/诊断路径的基准文件名（默认 `demo_log.bin`）。 |
+| `data_dir()` | 非空时，`.bin` / `.attr` / sidecar 相对此目录解析（见 **`resolve_table_file(ShellState&, …)`**）。 |
+| `mirror_output_fd()` | ≥0 时向该 FD 镜像输出；`-1` 关闭。 |
+| `encrypt_log()` | `true` 时使用旧式 XOR 帧写会话日志；默认 UTF-8 明文行。 |
+| `verbose()` | 额外路径/加载错误等到 stderr。 |
+| `where_ctx()` | 每条 shell 级 WHERE 缓存与原子计数器（见 §12.12.5）。 |
+| `runtime_policy()` | [`ShellRuntimePolicy`](../../cli/shell/state/shell_state_benchmark.h)：内含 **`ShellBenchmarkProfile`**（`NewdbDefault` / `LeveldbLike` / `InnodbLike` / `HybridBalanced`）与 `initialized`。LSM 侧见 [`lsm_lite_service.cc`](../../cli/shell/dispatch/services/lsm/lsm_lite_service.cc)。 |
 
 **`LsmShellCache`（`st.lsm`）**
 
@@ -1788,7 +2082,7 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `write_wal_append_*` | WAL 追加。 |
 | `write_lsm_*` | LSM track / flush / compaction / rotate_compact。 |
 
-**`TxnRuntimeStats` 逐字段全表**（与 `txn_manager.h` 中声明顺序一致；未标注单位：**次数**；`bool`/`double`/`std::string` 除外）
+**`TxnRuntimeStats` 逐字段全表**（与 **`engine/include/newdb/txn_runtime_stats_snapshot.h`** 中声明顺序一致；未标注单位：**次数**；`bool`/`double`/`std::string` 除外）
 
 | 字段 | 含义 |
 |------|------|
@@ -1829,6 +2123,7 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | `wal_recovery_segments_after_checkpoint` | 从 segment 扫描视角，checkpoint 之后被索引/访问的段数。 |
 | `wal_recovery_redo_plan_pending_txn_count` | redo planning 阶段看到的未提交 / dangling 事务数。 |
 | `wal_recovery_apply_conflict_count` | redo apply 中因幂等重复、保护条件冲突等而跳过/记冲突的次数。 |
+| `wal_recovery_undo_chain_fallback_txns` | 恢复扫描中 undo 链需走兜底路径的事务计数（与协调器 reconcile 细分一致）。 |
 | `wal_recovery_policy` | 协调器与堆策略对账后得到的策略标签串。 |
 | `wal_group_commit_count` | 组提交批处理轮次次数。 |
 | `wal_group_commit_batch_commits` | 各批中累计提交事务数（或统计口径内累加，见实现）。 |
@@ -1996,7 +2291,8 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 | | `conds` | 已解析的谓词列表（与一行多条件 AND 典型用法一致，具体组合见解析层）。 |
 | | `ctx` | 可空；传入则累计原子计数与缓存；不传则无会话级统计。 |
 | `where_estimate_scan_rows` | 同上 `tbl`/`schema`/`conds`/`ctx` | 返回估计扫描行数上门（与计划门控对齐）。 |
-| `where_build_plan_candidates` | `stats_hint` | 可空 `TableStats*`，用于候选路径代价估计。 |
+| `where_build_plan_candidates` | `stats` / `stats_hint` | 主重载接受 **`WherePlanningStatsRef`**（封装可选 `TableStats*`）；`TableStats*` 便捷重载为其薄包装。 |
+| `build_candidate_slots` | 同 `query_with_index` 前三参 + `ctx` | 生成候选 slot 向量（计划/执行拆分路径）。 |
 
 #### 12.12.6 表统计：`ColumnStats`、`TableStats` 与文件 API
 
@@ -2125,8 +2421,8 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 
 | API | 形参 / 行为 |
 |-----|-------------|
-| `get_cached_table(st)` | 无额外形参；必要时 `emplace(lock_heap(log_file_path))`；返回当前 `HeapTable*` 或 `nullptr`。 |
-| `shell_invalidate_session_table(st)` | 先 `session_heap_guard.reset()` 再 `session.invalidate()`，避免持锁死锁。 |
+| `get_cached_table(st)` | 无额外形参；经 **`ShellStateFacade`** 访问 session；在 **`heap_guard_box_->session_heap_guard`** 上必要时 `emplace(lock_heap(log_file_path))`；返回 **`&session_heap_table()`** 或 `nullptr`。 |
+| `shell_invalidate_session_table(st)` | 先 **`heap_guard_box_->session_heap_guard.reset()`** 再 **`session().invalidate()`**。 |
 | `HeapReadViewGuard(st, tbl)` | 构造时 `txn.syncHeapReadSnapshotForQuery(tbl)`，析构 `tbl.clear_snapshot()`。 |
 | `newdb_materialize_heap_if_lazy(tbl, sch, stats_sink)` | 惰性 mmap 堆时物化所有行；`stats_sink` 非空则更新 lazy 物化计数；受 `NEWDB_LAZY_MATERIALIZE_WARN_ROWS` 警告。 |
 
@@ -2147,4 +2443,4 @@ export const RUNTIME_TUNING_DIAGNOSTIC_GROUPS: ReadonlyArray<{ title: string; ke
 
 ---
 
-*文档版本：与仓库 `main` 上 newdb 二阶段模块划分一致；若目录重构，请同步更新 §2 表格、§11 分发链、§12 类型、**§12.11 源码行号引用**、**§12.12 字段释义**与图表中的节点名。*
+*文档版本：与当前仓库 newdb 一致；**数据流图默认 Plugin 双 DLL 口径**，并对照 **full_embed/slim**；若 CMake 选项或 `newdb_cli_backend_*` 导出变更，请同步 §3、§3.2、§4、§5 与 **§12.11** 行号引用。*

@@ -2,7 +2,7 @@
 
 [中文](readme.md) | English
 
-A hands-on database engineering repository. This file is a **shortened** view of [`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md): **top-level layout** and **high-level data flow** only. Per-module tables, field glossaries, and CI observability details stay in the full doc. **CMake**: the CLI is split into **`newdb_shell_*` OBJECT** libraries folded into static **`newdb_capi_adapter`** and linked by default **`newdb_shared`**; **`newdb_demo`** / integration tests link **`newdb_shell`** for the REPL slice. See [`MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md) and [`BUILD.md`](newdb/docs/dev/BUILD.md) for the assembly diagram and **plugin / slim** modes.
+A hands-on database engineering repository. This file is a **shortened** view of [`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md): **top-level layout** and **high-level data flow** only. Per-module tables, field glossaries, and CI observability details stay in the full doc. **CMake**: the CLI is split into **`newdb_shell_*` OBJECT** libraries folded into static **`newdb_capi_adapter`** and linked by default **`newdb_shared`**; **`newdb_demo`** / integration tests link **`newdb_shell`** for the REPL slice. See [`MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md) and [`BUILD.md`](newdb/docs/dev/BUILD.md) for the assembly diagram and **plugin / slim** modes. **Cross-platform plugin shipping**: `newdb/CMakePresets.json` defines **`plugin-shipping-mingw` / `plugin-shipping-msvc` / `plugin-shipping-linux-gcc` / `plugin-shipping-linux-clang`** configure presets plus matching **`*-rel` build/test** presets for clean, CI-aligned builds. **gtest**: `gtest_capi/third_party/googletest` is a **vendored** tree to avoid FetchContent/network flakiness. **Releases**: GitHub Action **`.github/workflows/newdb-plugin-release.yml`** (`workflow_dispatch` or tag `newdb-plugin-*`) runs an ABI gate then publishes **`shared_bundle`**-style artifacts.
 
 ## Repository layout
 
@@ -12,14 +12,14 @@ database/                    # repo root
 ├── newdb/                   # main tree: engine + CLI + tools + tests + Rust GUI + scripts + docs
 │   ├── engine/              # storage engine (C++): heap, WAL, MVCC, C ABI, cache
 │   ├── cli/                 # interactive command layer (C++): shell, dispatch, modules
-│   ├── tools/               # perf, smoke, runtime_report
+│   ├── tools/               # perf, smoke, runtime_report; audit_object_includes.py (OBJECT includes)
 │   ├── tests/               # GoogleTest + gtest_capi bridge sources
 │   ├── rust_gui/            # Tauri + Vue desktop GUI
 │   ├── scripts/             # CI, benches, validation, soak
 │   ├── docs/
 │   ├── intro/               # LaTeX → PDF
 │   └── CMakeLists.txt
-├── gtest_capi/              # optional gtest C API sample/packaging
+├── gtest_capi/              # optional gtest C API sample/packaging (vendored googletest under third_party/)
 ├── docs/                    # repo-level notes (complements newdb/docs)
 ├── rules/
 ├── Makefile
@@ -162,7 +162,7 @@ flowchart LR
 
 ## C API plugin layout (Track P)
 
-With the **plugin** preset you typically ship **two** binaries: the main **`newdb` / `libnewdb` (`newdb_shared`)** linked to the engine core only, plus **`newdb_cli_backend`** loaded at runtime. Set **`NEWDB_CLI_BACKEND_PATH`** to the backend shared library (absolute path) before `newdb_session_create` (same idea as the **`plugin-shared`** preset in `CMakePresets.json`). Details: [`C_API_PLUGIN_BACKEND.md`](newdb/docs/dev/C_API_PLUGIN_BACKEND.md), [`BUILD.md`](newdb/docs/dev/BUILD.md), and [`plugin_backend_packaging.md`](newdb/scripts/ci/plugin_backend_packaging.md).
+With the **plugin** preset you typically ship **two** binaries: the main **`newdb` / `libnewdb` (`newdb_shared`)** linked to the engine core only, plus **`newdb_cli_backend`** loaded at runtime. Set **`NEWDB_CLI_BACKEND_PATH`** to the backend shared library (**absolute path**) before `newdb_session_create` (same idea as **`plugin-shared`** and other plugin presets in `CMakePresets.json`). For **cross-platform shipping**, prefer the **`plugin-shipping-*`** configure / build / test presets; artifact layout and library names are summarized in [`INSTALL_PLUGIN.md`](newdb/scripts/ci/INSTALL_PLUGIN.md) and [`plugin_backend_packaging.md`](newdb/scripts/ci/plugin_backend_packaging.md). **CI / releases**: PR-style workflows can reuse **`.github/workflows/newdb-ci-reusable.yml`**; **`.github/workflows/newdb-plugin-release.yml`** runs **`newdb/scripts/validate/check_c_api_abi.py`** before bundling (expected ABI per script/workflow) and treats **`shared_bundle/Release`** as the artifact root. Details: [`C_API_PLUGIN_BACKEND.md`](newdb/docs/dev/C_API_PLUGIN_BACKEND.md) and [`BUILD.md`](newdb/docs/dev/BUILD.md).
 
 **Track Q (WHERE / query sink)**: still a separate milestone; see the **WHERE planner** fork in [`MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md).
 
@@ -173,6 +173,8 @@ With the **plugin** preset you typically ship **two** binaries: the main **`newd
 - Developer guide: `docs/dev-guide.md`
 - Module boundaries: `newdb/docs/architecture/MODULE_BOUNDARIES.md`
 - Build & test: `newdb/docs/dev/BUILD.md`
+- Plugin install & library naming: [`INSTALL_PLUGIN.md`](newdb/scripts/ci/INSTALL_PLUGIN.md)
+- Clean-environment test runners: `newdb/scripts/run_newdb_tests_cleanenv.ps1`, `run_newdb_tests_cleanenv.sh`
 - Full data-flow doc: [`PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md)
 
 ## Repository

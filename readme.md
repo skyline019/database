@@ -2,7 +2,7 @@
 
 [English](README.en.md) | 中文
 
-教学与工程实践为导向的数据库实验仓库。下文是 [`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md) 的**截断版**：只保留**整体项目结构**与**整体数据流**；模块子表、字段释义、CI 观测细节等见原文。**CMake**：CLI 拆为 **`newdb_shell_*` OBJECT**，由 **`newdb_capi_adapter`** 聚合并链入默认 **`newdb_shared`**；**`newdb_demo`** / 集成测试经 **`newdb_shell`** 带上 REPL 闭包；装配图与 **plugin / slim** 见 [`MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md) 与 [`BUILD.md`](newdb/docs/dev/BUILD.md)。
+教学与工程实践为导向的数据库实验仓库。下文是 [`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`](newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md) 的**截断版**：只保留**整体项目结构**与**整体数据流**；模块子表、字段释义、CI 观测细节等见原文。**CMake**：CLI 拆为 **`newdb_shell_*` OBJECT**，由 **`newdb_capi_adapter`** 聚合并链入默认 **`newdb_shared`**；**`newdb_demo`** / 集成测试经 **`newdb_shell`** 带上 REPL 闭包；装配图与 **plugin / slim** 见 [`MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md) 与 [`BUILD.md`](newdb/docs/dev/BUILD.md)。**跨平台 plugin 交付**：`newdb/CMakePresets.json` 提供 **`plugin-shipping-mingw` / `plugin-shipping-msvc` / `plugin-shipping-linux-gcc` / `plugin-shipping-linux-clang`** 等 configure 预设及对应 **`*-rel` build/test** 预设，便于与 CI 语义对齐的干净构建。**gtest**：`gtest_capi/third_party/googletest` 为 **vendor 源码**，减少对外网 Fetch 的依赖。**发布**：GitHub Actions **`.github/workflows/newdb-plugin-release.yml`**（`workflow_dispatch` 或 tag `newdb-plugin-*`）在 ABI 校验后产出 **`shared_bundle`** 类制品。
 
 ## 仓库顶层结构
 
@@ -12,14 +12,14 @@ database/                    # 仓库根
 ├── newdb/                   # 主工程：引擎 + CLI + 工具 + 测试 + Rust GUI + 脚本 + 文档
 │   ├── engine/              # 存储引擎（C++）：堆表、WAL、MVCC、C ABI、缓存
 │   ├── cli/                 # 交互式命令层（C++）：shell、dispatch、业务模块
-│   ├── tools/               # 可执行工具：perf、smoke、runtime_report
+│   ├── tools/               # 可执行工具：perf、smoke、runtime_report；OBJECT include 审计 audit_object_includes.py
 │   ├── tests/               # GoogleTest 回归与 gtest_capi 桥接源码
 │   ├── rust_gui/            # Tauri + Vue 桌面 GUI
 │   ├── scripts/             # CI、压测、校验、soak（Python/PowerShell）
 │   ├── docs/                # 设计与运维文档
 │   ├── intro/               # LaTeX 源码解析工程 → PDF
 │   └── CMakeLists.txt       # 构建编排
-├── gtest_capi/              # 可选：gtest C API 示例/打包
+├── gtest_capi/              # 可选：gtest C API 示例/打包（含 third_party/googletest 源码 vendor）
 ├── docs/                    # 仓库级讲义（与 newdb/docs 互补）
 ├── rules/                   # Makefile 片段（非 CMake 路径）
 ├── Makefile                 # 顶层 make 入口
@@ -162,7 +162,7 @@ flowchart LR
 
 ## C API plugin 装配（Track P）
 
-在 **plugin** 预设下，进程内典型为 **两份二进制**：主 **`newdb` / `libnewdb`（`newdb_shared`）** 仅链引擎核，会话侧能力由单独的 **`newdb_cli_backend`** 共享库在运行时加载。运行或打包测试前请设置环境变量 **`NEWDB_CLI_BACKEND_PATH`** 指向该 backend DLL/so 的路径（与 `CMakePresets.json` 中的 **`plugin-shared`** 一致）。说明与故障排查见 [`newdb/docs/dev/C_API_PLUGIN_BACKEND.md`](newdb/docs/dev/C_API_PLUGIN_BACKEND.md) 与 [`newdb/docs/dev/BUILD.md`](newdb/docs/dev/BUILD.md)。
+在 **plugin** 预设下，进程内典型为 **两份二进制**：主 **`newdb` / `libnewdb`（`newdb_shared`）** 仅链引擎核，会话侧能力由单独的 **`newdb_cli_backend`** 共享库在运行时加载。运行或打包测试前请设置环境变量 **`NEWDB_CLI_BACKEND_PATH`** 指向该 backend 的**绝对路径**（与 `CMakePresets.json` 中的 **`plugin-shared`** 等 plugin 类预设一致）。**跨平台交付**请优先使用 **`plugin-shipping-*`** 预设做 configure / build / test，产物目录约定见 [`newdb/scripts/ci/INSTALL_PLUGIN.md`](newdb/scripts/ci/INSTALL_PLUGIN.md) 与 [`newdb/scripts/ci/plugin_backend_packaging.md`](newdb/scripts/ci/plugin_backend_packaging.md)。**CI / Release**：PR 侧可复用 **`.github/workflows/newdb-ci-reusable.yml`**；发布侧 **`.github/workflows/newdb-plugin-release.yml`** 在打包前运行 **`newdb/scripts/validate/check_c_api_abi.py`**（期望 ABI 以脚本与工作流为准），并将 **`shared_bundle/Release`** 作为制品根路径。说明与故障排查见 [`newdb/docs/dev/C_API_PLUGIN_BACKEND.md`](newdb/docs/dev/C_API_PLUGIN_BACKEND.md) 与 [`newdb/docs/dev/BUILD.md`](newdb/docs/dev/BUILD.md)。
 
 **Track Q（WHERE / 查询下沉）**：仍为独立里程碑，不阻塞日常 shell 重构；路线图分叉见 [`newdb/docs/architecture/MODULE_BOUNDARIES.md`](newdb/docs/architecture/MODULE_BOUNDARIES.md) 中 **WHERE planner** 小节。
 
@@ -173,6 +173,9 @@ flowchart LR
 - 开发者手册：`docs/dev-guide.md`
 - 模块边界：`newdb/docs/architecture/MODULE_BOUNDARIES.md`
 - 构建与测试：`newdb/docs/dev/BUILD.md`
+- Plugin 安装与库命名对照：`newdb/scripts/ci/INSTALL_PLUGIN.md`
+- 可重复干净跑测：`newdb/scripts/run_newdb_tests_cleanenv.ps1` / `run_newdb_tests_cleanenv.sh`
+- 完整数据流原文：`newdb/docs/architecture/PROJECT_DATAFLOW_WHOLE.md`
 
 ## 仓库地址
 

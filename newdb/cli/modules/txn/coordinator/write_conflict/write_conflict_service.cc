@@ -29,6 +29,11 @@
 #include <thread>
 #include <algorithm>
 
+// Write-intent reservation: all LockKey kinds share `g_write_intent_owner`; conflict is storage-key equality only.
+// Future unique secondary index: reserve `LockKey::index_eq_write_intent(table, index_name, encoded_key)` *before*
+// uniqueness checks; recommended acquisition order with PK row intent is **index_eq first, then row_pk** so that
+// bulk PK reservation (`tryReserveWriteKeysBatchSorted`) and single-row updates stay consistent.
+
 void TxnCoordinator::recordWriteConflictSampleLockKey(const LockKey& lk,
                                                         const std::uint64_t holder_txn,
                                                         const char* tag) {
@@ -51,6 +56,46 @@ bool TxnCoordinator::tryReserveWriteKey(const std::string& table_name, const int
         return true;
     }
     return tryReserveWriteLockKey(LockKey::row_pk_write_intent(table_name, id), reason);
+}
+
+bool TxnCoordinator::tryReserveWriteKeysBatchSorted(const std::string& table_name,
+                                                    std::vector<int> row_ids,
+                                                    std::string* reason) {
+    if (table_name.empty()) {
+        return true;
+    }
+    std::sort(row_ids.begin(), row_ids.end());
+    row_ids.erase(std::unique(row_ids.begin(), row_ids.end()), row_ids.end());
+    std::vector<std::string> acquired;
+    acquired.reserve(row_ids.size());
+    for (const int id : row_ids) {
+        LockKey lk = LockKey::row_pk_write_intent(table_name, id);
+        if (!tryReserveWriteLockKey(lk, reason)) {
+            releaseWriteIntentStorageKeysForCurrentTxn(acquired);
+            return false;
+        }
+        acquired.push_back(lk.to_storage_key());
+    }
+    return true;
+}
+
+void TxnCoordinator::releaseWriteIntentStorageKeysForCurrentTxn(const std::vector<std::string>& storage_keys) {
+    if (storage_keys.empty()) {
+        return;
+    }
+    if (st_->m_state.load() != TxnState::Active) {
+        return;
+    }
+    const std::uint64_t txn = static_cast<std::uint64_t>(st_->m_txn_id.load());
+    std::lock_guard<std::mutex> lk_mu(g_write_intent_mu);
+    g_txn_wait_for_owner.erase(txn);
+    for (const std::string& key : storage_keys) {
+        const auto it = g_write_intent_owner.find(key);
+        if (it != g_write_intent_owner.end() && it->second == txn) {
+            g_write_intent_owner.erase(it);
+        }
+        st_->m_reserved_write_keys.erase(key);
+    }
 }
 
 bool TxnCoordinator::tryReserveWriteLockKey(const LockKey& lk, std::string* reason) {

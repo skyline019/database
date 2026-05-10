@@ -2,6 +2,8 @@
 
 This document defines the second-stage module boundaries for `newdb`.
 
+Decoupling roadmap index (phases, CI gates, presets): [`DECOUPLING_ROADMAP.md`](DECOUPLING_ROADMAP.md). Query static library: [`NEWDB_QUERY_LAYER.md`](NEWDB_QUERY_LAYER.md). Optional multi-repo notes: [`MULTI_REPO_PACKAGING.md`](MULTI_REPO_PACKAGING.md).
+
 ## Dependency Direction
 
 - `cli/app` -> `cli/shell/*` -> `cli/modules/*` -> `engine/include/newdb/*`
@@ -81,7 +83,7 @@ Ship or merge **engine/shell/C API boundary** changes only after:
 | **Full shared** | Configure `-DNEWDB_BUILD_SHARED=ON -DNEWDB_SHARED_SLIM=OFF` (clean tree); build `newdb_shared`, `newdb_capi_adapter`, `newdb_tests`, `newdb_capi_integration_tests`; `ctest -L newdb` (or project CI matrix). |
 | **Slim shared** | `-DNEWDB_SHARED_SLIM=ON`; build `newdb_shared`, `newdb_capi_slim_tests`; run slim-labeled / full matrix per [CI_SLIM_FULL_MATRIX.md](../dev/CI_SLIM_FULL_MATRIX.md). |
 | **Plugin backend** | `-DNEWDB_C_API_PLUGIN_BACKEND=ON -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON` (mutually exclusive with slim); `CliBackendPluginSmoke` and documented `NEWDB_CLI_BACKEND_PATH`. |
-| **Include baselines** | `python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10`; `python3 newdb/tools/count_bridge_dispatch_includes.py` (see [.github/workflows/newdb-ci-reusable.yml](../../../.github/workflows/newdb-ci-reusable.yml)). |
+| **Include baselines** | `python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10`; `python3 newdb/tools/count_bridge_dispatch_includes.py`; `python3 newdb/tools/audit_object_includes.py` (budgets in [.github/workflows/newdb-ci-reusable.yml](../../../.github/workflows/newdb-ci-reusable.yml); local: `cmake --build <dir> --target newdb_audit_object_includes`). |
 | **Runtime stats contract** | `python3 newdb/scripts/validate/check_runtime_stats_contract_parity.py`; optional `validate_runtime_stats.py` on representative JSONL fixtures. |
 
 Authoritative CI wiring: [.github/workflows/newdb-ci-reusable.yml](../../../.github/workflows/newdb-ci-reusable.yml).
@@ -93,19 +95,20 @@ Named **OBJECT** compile bricks (resolved when folded into **`newdb_capi_adapter
 - **`newdb_shell_state`**: shell state + C API bridge spine (cannot be a standalone `STATIC` without duplicating the rest of the adapter link closure).
 - **`newdb_shell_dispatch`**: router, handlers, dispatch support, and dispatch services (formerly `newdb_shell_obj_dispatch`).
 - **`newdb_shell_bootstrap_capi` / `newdb_shell_bootstrap_repl`**: non-REPL vs REPL bootstrap TU slices.
-- **`newdb_shell_common`**, **`newdb_shell_catalog`**, **`newdb_shell_where`**, **`newdb_shell_txn`**, **`newdb_shell_sidecar`**: module-layer OBJECT bricks aggregated into `newdb_capi_adapter`.
+- **`newdb_shell_common`**, **`newdb_shell_catalog`**, **`newdb_shell_txn`**, **`newdb_shell_sidecar`**: module-layer OBJECT bricks aggregated into `newdb_capi_adapter`.
+- **`newdb_query`**: **STATIC** library (WHERE parse/plan/execute); linked **PUBLIC** with `newdb_capi_adapter` (not folded as OBJECT bricks). See [`NEWDB_QUERY_LAYER.md`](NEWDB_QUERY_LAYER.md).
 
 Update this diagram when adding or renaming blocks.
 
 ```mermaid
 flowchart TB
   core[newdb_core]
+  query_lib[newdb_query STATIC]
   shell_state[newdb_shell_state OBJECT]
   shell_dispatch[newdb_shell_dispatch OBJECT]
   boot_capi[newdb_shell_bootstrap_capi OBJECT]
   boot_common[newdb_shell_common OBJECT]
   boot_cat[newdb_shell_catalog OBJECT]
-  boot_where[newdb_shell_where OBJECT]
   boot_txn[newdb_shell_txn OBJECT]
   boot_side[newdb_shell_sidecar OBJECT]
   capi[newdb_capi_adapter STATIC]
@@ -113,25 +116,25 @@ flowchart TB
   shell[newdb_shell STATIC]
   shared[newdb_shared SHARED]
   core --> shell_state
+  core --> query_lib
   shell_state --> shell_dispatch
   shell_state --> boot_capi
   boot_common --> shell_dispatch
   boot_common --> boot_capi
   boot_common --> boot_cat
-  boot_common --> boot_where
   boot_common --> boot_txn
-  boot_cat --> boot_where
   boot_cat --> boot_side
   shell_dispatch --> boot_capi
   shell_dispatch --> boot_repl
+  shell_dispatch --> query_lib
   shell_state --> capi
   boot_capi --> capi
   shell_dispatch --> capi
   boot_common --> capi
   boot_cat --> capi
-  boot_where --> capi
   boot_txn --> capi
   boot_side --> capi
+  query_lib --> capi
   capi --> shell
   boot_repl --> shell
   core --> capi
@@ -142,6 +145,7 @@ flowchart TB
 
 ### OBJECT vs STATIC shell bricks (pre-study)
 
+- **`newdb_query` (`STATIC`)** is the first promoted **non-OBJECT** slice inside the embed stack: it links **`PUBLIC`** into `newdb_capi_adapter` so embedders still depend on a single adapter archive + its transitive libs. Further splits should follow the same pattern to avoid duplicate static state / ODR issues.
 - **`newdb_shell_state` as a standalone `STATIC` link target** remains **not viable** without the rest of the `newdb_capi_adapter` link closure (linking only `newdb_shell_state` + `newdb_shared` reproduces large unresolved-symbol sets). Keep **OBJECT** bricks folded into `newdb_capi_adapter` as in the diagram above.
 - **Pilot: `newdb_shell_common` → `STATIC`**: **deferred**. OBJECT targets already give strong incremental builds; promoting `newdb_shell_common` alone would require every dependent OBJECT/executable edge to adopt a consistent `PUBLIC`/`PRIVATE` `target_link_libraries` story across MinGW/MSVC/Linux and risks subtle **ODR / duplicate static state** if anything linked the static library twice. Unless a **second embedder** needs an explicit static library boundary, stay on OBJECT aggregation.
 

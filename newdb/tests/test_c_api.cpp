@@ -264,6 +264,7 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     EXPECT_NE(stats_json.find("\"wal_recovery_redo_ms\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"wal_recovery_checkpoint_begin_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"wal_recovery_checkpoint_end_count\":"), std::string::npos);
+    EXPECT_NE(stats_json.find("\"wal_recovery_undo_chain_fallback_txns\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"wal_recovery_policy\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"file_lock_same_process_reuse_count\":"), std::string::npos);
     EXPECT_NE(stats_json.find("\"wal_group_commit_count\":"), std::string::npos);
@@ -323,6 +324,7 @@ TEST(CApi, RuntimeStatsAndShowTuningJsonAreStructured) {
     EXPECT_NE(tuning_json.find("\"wal_recovery_undo_ms\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"wal_recovery_finalize_ms\":"), std::string::npos);
     EXPECT_NE(tuning_json.find("\"wal_recovery_records_scanned\":"), std::string::npos);
+    EXPECT_NE(tuning_json.find("\"wal_recovery_undo_chain_fallback_txns\":"), std::string::npos);
     // NOTE: tail fields may be truncated in fixed C API buffers on long JSON payloads.
     // NOTE: SHOW TUNING JSON can become long with extended counters; keep
     // strict assertions on core gate fields above and avoid tail-field
@@ -420,6 +422,7 @@ TEST(CApi, RuntimeSnapshotAppendsJsonl) {
     EXPECT_NE(l1.find("\"wal_recovery_finalize_ms\":"), std::string::npos);
     EXPECT_NE(l1.find("\"wal_recovery_records_scanned\":"), std::string::npos);
     EXPECT_NE(l1.find("\"wal_recovery_dangling_txns\":"), std::string::npos);
+    EXPECT_NE(l1.find("\"wal_recovery_undo_chain_fallback_txns\":"), std::string::npos);
     EXPECT_NE(l1.find("\"wal_group_commit_count\":"), std::string::npos);
     EXPECT_NE(l1.find("\"scheduler_throttle_count\":"), std::string::npos);
     EXPECT_NE(l1.find("\"lsm_memtable_flush_count\":"), std::string::npos);

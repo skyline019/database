@@ -3,12 +3,12 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { RUNTIME_TUNING_DIAGNOSTIC_GROUPS, shouldStopAndSkipHistory } from "./commandPolicy";
+import { shouldStopAndSkipHistory } from "./commandPolicy";
 import { shouldApplyPageResult } from "./pagePolicy";
 import { buildDefattrAppendCommand } from "./attrPolicy";
 import {
   FolderOpened,
-  Coin,
+  InfoFilled,
   DocumentCopy,
   Plus,
   QuestionFilled,
@@ -30,7 +30,16 @@ import {
 
 type PageResult = { headers: string[]; rows: string[][]; raw: string; columns?: { name: string; ty: string }[] };
 type State = { dataDir: string; currentTable: string; pageSize: number };
-type DllInfo = { loaded: boolean; version: string; path: string; message: string };
+type DllInfo = {
+  loaded: boolean;
+  version: string;
+  path: string;
+  message: string;
+  apiVersionMajor?: number;
+  apiVersionMinor?: number;
+  apiVersionPatch?: number;
+  abiVersion?: number;
+};
 type CommandExecResult = {
   ok: boolean;
   output: string;
@@ -45,7 +54,6 @@ type TimedExecResult = {
   errorCodeNumeric?: number | null;
   elapsedMs: number;
 };
-type TimedScriptResult = { ok: boolean; output: string; elapsedMs: number };
 type ExportBundleResult = { path: string };
 type RuntimeArtifactInfo = {
   guiExePath: string;
@@ -68,75 +76,10 @@ type RuntimeArtifactInfo = {
   buildProfile?: string;
   /** `debug` | `release` — GUI/Tauri build kind from `runtime_artifact_info`. */
   guiPackageKind?: string;
-};
-type PressureBenchProfile = {
-  jobs: number;
-  batches: number;
-  batchSize: number;
-  segmentTargetBytes: number;
-  sidecarInvalidateEveryN: number;
-  lsmCompactionWorkers: number;
-  lsmCompactionReapBudget: number;
-  lsmL0CompactTrigger: number;
-  lsmL0CompactBatch: number;
-  lsmFlushTriggerMultiplier: number;
-  repeatUntilFail: number;
-  sourceSummary: string;
-};
-type PressureBenchSummaryItem = {
-  path: string;
-  timestamp: string;
-  benchmarkProfile: string;
-  runtimeWalsyncMode: string;
-  runtimePressureTpsEst: number;
-  runtimePressureBatchMsP95: number;
-};
-type RuntimeTrendDashboard = {
-  schema_version?: string;
-  generated_at?: string;
-  health?: {
-    tier?: "healthy" | "warning" | "critical" | string;
-    reasons?: string[];
-    latest_query_avg_ms?: number | null;
-    latest_cm_tps_min?: number | null;
-    latest_hp_max_query_avg_ms?: number | null;
-    latest_txn_normal_avg_ms?: number | null;
-  };
-  sources?: {
-    test_loop_rows?: number;
-    nightly_rows?: number;
-  };
-  nightly_status?: {
-    pass_rate?: number | null;
-  };
-  perf_metrics?: Record<string, { count: number; min: number | null; max: number | null; avg: number | null }>;
-  recent_runs?: Array<{
-    source?: string | null;
-    timestamp?: string | null;
-    runtime_run_id?: string | null;
-    status?: string | null;
-    dashboard_quality_gate_status?: string | null;
-    query_avg_ms_max?: number | null;
-    cm_tps_min?: number | null;
-  }>;
-  nightly?: {
-    crash_matrix?: {
-      schema_version?: string;
-      ts_ms?: number;
-      gate?: string;
-      summary?: { total?: number; passed?: number; failed?: number };
-      points?: Array<{ point: string; pass: boolean; elapsed_ms: number }>;
-    };
-  };
-};
-
-type CrashMatrixPoint = { point: string; pass: boolean; elapsed_ms: number };
-type CrashMatrixJson = {
-  schema_version?: string;
-  ts_ms?: number;
-  gate?: string;
-  summary?: { total?: number; passed?: number; failed?: number };
-  points?: CrashMatrixPoint[];
+  cApiVersionMajor?: number;
+  cApiVersionMinor?: number;
+  cApiVersionPatch?: number;
+  cApiAbiVersion?: number;
 };
 type TableTabState = {
   key: string;
@@ -248,15 +191,10 @@ type MenuAction =
   | { kind: "help" }
   | { kind: "logWindow" }
   | { kind: "cliTerminalWindow" }
-  | { kind: "perfBench" }
-  | { kind: "pressureBench" }
-  | { kind: "nightlySoak" }
-  | { kind: "runtimeDashboard" }
   | { kind: "txnRecovery" }
-  | { kind: "crashMatrix" }
   | { kind: "walRecovery" }
-  | { kind: "gates" }
   | { kind: "exportBundle" }
+  | { kind: "about" }
   | { kind: "settings" }
   | { kind: "createTableWizard" }
   | {
@@ -300,21 +238,21 @@ const logs = ref<string[]>([]);
 const validationErrors = ref<Record<string, boolean>>({});
 const activeTab = ref<"data" | "mdb">("data");
 const busy = ref(false);
-const dll = ref<DllInfo>({ loaded: false, version: "n/a", path: "", message: "" });
+const dll = ref<DllInfo>({
+  loaded: false,
+  version: "n/a",
+  path: "",
+  message: "",
+  apiVersionMajor: -1,
+  apiVersionMinor: -1,
+  apiVersionPatch: -1,
+  abiVersion: -1
+});
 const runtimeArtifacts = ref<RuntimeArtifactInfo | null>(null);
 /** Last SHOW PLAN / EXPLAIN WHERE raw output (for Export modal diagnostics). */
 const lastShowPlanRaw = ref("");
 const lastCommandErrorCodeNumeric = ref<number | null>(null);
-const runtimeDashboard = ref<RuntimeTrendDashboard | null>(null);
-const runtimeDashboardUpdatedAt = ref("");
-const runtimeDashboardPrevTier = ref<string>("");
-const runtimeDashboardTierChangeNote = ref("");
-const crashMatrixFiles = ref<string[]>([]);
-const crashMatrixSelected = ref("");
-const crashMatrixJson = ref<CrashMatrixJson | null>(null);
 const walRecoveryText = ref("");
-const gatesMode = ref<"both" | "lite" | "strict">("both");
-const gatesOutput = ref("");
 const exportBundlePath = ref("");
 const undoStack = ref<UndoUnit[]>([]);
 const redoStack = ref<UndoUnit[]>([]);
@@ -332,15 +270,11 @@ const stackPageSize = 8;
 const stackPreviewUnit = ref<UndoUnit | null>(null);
 const selectedStackKey = ref("");
 const showHelp = ref(false);
-const showDllModal = ref(false);
-const showRuntimeDashboardModal = ref(false);
+const showAboutModal = ref(false);
 const showTxnRecoveryModal = ref(false);
-const showCrashMatrixModal = ref(false);
 const showWalRecoveryModal = ref(false);
-const showGatesModal = ref(false);
 const showExportModal = ref(false);
 const showSettingsModal = ref(false);
-const showPressureBenchModal = ref(false);
 const txnRecoverySavepointName = ref("sp1");
 const txnRecoveryRecoverLsn = ref("0");
 const txnRecoveryRecoverTs = ref(String(Date.now()));
@@ -365,20 +299,6 @@ const dialogFields = ref<{ key: string; label: string; value: string }[]>([]);
 const dialogTemplate = ref("");
 const dialogOpType = ref<OperationType>("generic");
 const dialogReversible = ref(false);
-const pressureBenchForm = ref<PressureBenchProfile>({
-  jobs: 16,
-  batches: 64,
-  batchSize: 500,
-  segmentTargetBytes: 256,
-  sidecarInvalidateEveryN: 16,
-  lsmCompactionWorkers: 2,
-  lsmCompactionReapBudget: 4,
-  lsmL0CompactTrigger: 8,
-  lsmL0CompactBatch: 12,
-  lsmFlushTriggerMultiplier: 2,
-  repeatUntilFail: 2,
-  sourceSummary: "default"
-});
 const contextMenu = ref({
   visible: false,
   x: 0,
@@ -890,7 +810,7 @@ function handleUiMessageClosed() {
 
 function handleGlobalHotkeys(ev: KeyboardEvent) {
   if (viewMode.value !== "main") return;
-  if (showHelp.value || showDllModal.value || showRuntimeDashboardModal.value || showSettingsModal.value || showDialog.value || showCreateTableWizard.value || showUiMessage.value) {
+  if (showHelp.value || showAboutModal.value || showSettingsModal.value || showDialog.value || showCreateTableWizard.value || showUiMessage.value) {
     return;
   }
   const key = (ev.key || "").toLowerCase();
@@ -980,18 +900,6 @@ const redoStackPaged = computed(() => {
   const start = Math.max(0, redoStack.value.length - stackRedoPage.value * stackPageSize);
   const end = redoStack.value.length - (stackRedoPage.value - 1) * stackPageSize;
   return redoStack.value.slice(start, end).reverse();
-});
-const dashboardTier = computed(() => String(runtimeDashboard.value?.health?.tier || "unknown").toLowerCase());
-const dashboardTierClass = computed(() => {
-  if (dashboardTier.value === "healthy") return "tier-healthy";
-  if (dashboardTier.value === "warning") return "tier-warning";
-  if (dashboardTier.value === "critical") return "tier-critical";
-  return "tier-unknown";
-});
-const dashboardRecentRuns = computed(() => {
-  const rows = runtimeDashboard.value?.recent_runs ?? [];
-  if (!Array.isArray(rows)) return [];
-  return rows.slice(-8).reverse();
 });
 type LogKind = "cmd" | "error" | "success" | "meta" | "session" | "normal";
 type LogFilterKind = "all" | LogKind;
@@ -1346,7 +1254,7 @@ const helpEntries: Array<{
   { category: "查询", command: "WHERE", syntax: "WHERE(attr,op,val[,AND|OR,...])", overloads: ["WHERE(age,>=,18)", "WHERE(dept,=,ENG,AND,salary,>,20000)"], example: "WHERE(dept,=,ENG,AND,age,>=,30)", desc: "条件筛选查询", detail: "常用操作符：= != > < >= <= contains。复杂条件建议在 MDB 脚本中多行维护，便于复用与调试。" },
   { category: "查询", command: "WHEREP", syntax: "WHEREP(proj_attr,WHERE,key_attr,=,key_value)", overloads: ["WHEREP(name,WHERE,dept,=,ENG)", "WHEREP(salary,WHERE,dept,=,FIN)"], example: "WHEREP(name,WHERE,dept,=,ENG)", desc: "等值过滤 + 单列投影（只读快速命中）", detail: "适用于“WHERE(单列=) + 只看某一列”的读路径优化。该路径会优先命中 covering projection sidecar，最多输出前 50 行。key_attr 需为非 id 的等值条件；若要按 id 定位请用 FIND。" },
   { category: "查询", command: "PAGE", syntax: "PAGE(page,size,order,asc|desc[,after=id])", overloads: ["PAGE(1,12,id,asc)", "PAGE(2,50,salary,desc)", "PAGE(1,20,id,desc,after=1000)"], example: "PAGE(1,25,join_date,desc)", desc: "分页+排序输出", detail: "UI 的分页器、排序框最终都会映射到该语义。order 为空时默认 id。可选第 5 参数 after=<id> 在 order=id 时启用 keyset 游标分页。页码越界返回空页，不会导致崩溃。" },
-  { category: "查询", command: "EXPLAIN WHERE / SHOW PLAN", syntax: "EXPLAIN WHERE(...) / SHOW PLAN(...)", overloads: ["EXPLAIN WHERE(dept,=,ENG)", "SHOW PLAN(age,>=,30,AND,dept,=,FIN)"], example: "SHOW PLAN(dept,=,ENG)", desc: "WHERE 执行计划（文本 / JSON）", detail: "谓词语法与 WHERE 相同。EXPLAIN WHERE 输出人类可读计划行；SHOW PLAN 输出单行 JSON（含 plan_id、候选成本、table_stats_stale 等），便于与诊断包、Runtime Dashboard 对照。" },
+  { category: "查询", command: "EXPLAIN WHERE / SHOW PLAN", syntax: "EXPLAIN WHERE(...) / SHOW PLAN(...)", overloads: ["EXPLAIN WHERE(dept,=,ENG)", "SHOW PLAN(age,>=,30,AND,dept,=,FIN)"], example: "SHOW PLAN(dept,=,ENG)", desc: "WHERE 执行计划（文本 / JSON）", detail: "谓词语法与 WHERE 相同。EXPLAIN WHERE 输出人类可读计划行；SHOW PLAN 输出单行 JSON（含 plan_id、候选成本、table_stats_stale 等），便于分析与导出诊断包。" },
   { category: "查询", command: "COUNT / SUM / AVG / MIN / MAX", syntax: "COUNT() / SUM(attr) / AVG(attr) / MIN(attr) / MAX(attr)", overloads: ["COUNT()", "SUM(salary)", "AVG(age)", "MIN(join_date)", "MAX(salary)"], example: "SUM(salary)", desc: "聚合统计", detail: "仅可聚合字段（通常为数值/可比较类型）有效。可先 WHERE 过滤后再统计；结果输出在日志区，可复制用于报表。" },
   { category: "导入导出", command: "IMPORTDIR / EXPORT", syntax: "IMPORTDIR(path) / EXPORT CSV file / EXPORT JSON file", overloads: ["IMPORTDIR(C:/tmp/newdb_import)", "EXPORT CSV out.csv", "EXPORT JSON out.json"], example: "EXPORT CSV hr_employees.csv", desc: "批量导入与导出", detail: "IMPORTDIR 扫描目录加载表文件；EXPORT 默认针对当前 USE 表。导出前建议确认分页排序键，避免误导出其他表。" },
   { category: "事务", command: "BEGIN / COMMIT / ROLLBACK", syntax: "BEGIN [table] / COMMIT / ROLLBACK", overloads: ["BEGIN", "BEGIN hr.employees", "COMMIT", "ROLLBACK"], example: "BEGIN", desc: "事务控制与回滚", detail: "BEGIN 后进行多条写操作，COMMIT 提交，ROLLBACK 回退。当前 GUI 通过 DLL 会话保持事务状态，exe 仅用于分页读取，不影响回滚可用性。" },
@@ -1388,7 +1296,9 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { divider: true, label: "-" },
       { section: true, label: "独立窗口" },
       { label: "日志窗口", action: { kind: "logWindow" } },
-      { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } }
+      { label: "CLI 终端窗口", action: { kind: "cliTerminalWindow" } },
+      { divider: true, label: "-" },
+      { label: "关于…", action: { kind: "about" } }
     ]
   },
   {
@@ -1422,7 +1332,7 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     items: [
       { section: true, label: "写入" },
       { label: "插入数据...", action: { kind: "dialog", opType: "data_insert", title: "插入数据", template: "INSERT({values})", fields: [{ key: "values", label: "参数", value: "1,alice,20" }], reversible: true } },
-      { label: "批量插入(压测)...", action: { kind: "dialog", opType: "data_insert", title: "批量插入", template: "BULKINSERT({start},{count})", fields: [{ key: "start", label: "起始ID", value: "100000" }, { key: "count", label: "条数", value: "5000" }] } },
+      { label: "批量插入...", action: { kind: "dialog", opType: "data_insert", title: "批量插入", template: "BULKINSERT({start},{count})", fields: [{ key: "start", label: "起始ID", value: "100000" }, { key: "count", label: "条数", value: "5000" }] } },
       { label: "更新数据...", action: { kind: "dialog", opType: "data_update", title: "更新数据", template: "UPDATE({values})", fields: [{ key: "values", label: "参数", value: "1,alice,21" }] } },
       { label: "删除数据...", action: { kind: "dialog", opType: "data_delete", title: "删除数据", template: "DELETE({id})", fields: [{ key: "id", label: "ID", value: "1" }] } },
       { divider: true, label: "-" },
@@ -1456,20 +1366,12 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
     ]
   },
   {
-    label: "工具与观测",
+    label: "工具",
     key: "tools",
     items: [
-      { section: true, label: "压测与跑批" },
-      { label: "百万级性能压测(可执行)...", action: { kind: "perfBench" } },
-      { label: "Concurrent Pressure 压测...", action: { kind: "pressureBench" } },
-      { label: "Nightly Soak 趋势跑批...", action: { kind: "nightlySoak" } },
-      { divider: true, label: "-" },
-      { section: true, label: "观测与诊断导出" },
-      { label: "Runtime Dashboard...", action: { kind: "runtimeDashboard" } },
-      { label: "Crash Matrix...", action: { kind: "crashMatrix" } },
+      { section: true, label: "运维与诊断" },
       { label: "WAL & Recovery...", action: { kind: "walRecovery" } },
-      { label: "Gates...", action: { kind: "gates" } },
-      { label: "导出诊断包(Export Bundle)...", action: { kind: "exportBundle" } },
+      { label: "导出诊断包…", action: { kind: "exportBundle" } },
       { divider: true, label: "-" },
       { section: true, label: "会话调优（当前库 CLI）" },
       { label: "调优状态", action: { kind: "command", command: "SHOW TUNING", opType: "generic", title: "调优状态" } },
@@ -1970,35 +1872,10 @@ async function refreshRuntimeArtifacts() {
   runtimeArtifacts.value = await invoke<RuntimeArtifactInfo>("runtime_artifact_info");
 }
 
-async function refreshRuntimeDashboard() {
-  try {
-    const raw = await invoke<string>("runtime_trend_dashboard_json");
-    const next = JSON.parse(raw) as RuntimeTrendDashboard;
-    const nextTier = String(next?.health?.tier || "unknown").toLowerCase();
-    const prevTier = String(runtimeDashboard.value?.health?.tier || runtimeDashboardPrevTier.value || "unknown").toLowerCase();
-    runtimeDashboard.value = next;
-    runtimeDashboardUpdatedAt.value = now();
-    if (prevTier && nextTier && prevTier !== nextTier) {
-      runtimeDashboardTierChangeNote.value = `${prevTier} -> ${nextTier}`;
-      logLine(`[DASHBOARD] health tier changed: ${prevTier} -> ${nextTier}`);
-    }
-    runtimeDashboardPrevTier.value = nextTier;
-  } catch (e) {
-    runtimeDashboard.value = null;
-    logLine(`[DASHBOARD][WARN] ${String(e)}`);
-  }
-}
-
-async function openDllStatusModal() {
+async function openAboutModal() {
   await refreshDllInfo();
   await refreshRuntimeArtifacts();
-  await refreshRuntimeDashboard();
-  showDllModal.value = true;
-}
-
-async function openRuntimeDashboardModal() {
-  await refreshRuntimeDashboard();
-  showRuntimeDashboardModal.value = true;
+  showAboutModal.value = true;
 }
 
 function applySettingsPreset(preset: SettingsPreset) {
@@ -2744,31 +2621,6 @@ async function runTimedOp(
   }
 }
 
-async function refreshCrashMatrix() {
-  try {
-    const files = await invoke<string[]>("list_results_files", { prefix: "redo_undo_crash_matrix_", limit: 30 });
-    crashMatrixFiles.value = files ?? [];
-    if (!crashMatrixSelected.value && crashMatrixFiles.value.length > 0) {
-      crashMatrixSelected.value = crashMatrixFiles.value[0]!;
-    }
-    if (crashMatrixSelected.value) {
-      const text = await invoke<string>("read_results_json", { fileName: crashMatrixSelected.value });
-      crashMatrixJson.value = JSON.parse(text) as CrashMatrixJson;
-    } else {
-      crashMatrixJson.value = null;
-    }
-  } catch (e: any) {
-    crashMatrixJson.value = null;
-    crashMatrixFiles.value = [];
-    await openUiMessage("alert", "Crash Matrix 读取失败", String(e));
-  }
-}
-
-async function onSelectCrashMatrix(name: string) {
-  crashMatrixSelected.value = name;
-  await refreshCrashMatrix();
-}
-
 async function refreshWalRecoverySummary() {
   // Minimal recovery summary: reuse CLI command output (keeps backend changes small).
   const ok = await runCommand("SHOW TUNING", { skipHistory: true, opType: "generic", title: "WAL/Recovery Summary" });
@@ -2778,46 +2630,6 @@ async function refreshWalRecoverySummary() {
   }
   // Use the latest logs slice as the modal content.
   walRecoveryText.value = logs.value.slice(0, 60).join("\n");
-}
-
-async function runRedoUndoGate() {
-  busy.value = true;
-  try {
-    const r = await invoke<TimedScriptResult>("run_redo_undo_gate", { idempotentMode: gatesMode.value });
-    gatesOutput.value = r.output ?? "";
-    logs.value.unshift(`[${now()}] redo/undo gate (mode=${gatesMode.value}) elapsed_ms=${r.elapsedMs}\n${gatesOutput.value}`);
-    persistLogs();
-    await refreshCrashMatrix();
-    await refreshRuntimeDashboard();
-    if (!r.ok) {
-      await openUiMessage("alert", "Gate 失败", "redo/undo gate 执行失败（请查看输出并导出诊断包）");
-    }
-  } catch (e: any) {
-    gatesOutput.value = String(e);
-    await openUiMessage("alert", "Gate 运行失败", String(e));
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function runNightlyPressureProfileCompare() {
-  busy.value = true;
-  try {
-    const r = await invoke<TimedScriptResult>("run_nightly_pressure_profile_compare");
-    gatesOutput.value = r.output ?? "";
-    logs.value.unshift(`[${now()}] nightly pressure profile compare elapsed_ms=${r.elapsedMs}\n${gatesOutput.value}`);
-    persistLogs();
-    await refreshCrashMatrix();
-    await refreshRuntimeDashboard();
-    if (!r.ok) {
-      await openUiMessage("alert", "Nightly 脚本失败", "nightly_pressure_profile_compare 执行失败（请查看输出）");
-    }
-  } catch (e: any) {
-    gatesOutput.value = String(e);
-    await openUiMessage("alert", "Nightly 脚本运行失败", String(e));
-  } finally {
-    busy.value = false;
-  }
 }
 
 async function exportBundle() {
@@ -3386,94 +3198,17 @@ async function runMenuAction(action: MenuAction) {
     await openDetachedCliTerminalWindow();
     return;
   }
-  if (action.kind === "perfBench") {
-    const sizes = (await openUiMessage("prompt", "压测规模 SizesCsv", "例如：100000,500000,1000000", "100000")) ?? "";
-    if (!sizes.trim()) return;
-    const qLoopsRaw = (await openUiMessage("prompt", "QueryLoops", "每档查询循环次数", "1")) ?? "1";
-    const txnRaw = (await openUiMessage("prompt", "TxnPerMode", "每种事务模式执行次数", "60")) ?? "60";
-    const chunkRaw = (await openUiMessage("prompt", "BuildChunkSize", "构建阶段分块大小", "50000")) ?? "50000";
-    const queryLoops = Number.parseInt(qLoopsRaw, 10);
-    const txnPerMode = Number.parseInt(txnRaw, 10);
-    const buildChunkSize = Number.parseInt(chunkRaw, 10);
-    busy.value = true;
-    try {
-      const result = await invoke<string>("run_perf_bench", {
-        sizesCsv: sizes.trim(),
-        queryLoops: Number.isFinite(queryLoops) ? queryLoops : 1,
-        txnPerMode: Number.isFinite(txnPerMode) ? txnPerMode : 60,
-        buildChunkSize: Number.isFinite(buildChunkSize) ? buildChunkSize : 50000
-      });
-      logs.value.unshift(`[${now()}] perf bench\n${result}`);
-      persistLogs();
-      await refreshTables();
-      await openUiMessage("alert", "压测完成", "性能压测执行完成，请在日志中查看 CSV 输出路径。");
-    } catch (e: any) {
-      await openUiMessage("alert", "压测失败", `性能压测执行失败: ${String(e)}`);
-    } finally {
-      busy.value = false;
-    }
-    return;
-  }
-  if (action.kind === "pressureBench") {
-    showPressureBenchModal.value = true;
-    await autofillPressureBenchProfile();
-    return;
-  }
-  if (action.kind === "nightlySoak") {
-    const runsRaw =
-      (await openUiMessage("prompt", "Nightly Runs", "连续跑批次数（例如 7）", "3")) ?? "3";
-    const soakRaw =
-      (await openUiMessage("prompt", "SoakMinutes", "每轮 soak 分钟数（例如 30）", "30")) ?? "30";
-    const sleepRaw =
-      (await openUiMessage("prompt", "SleepSecondsBetweenRuns", "每轮间隔秒数（例如 60）", "30")) ?? "30";
-    const runs = Number.parseInt(runsRaw, 10);
-    const soakMinutes = Number.parseInt(soakRaw, 10);
-    const sleepSeconds = Number.parseInt(sleepRaw, 10);
-    busy.value = true;
-    try {
-      const result = await invoke<string>("run_nightly_soak", {
-        runs: Number.isFinite(runs) ? runs : 1,
-        soakMinutes: Number.isFinite(soakMinutes) ? soakMinutes : 30,
-        sleepSecondsBetweenRuns: Number.isFinite(sleepSeconds) ? sleepSeconds : 30,
-        continueOnFailure: true
-      });
-      logs.value.unshift(`[${now()}] nightly soak\n${result}`);
-      persistLogs();
-      await refreshRuntimeDashboard();
-      await openUiMessage(
-        "alert",
-        "Nightly Soak 完成",
-        "Nightly soak 跑批完成，趋势已写入 scripts/results/nightly_soak_trend.jsonl。"
-      );
-    } catch (e: any) {
-      logs.value.unshift(`[${now()}] nightly soak failed\n${String(e)}`);
-      persistLogs();
-      await openUiMessage("alert", "Nightly Soak 失败", `跑批失败：${String(e)}`);
-    } finally {
-      busy.value = false;
-    }
-    return;
-  }
-  if (action.kind === "runtimeDashboard") {
-    await openRuntimeDashboardModal();
+  if (action.kind === "about") {
+    await openAboutModal();
     return;
   }
   if (action.kind === "txnRecovery") {
     showTxnRecoveryModal.value = true;
     return;
   }
-  if (action.kind === "crashMatrix") {
-    showCrashMatrixModal.value = true;
-    await refreshCrashMatrix();
-    return;
-  }
   if (action.kind === "walRecovery") {
     showWalRecoveryModal.value = true;
     await refreshWalRecoverySummary();
-    return;
-  }
-  if (action.kind === "gates") {
-    showGatesModal.value = true;
     return;
   }
   if (action.kind === "exportBundle") {
@@ -3508,68 +3243,6 @@ async function runMenuAction(action: MenuAction) {
     return;
   }
   await runCommand(action.command, { opType: action.opType, title: action.title });
-}
-
-async function autofillPressureBenchProfile() {
-  try {
-    const profile = await invoke<PressureBenchProfile>("suggest_concurrent_pressure_profile");
-    pressureBenchForm.value = profile;
-    logs.value.unshift(`[${now()}] pressure profile autofill\nsource=${profile.sourceSummary}`);
-    persistLogs();
-  } catch (e: any) {
-    await openUiMessage("alert", "自动回填失败", `读取最佳参数失败: ${String(e)}`);
-  }
-}
-
-async function submitPressureBench() {
-  busy.value = true;
-  try {
-    const f = pressureBenchForm.value;
-    const result = await invoke<string>("run_concurrent_pressure_bench", {
-      jobs: f.jobs,
-      batches: f.batches,
-      batchSize: f.batchSize,
-      segmentTargetBytes: f.segmentTargetBytes,
-      sidecarInvalidateEveryN: f.sidecarInvalidateEveryN,
-      lsmCompactionWorkers: f.lsmCompactionWorkers,
-      lsmCompactionReapBudget: f.lsmCompactionReapBudget,
-      lsmL0CompactTrigger: f.lsmL0CompactTrigger,
-      lsmL0CompactBatch: f.lsmL0CompactBatch,
-      lsmFlushTriggerMultiplier: f.lsmFlushTriggerMultiplier,
-      repeatUntilFail: f.repeatUntilFail
-    });
-    logs.value.unshift(`[${now()}] concurrent pressure bench\n${result}`);
-    persistLogs();
-    showPressureBenchModal.value = false;
-    await refreshTables();
-    await openUiMessage("alert", "压测完成", "Concurrent pressure bench 执行完成，请在日志中查看 summary 路径与 PRESSURE_TPS_LATENCY。");
-  } catch (e: any) {
-    logs.value.unshift(`[${now()}] concurrent pressure bench failed\n${String(e)}`);
-    persistLogs();
-    await openUiMessage("alert", "压测失败", `Concurrent pressure bench 执行失败: ${String(e)}`);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function showRecentPressureSummaries() {
-  try {
-    const rows = await invoke<PressureBenchSummaryItem[]>("list_concurrent_pressure_summaries", { limit: 8 });
-    if (!rows.length) {
-      await openUiMessage("alert", "最近压测结果", "未找到 concurrent_pressure_summary 结果文件。");
-      return;
-    }
-    const body = rows
-      .map((r, i) =>
-        `#${i + 1} tps=${r.runtimePressureTpsEst.toFixed(3)} p95=${r.runtimePressureBatchMsP95.toFixed(3)}ms profile=${r.benchmarkProfile || "-"} walsync=${r.runtimeWalsyncMode || "-"}\n${r.path}`
-      )
-      .join("\n\n");
-    logs.value.unshift(`[${now()}] recent concurrent pressure summaries\n${body}`);
-    persistLogs();
-    await openUiMessage("alert", "最近压测结果", "已写入日志面板，可直接复制路径做回放对比。");
-  } catch (e: any) {
-    await openUiMessage("alert", "读取失败", `读取最近压测结果失败: ${String(e)}`);
-  }
 }
 
 function onTableContextMenu(ev: MouseEvent, table: string) {
@@ -3615,24 +3288,18 @@ onMounted(async () => {
   }
   state.value = await invoke<State>("get_state");
   checkWorkspacePathOrWarn(state.value.dataDir);
-  await refreshDllInfo();
   try {
     const rt = await invoke<RuntimeArtifactInfo>("runtime_artifact_info");
     runtimeArtifacts.value = rt;
-    logLine(`[RUNTIME] gui=${rt.guiExePath} mtime=${rt.guiExeModified}`);
-    logLine(`[RUNTIME] demo=${rt.demoPath} mtime=${rt.demoModified}`);
-    logLine(`[RUNTIME] perf=${rt.perfPath} mtime=${rt.perfModified}`);
-    logLine(`[RUNTIME] runtime_report=${rt.runtimeReportPath} mtime=${rt.runtimeReportModified}`);
-    logLine(`[RUNTIME] dll=${rt.dllPath} mtime=${rt.dllModified}`);
+    logLine(`[RUNTIME] core_dll=${rt.dllPath}`);
     if (rt.newdbCliBackendPathEnv) {
       logLine(`[RUNTIME] NEWDB_CLI_BACKEND_PATH=${rt.newdbCliBackendPathEnv}`);
     } else if (rt.cliBackendPluginPath) {
-      logLine(`[RUNTIME] cli_backend=${rt.cliBackendPluginPath} mtime=${rt.cliBackendPluginModified ?? ""}`);
+      logLine(`[RUNTIME] cli_backend=${rt.cliBackendPluginPath}`);
     }
   } catch (e) {
     logLine(`[RUNTIME][ERROR] ${String(e)}`);
   }
-  await refreshRuntimeDashboard();
   await loadStackState();
   await refreshTables();
   if (state.value.currentTable?.trim()) {
@@ -4029,7 +3696,7 @@ onUnmounted(() => {
         </div>
         <div class="toolbar-group toolbar-group-low">
           <span class="toolbar-group-title">低频</span>
-          <el-button plain :icon="Coin" @click="openDllStatusModal">DLL状态</el-button>
+          <el-button plain :icon="InfoFilled" @click="openAboutModal">关于</el-button>
           <el-button plain :icon="DocumentCopy" @click="openDetachedLogWindow">日志窗口</el-button>
           <el-button plain :icon="Monitor" @click="openDetachedCliTerminalWindow">CLI 终端</el-button>
           <el-button plain :icon="QuestionFilled" @click="showHelp = true">帮助</el-button>
@@ -4336,133 +4003,27 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showDllModal" width="560px">
+    <el-dialog v-model="showAboutModal" width="520px">
       <template #header>
-        <h3>DLL 状态</h3>
+        <h3>关于 newdb GUI</h3>
       </template>
-      <div><strong>加载状态：</strong>{{ dll.loaded ? "已加载" : "未加载" }}</div>
-      <div><strong>版本：</strong>{{ dll.version }}</div>
-      <div><strong>路径：</strong>{{ dll.path }}</div>
-      <div class="dll-message"><strong>详情：</strong>{{ dll.message }}</div>
+      <p class="mini-tip">桌面客户端用于管理工作区、表数据与 CLI 会话。</p>
+      <div><strong>引擎核心 DLL：</strong>{{ dll.loaded ? "已加载" : "未加载" }}</div>
+      <div><strong>版本字符串：</strong>{{ dll.version }}</div>
+      <div v-if="dll.loaded && dll.apiVersionMajor != null && dll.apiVersionMajor >= 0">
+        <strong>C API：</strong>{{ dll.apiVersionMajor }}.{{ dll.apiVersionMinor }}.{{ dll.apiVersionPatch }}（ABI {{ dll.abiVersion }}）
+      </div>
+      <div><strong>DLL 路径：</strong><span class="mono">{{ dll.path }}</span></div>
+      <div v-if="!dll.loaded" class="dll-message"><strong>说明：</strong>{{ dll.message }}</div>
       <template v-if="runtimeArtifacts">
-        <div style="margin-top: 10px"><strong>GUI EXE：</strong>{{ runtimeArtifacts.guiExePath }} (mtime={{ runtimeArtifacts.guiExeModified }})</div>
-        <div><strong>Demo EXE：</strong>{{ runtimeArtifacts.demoPath }} (mtime={{ runtimeArtifacts.demoModified }})</div>
-        <div><strong>Perf EXE：</strong>{{ runtimeArtifacts.perfPath }} (mtime={{ runtimeArtifacts.perfModified }})</div>
-        <div><strong>Runtime Report EXE：</strong>{{ runtimeArtifacts.runtimeReportPath }} (mtime={{ runtimeArtifacts.runtimeReportModified }})</div>
-        <div><strong>Core DLL：</strong>{{ runtimeArtifacts.dllPath }} (mtime={{ runtimeArtifacts.dllModified }})</div>
-        <div v-if="runtimeArtifacts.cliBackendPluginPath">
-          <strong>CLI backend（plugin）：</strong>{{ runtimeArtifacts.cliBackendPluginPath }} (mtime={{
-            runtimeArtifacts.cliBackendPluginModified
-          }})
-        </div>
+        <div style="margin-top: 12px"><strong>CLI 后端插件：</strong>{{ runtimeArtifacts.cliBackendPluginPath || "（未附带）" }}</div>
         <div v-if="runtimeArtifacts.newdbCliBackendPathEnv">
           <strong>NEWDB_CLI_BACKEND_PATH：</strong><span class="mono">{{ runtimeArtifacts.newdbCliBackendPathEnv }}</span>
         </div>
-        <div v-if="runtimeArtifacts.runtimeStatsSchemaVersion">
-          <strong>Runtime stats schema：</strong>{{ runtimeArtifacts.runtimeStatsSchemaVersion }}
-        </div>
-        <div v-if="runtimeArtifacts.backendGitCommit">
-          <strong>Backend git：</strong>{{ runtimeArtifacts.backendGitCommit }}
-        </div>
-        <div v-if="runtimeArtifacts.buildProfile"><strong>Build profile：</strong>{{ runtimeArtifacts.buildProfile }}</div>
-        <div v-if="runtimeArtifacts.guiPackageKind"><strong>GUI package：</strong>{{ runtimeArtifacts.guiPackageKind }}</div>
       </template>
       <template #footer>
-        <el-button @click="showDllModal = false">关闭</el-button>
-        <el-button type="primary" @click="openDllStatusModal">刷新状态</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="showRuntimeDashboardModal" class="dashboard-modal" width="860px">
-      <template #header>
-        <div class="dashboard-modal-header">
-          <h3 style="margin:0;">Runtime Dashboard</h3>
-          <div class="dashboard-modal-header-right">
-            <span v-if="runtimeDashboard?.health?.tier" class="dashboard-tier-wrap">
-              <span class="dashboard-tier-pill" :class="dashboardTierClass">{{ runtimeDashboard.health.tier }}</span>
-            </span>
-            <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新</el-button>
-          </div>
-        </div>
-      </template>
-      <template v-if="runtimeDashboard">
-        <div class="dashboard-meta-line">
-          <span>last refresh: {{ runtimeDashboardUpdatedAt || "n/a" }}</span>
-          <span>generated_at: {{ runtimeDashboard.generated_at || "n/a" }}</span>
-          <span v-if="runtimeDashboardTierChangeNote" class="dashboard-tier-change">
-            tier changed: {{ runtimeDashboardTierChangeNote }}
-          </span>
-        </div>
-        <div style="height: 10px" />
-        <div class="tool-grid">
-          <div class="tool-card">
-            <div class="tool-title">健康状态</div>
-            <div><strong>tier:</strong> {{ runtimeDashboard.health?.tier || "unknown" }}</div>
-            <div><strong>nightly rows:</strong> {{ runtimeDashboard.sources?.nightly_rows ?? 0 }}</div>
-            <div><strong>test rows:</strong> {{ runtimeDashboard.sources?.test_loop_rows ?? 0 }}</div>
-            <div><strong>nightly pass_rate:</strong> {{ runtimeDashboard.nightly_status?.pass_rate ?? "n/a" }}</div>
-          </div>
-          <div class="tool-card">
-            <div class="tool-title">关键性能快照</div>
-            <div><strong>latest query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_query_avg_ms ?? "n/a" }}</div>
-            <div><strong>latest cm_tps_min:</strong> {{ runtimeDashboard.health?.latest_cm_tps_min ?? "n/a" }}</div>
-            <div><strong>latest hp_query_avg_ms:</strong> {{ runtimeDashboard.health?.latest_hp_max_query_avg_ms ?? "n/a" }}</div>
-            <div><strong>latest txn_normal_avg_ms:</strong> {{ runtimeDashboard.health?.latest_txn_normal_avg_ms ?? "n/a" }}</div>
-          </div>
-          <div class="tool-card">
-            <div class="tool-title">健康原因</div>
-            <div v-if="runtimeDashboard.health?.reasons?.length">
-              {{ runtimeDashboard.health?.reasons?.join(" | ") }}
-            </div>
-            <div v-else>无</div>
-          </div>
-        </div>
-        <div style="height: 10px" />
-        <div class="tool-card">
-          <div class="tool-title">最近运行（recent_runs）</div>
-          <div v-if="dashboardRecentRuns.length === 0" class="mini-tip">暂无 recent_runs 数据</div>
-          <div v-else class="recent-runs-list">
-            <div v-for="(r, idx) in dashboardRecentRuns" :key="`run-${idx}`" class="recent-run-row">
-              <span class="mono">{{ r.timestamp || "n/a" }}</span>
-              <span>{{ r.source || "unknown" }}</span>
-              <span class="mono">{{ r.runtime_run_id || "-" }}</span>
-              <span>q={{ r.query_avg_ms_max ?? "n/a" }}</span>
-              <span>cm={{ r.cm_tps_min ?? "n/a" }}</span>
-              <span>status={{ r.status || "-" }}</span>
-            </div>
-          </div>
-        </div>
-
-        <div style="height: 10px" />
-        <div class="tool-card">
-          <div class="tool-title">Nightly Crash Matrix（nightly.crash_matrix）</div>
-          <div v-if="!runtimeDashboard.nightly?.crash_matrix" class="mini-tip">暂无 crash matrix（先跑 nightly gate / merge 脚本）</div>
-          <template v-else>
-            <div class="mini-tip mono">
-              gate={{ runtimeDashboard.nightly.crash_matrix.gate || "n/a" }}
-              | total={{ runtimeDashboard.nightly.crash_matrix.summary?.total ?? (runtimeDashboard.nightly.crash_matrix.points?.length ?? 0) }}
-              | pass={{ runtimeDashboard.nightly.crash_matrix.summary?.passed ?? "n/a" }}
-              | fail={{ runtimeDashboard.nightly.crash_matrix.summary?.failed ?? "n/a" }}
-            </div>
-            <div v-if="runtimeDashboard.nightly.crash_matrix.points?.length" class="recent-runs-list" style="margin-top: 6px">
-              <div
-                v-for="(p, idx) in runtimeDashboard.nightly.crash_matrix.points.slice(0, 12)"
-                :key="`nightly-cm-${idx}`"
-                class="recent-run-row"
-              >
-                <span class="mono">{{ p.point }}</span>
-                <span :style="{ color: p.pass ? '#22c55e' : '#ef4444' }">{{ p.pass ? "pass" : "fail" }}</span>
-                <span class="mono">elapsed_ms={{ p.elapsed_ms }}</span>
-              </div>
-            </div>
-          </template>
-        </div>
-      </template>
-      <template v-else>
-        <div class="mini-tip">未找到 runtime_trend_dashboard.json（先运行 test_loop/nightly_soak 产样）</div>
-      </template>
-      <template #footer>
-        <el-button @click="showRuntimeDashboardModal = false">关闭</el-button>
+        <el-button @click="showAboutModal = false">关闭</el-button>
+        <el-button type="primary" @click="openAboutModal">刷新</el-button>
       </template>
     </el-dialog>
 
@@ -4470,7 +4031,7 @@ onUnmounted(() => {
       <template #header>
         <div class="settings-header">
           <h3 style="margin: 0">Txn & Recovery</h3>
-          <span class="mini-tip mono">Soak-ready 操作面板（事务/Savepoint/PITR）</span>
+          <span class="mini-tip mono">事务、Savepoint 与按时间点恢复（PITR）</span>
         </div>
       </template>
       <div class="tool-grid">
@@ -4511,68 +4072,6 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showCrashMatrixModal" class="dashboard-modal" width="860px">
-      <template #header>
-        <div class="dashboard-modal-header">
-          <h3 style="margin:0;">Crash Matrix</h3>
-          <div class="dashboard-modal-header-right">
-            <el-button size="small" plain :disabled="busy" @click="refreshCrashMatrix">刷新</el-button>
-          </div>
-        </div>
-      </template>
-      <div class="tool-card">
-        <div class="tool-title">选择结果文件</div>
-        <div class="tool-row">
-          <el-select
-            v-model="crashMatrixSelected"
-            size="small"
-            filterable
-            placeholder="选择 redo_undo_crash_matrix_*.json"
-            style="min-width: 360px"
-            @change="onSelectCrashMatrix"
-          >
-            <el-option v-for="f in crashMatrixFiles" :key="f" :label="f" :value="f" />
-          </el-select>
-          <span class="mini-tip mono">count={{ crashMatrixFiles.length }}</span>
-        </div>
-      </div>
-      <div style="height: 10px" />
-      <template v-if="crashMatrixJson">
-        <div class="tool-grid">
-          <div class="tool-card">
-            <div class="tool-title">Summary</div>
-            <div><strong>gate:</strong> {{ crashMatrixJson.gate || "n/a" }}</div>
-            <div><strong>total:</strong> {{ crashMatrixJson.summary?.total ?? (crashMatrixJson.points?.length ?? 0) }}</div>
-            <div><strong>passed:</strong> {{ crashMatrixJson.summary?.passed ?? "n/a" }}</div>
-            <div><strong>failed:</strong> {{ crashMatrixJson.summary?.failed ?? "n/a" }}</div>
-          </div>
-          <div class="tool-card">
-            <div class="tool-title">Schema</div>
-            <div class="mono">{{ crashMatrixJson.schema_version || "n/a" }}</div>
-            <div class="mini-tip mono">ts_ms={{ crashMatrixJson.ts_ms ?? "n/a" }}</div>
-          </div>
-        </div>
-        <div style="height: 10px" />
-        <div class="tool-card">
-          <div class="tool-title">Points</div>
-          <div v-if="!crashMatrixJson.points?.length" class="mini-tip">无 points 数据</div>
-          <div v-else class="recent-runs-list">
-            <div v-for="(p, idx) in crashMatrixJson.points" :key="`cm-${idx}`" class="recent-run-row">
-              <span class="mono">{{ p.point }}</span>
-              <span :style="{ color: p.pass ? '#22c55e' : '#ef4444' }">{{ p.pass ? "pass" : "fail" }}</span>
-              <span class="mono">elapsed_ms={{ p.elapsed_ms }}</span>
-            </div>
-          </div>
-        </div>
-      </template>
-      <template v-else>
-        <div class="mini-tip">未加载 crash matrix（先运行 redo/undo gate 生成 results）</div>
-      </template>
-      <template #footer>
-        <el-button @click="showCrashMatrixModal = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
     <el-dialog v-model="showWalRecoveryModal" class="dashboard-modal" width="860px">
       <template #header>
         <div class="dashboard-modal-header">
@@ -4591,50 +4090,10 @@ onUnmounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="showGatesModal" class="dashboard-modal" width="860px">
-      <template #header>
-        <div class="dashboard-modal-header">
-          <h3 style="margin:0;">Gates</h3>
-          <div class="dashboard-modal-header-right">
-            <el-button size="small" plain :disabled="busy" @click="refreshRuntimeDashboard">刷新看板</el-button>
-          </div>
-        </div>
-      </template>
-      <div class="tool-grid">
-        <div class="tool-card">
-          <div class="tool-title">Redo/Undo Gate</div>
-          <div class="tool-row">
-            <el-select v-model="gatesMode" size="small" style="max-width: 220px">
-              <el-option label="both(lite+strict)" value="both" />
-              <el-option label="lite" value="lite" />
-              <el-option label="strict" value="strict" />
-            </el-select>
-            <el-button size="small" type="primary" :disabled="busy" @click="runRedoUndoGate">运行</el-button>
-          </div>
-          <div class="mini-tip">产物会写入 scripts/results，并可在 Crash Matrix / Dashboard 中查看。</div>
-        </div>
-        <div class="tool-card">
-          <div class="tool-title">Nightly Pressure Profile Compare</div>
-          <div class="tool-row">
-            <el-button size="small" type="primary" :disabled="busy" @click="runNightlyPressureProfileCompare">运行</el-button>
-          </div>
-          <div class="mini-tip">该脚本会合并 crash matrix 进 runtime_trend_dashboard.json（nightly section）。</div>
-        </div>
-      </div>
-      <div style="height: 10px" />
-      <div class="tool-card">
-        <div class="tool-title">Output</div>
-        <pre class="mono" style="white-space: pre-wrap; margin: 0">{{ gatesOutput || "n/a" }}</pre>
-      </div>
-      <template #footer>
-        <el-button @click="showGatesModal = false">关闭</el-button>
-      </template>
-    </el-dialog>
-
     <el-dialog v-model="showExportModal" class="dashboard-modal" width="860px">
       <template #header>
         <div class="dashboard-modal-header">
-          <h3 style="margin:0;">Export Bundle</h3>
+          <h3 style="margin:0;">导出诊断包</h3>
           <div class="dashboard-modal-header-right">
             <el-button size="small" plain :disabled="busy" @click="refreshRuntimeArtifacts">刷新版本</el-button>
           </div>
@@ -4650,42 +4109,25 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="tool-card">
-          <div class="tool-title">Artifacts</div>
+          <div class="tool-title">运行环境摘要</div>
           <div v-if="runtimeArtifacts" class="mini-tip mono">
             gui={{ runtimeArtifacts.guiExePath }}\n
-            demo={{ runtimeArtifacts.demoPath }}\n
-            perf={{ runtimeArtifacts.perfPath }}\n
-            report={{ runtimeArtifacts.runtimeReportPath }}\n
             dll={{ runtimeArtifacts.dllPath }}\n
             cli_backend={{ runtimeArtifacts.cliBackendPluginPath ?? "" }}\n
             NEWDB_CLI_BACKEND_PATH={{ runtimeArtifacts.newdbCliBackendPathEnv ?? "" }}\n
-            stats_schema={{ runtimeArtifacts.runtimeStatsSchemaVersion ?? "" }}\n
-            git={{ runtimeArtifacts.backendGitCommit ?? "" }}\n
-            profile={{ runtimeArtifacts.buildProfile ?? "" }}\n
-            gui_pkg={{ runtimeArtifacts.guiPackageKind ?? "" }}
+            capi={{ runtimeArtifacts.cApiVersionMajor ?? "" }}.{{ runtimeArtifacts.cApiVersionMinor ?? "" }}.{{
+              runtimeArtifacts.cApiVersionPatch ?? ""
+            }}/abi={{ runtimeArtifacts.cApiAbiVersion ?? "" }}
           </div>
-          <div v-else class="mini-tip">未加载 artifacts（点“刷新版本”）</div>
+          <div v-else class="mini-tip">未加载环境信息（点击「刷新版本」）</div>
         </div>
         <div class="tool-card">
-          <div class="tool-title">计划 / 诊断</div>
+          <div class="tool-title">执行计划（最近一次）</div>
           <div class="mini-tip">最近一次 SHOW PLAN 或 EXPLAIN WHERE 的原始输出；errorCodeNumeric 取自该次命令结果。</div>
           <div class="mini-tip mono">errorCodeNumeric={{ lastCommandErrorCodeNumeric ?? "n/a" }}</div>
           <pre class="mono" style="white-space: pre-wrap; max-height: 220px; overflow: auto; margin: 8px 0 0">{{
             lastShowPlanRaw || "（尚未运行 SHOW PLAN / EXPLAIN WHERE）"
           }}</pre>
-        </div>
-        <div class="tool-card">
-          <div class="tool-title">Runtime 字段对齐（CLI / C API）</div>
-          <div class="mini-tip">与校验脚本契约一致；导出诊断包前可对照下列键是否在 `SHOW TUNING JSON` 中出现。</div>
-          <div
-            v-for="g in RUNTIME_TUNING_DIAGNOSTIC_GROUPS"
-            :key="g.title"
-            class="mini-tip mono"
-            style="margin-top: 6px; line-height: 1.35"
-          >
-            <div><strong>{{ g.title }}</strong></div>
-            <div>{{ g.keys.join(", ") }}</div>
-          </div>
         </div>
       </div>
       <template #footer>
@@ -5100,54 +4542,6 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="showCreateTableWizard = false">取消</el-button>
         <el-button type="primary" :disabled="busy" @click="submitCreateTableWizard">创建空表</el-button>
-      </template>
-    </el-dialog>
-
-    <el-dialog v-model="showPressureBenchModal" class="settings-modal" width="760px">
-      <template #header>
-        <h3>Concurrent Pressure 压测</h3>
-      </template>
-      <el-form label-width="260px">
-        <el-form-item label="并发 jobs">
-          <el-input-number v-model="pressureBenchForm.jobs" :min="1" :max="256" />
-        </el-form-item>
-        <el-form-item label="批次数 batches">
-          <el-input-number v-model="pressureBenchForm.batches" :min="1" :max="20000" />
-        </el-form-item>
-        <el-form-item label="每批写入 batchSize">
-          <el-input-number v-model="pressureBenchForm.batchSize" :min="1" :max="100000" />
-        </el-form-item>
-        <el-form-item label="LSM segmentTargetBytes">
-          <el-input-number v-model="pressureBenchForm.segmentTargetBytes" :min="64" :max="8192" />
-        </el-form-item>
-        <el-form-item label="sidecarInvalidateEveryN">
-          <el-input-number v-model="pressureBenchForm.sidecarInvalidateEveryN" :min="1" :max="4096" />
-        </el-form-item>
-        <el-form-item label="lsmCompactionWorkers">
-          <el-input-number v-model="pressureBenchForm.lsmCompactionWorkers" :min="1" :max="32" />
-        </el-form-item>
-        <el-form-item label="lsmCompactionReapBudget">
-          <el-input-number v-model="pressureBenchForm.lsmCompactionReapBudget" :min="1" :max="1024" />
-        </el-form-item>
-        <el-form-item label="lsmL0CompactTrigger">
-          <el-input-number v-model="pressureBenchForm.lsmL0CompactTrigger" :min="1" :max="512" />
-        </el-form-item>
-        <el-form-item label="lsmL0CompactBatch">
-          <el-input-number v-model="pressureBenchForm.lsmL0CompactBatch" :min="1" :max="512" />
-        </el-form-item>
-        <el-form-item label="lsmFlushTriggerMultiplier">
-          <el-input-number v-model="pressureBenchForm.lsmFlushTriggerMultiplier" :min="1" :max="64" />
-        </el-form-item>
-        <el-form-item label="repeatUntilFail">
-          <el-input-number v-model="pressureBenchForm.repeatUntilFail" :min="1" :max="64" />
-        </el-form-item>
-      </el-form>
-      <div class="dialog-preview">参数来源: {{ pressureBenchForm.sourceSummary || "default" }}</div>
-      <template #footer>
-        <el-button :disabled="busy" @click="showRecentPressureSummaries">最近结果回放</el-button>
-        <el-button :disabled="busy" @click="autofillPressureBenchProfile">自动回填最佳参数</el-button>
-        <el-button :disabled="busy" @click="showPressureBenchModal = false">取消</el-button>
-        <el-button type="primary" :disabled="busy" @click="submitPressureBench">执行压测</el-button>
       </template>
     </el-dialog>
 

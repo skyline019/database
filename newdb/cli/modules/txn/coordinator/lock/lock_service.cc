@@ -85,7 +85,10 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
                           nullptr);
         if (h == INVALID_HANDLE_VALUE) {
             st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
-            return Result<bool>::Err("failed to open lock file: " + lock_file);
+            return Result<bool>::Err(
+                "failed to open lock file: " + lock_file +
+                " [Windows: another session/process may hold an exclusive lock on this table path; "
+                "do not confuse with write-intent rejection.]");
         }
         OVERLAPPED ov{};
         if (::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, MAXDWORD, MAXDWORD, &ov)) {
@@ -100,8 +103,9 @@ Result<bool> TxnCoordinator::acquireLock(const std::string& file_path) {
         st_->m_file_lock_acquire_fail_count.fetch_add(1, std::memory_order_relaxed);
         return Result<bool>::Err(
             "lock is already held or lock acquisition failed (" +
-            std::to_string(static_cast<unsigned long long>(err)) + "): " +
-            lock_file);
+            std::to_string(static_cast<unsigned long long>(err)) + "): " + lock_file +
+            " [Windows: concurrent BEGIN on the same data file from another shell/process often fails here; "
+            "do not confuse with write-intent rejection.]");
     }
     state.handle = h;
 #else

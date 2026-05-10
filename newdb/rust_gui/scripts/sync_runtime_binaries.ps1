@@ -3,7 +3,7 @@
 # copies `newdb_cli_backend.dll` (from `newdb_cli_backend.dll` or MinGW `libnewdb_cli_backend.dll`) so the
 # GUI can auto-set NEWDB_CLI_BACKEND_PATH beside `libnewdb.dll`.
 param(
-    # Default: MinGW / single-config tree next to `rust_gui/` (i.e. `newdb/build-mingw`).
+    # Default: typical MinGW tree (`newdb/build-mingw`). Plugin CI preset often uses `..\build-clean-plugin`.
     [string]$BuildDir = "..\build-mingw",
     [string]$OutDir = ".\src-tauri\bin",
     [string]$ScriptsOutDir = ".\src-tauri\resources\scripts",

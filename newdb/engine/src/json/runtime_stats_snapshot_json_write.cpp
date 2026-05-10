@@ -44,6 +44,7 @@ void append_runtime_stats_snapshot_json_members_before_where(std::ostream& oss, 
         << "\"wal_recovery_redo_plan_pending_txn_count\":" << stats.wal_recovery_redo_plan_pending_txn_count
         << ","
         << "\"wal_recovery_apply_conflict_count\":" << stats.wal_recovery_apply_conflict_count << ","
+        << "\"wal_recovery_undo_chain_fallback_txns\":" << stats.wal_recovery_undo_chain_fallback_txns << ","
         << "\"wal_recovery_policy\":\"" << newdb::json_escape(stats.wal_recovery_policy) << "\","
         << "\"write_conflict_last_sample\":\"" << newdb::json_escape(stats.write_conflict_last_sample) << "\","
         << "\"file_lock_acquire_fail_count\":" << stats.file_lock_acquire_fail_count << ","

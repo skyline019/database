@@ -8,6 +8,12 @@
 #  else
 #    define GTEST_C_API
 #  endif
+#elif defined(GTEST_C_API_SHARED_BUILD)
+#  if (defined(__GNUC__) && __GNUC__ >= 4) || defined(__clang__)
+#    define GTEST_C_API __attribute__((visibility("default")))
+#  else
+#    define GTEST_C_API
+#  endif
 #else
 #  define GTEST_C_API
 #endif

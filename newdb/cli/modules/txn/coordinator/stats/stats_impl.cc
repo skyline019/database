@@ -187,6 +187,8 @@ TxnRuntimeStats TxnCoordinator::runtimeStats() const {
     s.wal_recovery_redo_plan_pending_txn_count =
         st_->m_wal_recovery_redo_plan_pending_txn_count.load(std::memory_order_relaxed);
     s.wal_recovery_apply_conflict_count = st_->m_wal_recovery_apply_conflict_count.load(std::memory_order_relaxed);
+    s.wal_recovery_undo_chain_fallback_txns =
+        st_->m_wal_recovery_undo_chain_fallback_txns.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lk(st_->m_wal_recovery_policy_mu);
         s.wal_recovery_policy = st_->m_wal_recovery_policy;

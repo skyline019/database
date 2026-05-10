@@ -52,11 +52,31 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
     // BEGIN [table_name] - ????
     if (strncasecmp_ascii(line, "BEGIN", 5) == 0) {
         std::string table = current_table;
+        bool explicit_begin_table = false;
         if (std::strlen(line) > 5) {
             std::string arg = trim(line + 5);
-            if (!arg.empty()) table = arg;
+            if (!arg.empty()) {
+                table = arg;
+                explicit_begin_table = true;
+            }
         }
-        if (f.txn().begin(table)) {
+        if (explicit_begin_table && !current_table.empty() && table != current_table) {
+            log_and_print(log_file,
+                          "[TXN] warning: BEGIN table '%s' differs from USE table '%s'\n",
+                          table.c_str(),
+                          current_table.c_str());
+            if (const char* raw = std::getenv("NEWDB_TXN_ENFORCE_BEGIN_USE_MATCH")) {
+                const std::string ev = trim(std::string(raw));
+                if (parse_on_off(ev).value_or(false)) {
+                    log_and_print(log_file,
+                                  "[TXN] BEGIN rejected: explicit table differs from USE "
+                                  "(NEWDB_TXN_ENFORCE_BEGIN_USE_MATCH).\n");
+                    return true;
+                }
+            }
+        }
+        const Result<bool> begin_res = f.txn().begin(table);
+        if (begin_res.isOk()) {
             if (txn_backup_enabled()) {
                 // Optional snapshot backup (off by default to reduce write amplification).
                 std::error_code ec;
@@ -69,7 +89,7 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
             log_and_print(log_file, "[TXN] transaction started (id=%lld, table=%s)\n",
                           (long long)f.txn().getTxnId(), table.c_str());
         } else {
-            log_and_print(log_file, "[TXN] failed to start transaction\n");
+            log_and_print(log_file, "[TXN] failed to start transaction: %s\n", begin_res.error().c_str());
         }
         return true;
     }
@@ -77,14 +97,15 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
     if (strcasecmp_ascii(line, "COMMIT") == 0) {
         const std::int64_t txn_id = f.txn().getTxnId();
         const std::string data_file = f.effective_data_path();
-        if (f.txn().commit()) {
+        const Result<bool> commit_res = f.txn().commit();
+        if (commit_res.isOk()) {
             lsm_lite_on_txn_commit(st, data_file, txn_id);
             std::error_code ec;
             fs::remove(txn_backup_path(), ec);
             log_and_print(log_file, "[TXN] transaction committed\n");
             f.txn().flushWAL();
         } else {
-            log_and_print(log_file, "[TXN] no active transaction to commit\n");
+            log_and_print(log_file, "[TXN] commit failed: %s\n", commit_res.error().c_str());
         }
         return true;
     }
@@ -92,7 +113,8 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
     if (strcasecmp_ascii(line, "ROLLBACK") == 0) {
         const std::int64_t txn_id = f.txn().getTxnId();
         const std::string data_file = f.effective_data_path();
-        if (f.txn().rollback()) {
+        const Result<bool> rollback_res = f.txn().rollback();
+        if (rollback_res.isOk()) {
             lsm_lite_on_txn_rollback(st, data_file, txn_id);
             std::error_code ec;
             const std::string bak_file = txn_backup_path();
@@ -104,8 +126,12 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
             // Rollback appends compensation records to disk; invalidate cache so
             // subsequent reads (e.g. FIND/PAGE) observe rolled-back state.
             shell_invalidate_session_table(st);
+            lsm_lite_clear_txn_views(st, data_file);
+            if (!data_file.empty()) {
+                invalidate_eq_sidecars_after_write(data_file);
+            }
         } else {
-            log_and_print(log_file, "[TXN] no active transaction to rollback\n");
+            log_and_print(log_file, "[TXN] rollback failed: %s\n", rollback_res.error().c_str());
         }
         return true;
     }
@@ -113,20 +139,22 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
         const std::string name = parse_single_arg(line, "SAVEPOINT ", 10);
         const bool maybe_savepoint_cmd = (strncasecmp_ascii(line, "SAVEPOINT", 9) == 0);
         if (!name.empty()) {
-            if (f.txn().savepoint(name)) {
+            const Result<bool> sp_res = f.txn().savepoint(name);
+            if (sp_res.isOk()) {
                 log_and_print(log_file, "[TXN] savepoint set: %s\n", name.c_str());
             } else {
-                log_and_print(log_file, "[TXN] savepoint failed: %s\n", name.c_str());
+                log_and_print(log_file, "[TXN] savepoint failed (%s): %s\n", name.c_str(), sp_res.error().c_str());
             }
             return true;
         }
         if (maybe_savepoint_cmd) {
             const std::string alt = parse_single_arg(line, "SAVEPOINT(", 10);
             if (!alt.empty()) {
-                if (f.txn().savepoint(alt)) {
+                const Result<bool> sp_res = f.txn().savepoint(alt);
+                if (sp_res.isOk()) {
                     log_and_print(log_file, "[TXN] savepoint set: %s\n", alt.c_str());
                 } else {
-                    log_and_print(log_file, "[TXN] savepoint failed: %s\n", alt.c_str());
+                    log_and_print(log_file, "[TXN] savepoint failed (%s): %s\n", alt.c_str(), sp_res.error().c_str());
                 }
             } else {
                 log_and_print(log_file, "[TXN] savepoint name required\n");
@@ -138,22 +166,28 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
         const std::string name = parse_single_arg(line, "ROLLBACK TO ", 12);
         const bool maybe_rb_to_cmd = (strncasecmp_ascii(line, "ROLLBACK TO", 11) == 0);
         if (!name.empty()) {
-            if (f.txn().rollbackToSavepoint(name)) {
+            const Result<bool> rb_sp_res = f.txn().rollbackToSavepoint(name);
+            if (rb_sp_res.isOk()) {
                 log_and_print(log_file, "[TXN] rolled back to savepoint: %s\n", name.c_str());
                 shell_invalidate_session_table(st);
             } else {
-                log_and_print(log_file, "[TXN] rollback to savepoint failed: %s\n", name.c_str());
+                log_and_print(log_file, "[TXN] rollback to savepoint failed (%s): %s\n",
+                              name.c_str(),
+                              rb_sp_res.error().c_str());
             }
             return true;
         }
         if (maybe_rb_to_cmd) {
             const std::string alt = parse_single_arg(line, "ROLLBACK TO(", 12);
             if (!alt.empty()) {
-                if (f.txn().rollbackToSavepoint(alt)) {
+                const Result<bool> rb_sp_res = f.txn().rollbackToSavepoint(alt);
+                if (rb_sp_res.isOk()) {
                     log_and_print(log_file, "[TXN] rolled back to savepoint: %s\n", alt.c_str());
                     shell_invalidate_session_table(st);
                 } else {
-                    log_and_print(log_file, "[TXN] rollback to savepoint failed: %s\n", alt.c_str());
+                    log_and_print(log_file, "[TXN] rollback to savepoint failed (%s): %s\n",
+                                  alt.c_str(),
+                                  rb_sp_res.error().c_str());
                 }
             } else {
                 log_and_print(log_file, "[TXN] rollback target savepoint required\n");
@@ -165,20 +199,26 @@ bool handle_txn_commands(ShellState& st, const char* line, const char* log_file,
         const std::string name = parse_single_arg(line, "RELEASE SAVEPOINT ", 18);
         const bool maybe_rel_sp_cmd = (strncasecmp_ascii(line, "RELEASE SAVEPOINT", 17) == 0);
         if (!name.empty()) {
-            if (f.txn().releaseSavepoint(name)) {
+            const Result<bool> rel_sp_res = f.txn().releaseSavepoint(name);
+            if (rel_sp_res.isOk()) {
                 log_and_print(log_file, "[TXN] savepoint released: %s\n", name.c_str());
             } else {
-                log_and_print(log_file, "[TXN] release savepoint failed: %s\n", name.c_str());
+                log_and_print(log_file, "[TXN] release savepoint failed (%s): %s\n",
+                              name.c_str(),
+                              rel_sp_res.error().c_str());
             }
             return true;
         }
         if (maybe_rel_sp_cmd) {
             const std::string alt = parse_single_arg(line, "RELEASE SAVEPOINT(", 18);
             if (!alt.empty()) {
-                if (f.txn().releaseSavepoint(alt)) {
+                const Result<bool> rel_sp_res = f.txn().releaseSavepoint(alt);
+                if (rel_sp_res.isOk()) {
                     log_and_print(log_file, "[TXN] savepoint released: %s\n", alt.c_str());
                 } else {
-                    log_and_print(log_file, "[TXN] release savepoint failed: %s\n", alt.c_str());
+                    log_and_print(log_file, "[TXN] release savepoint failed (%s): %s\n",
+                                  alt.c_str(),
+                                  rel_sp_res.error().c_str());
                 }
             } else {
                 log_and_print(log_file, "[TXN] release savepoint name required\n");

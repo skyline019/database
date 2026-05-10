@@ -583,6 +583,15 @@ void TxnCoordinator::syncHeapReadSnapshotForQuery(newdb::HeapTable& table) {
         publish_snapshot_lsns(0, 0);
         return;
     }
+    // Outside an active transaction, do not pin an MVCC snapshot on the heap. Compensation / undo rows
+    // can carry created_lsn equal to the current WAL tip; a statement snapshot taken slightly earlier
+    // would mark them invisible (e.g. COUNT/WHERE after ROLLBACK while readpath is enabled).
+    if (getState() != TxnState::Active) {
+        table.clear_snapshot();
+        set_source(0);
+        publish_snapshot_lsns(0, 0);
+        return;
+    }
     std::uint64_t lsn = wm->current_lsn();
     std::uint64_t txn_lsn = 0;
     std::uint64_t stmt_lsn = 0;

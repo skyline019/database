@@ -164,7 +164,7 @@
 | `core/core_impl.cc` | 事务核心状态与操作记录 |
 | `lock/lock_service.cc` | 锁与死锁相关 |
 | `wal/wal_service.cc` | 与 `WalManager` 协同的追加、flush、模式 |
-| `recovery/recovery_service.cc` | **`recoverFromWAL`**、与引擎 redo 对齐的堆补偿语义 |
+| `recovery/{recovery_analyze,redo,undo,heap_undo_apply,finalize,recovery_service}.cc` | **`recoverFromWAL`** 编排；analyze / redo / undo 链与 fallback / finalize；堆 undo 与运行时回滚共用 |
 | `vacuum/vacuum_service.cc` | vacuum 队列、compact、与 `measure_table_storage_health` 衔接 |
 | `write_conflict/write_conflict_service.cc` | 写冲突检测与等待 |
 | `write_conflict/lock_key.h` | **`LockKey`** / **`LockKeyKind`** |
@@ -276,7 +276,18 @@
 | `WriteTimingStage` | `HeapAppend` … `LsmCompaction` | 写路径分段计时标签 |
 | `LockKey` / `LockKeyKind` | range / predicate / secondary 等扩展写意图 | 与 `tryReserveWriteLockKey` 共用 reservation map |
 
-**`TxnCoordinator` 主要 API（类别）**：`begin`/`commit`/`rollback`/`savepoint`/`recoverToLsn`/`recoverToTime`；`acquireLock`/`releaseLock`/`isLocked`；`writeWAL`/`flushWAL`/`recoverFromWAL`/`setWalSyncMode`；`recordOperation`；`tryReserveWriteKey`/`tryReserveWriteLockKey`；写冲突与隔离级别 setter/getter（完整列表见头文件）。
+**`TxnCoordinator` 主要 API（类别）**：`begin`/`commit`/`rollback`/`savepoint`/`recoverToLsn`/`recoverToTime`；`acquireLock`/`releaseLock`/`isLocked`；`writeWAL`/`flushWAL`/`recoverFromWAL`/`setWalSyncMode`；`recordOperation`；`tryReserveWriteKey`/`tryReserveWriteKeysBatchSorted`/`tryReserveWriteLockKey`/`releaseWriteIntentStorageKeysForCurrentTxn`；写冲突与隔离级别 setter/getter（完整列表见头文件）。
+
+**扩展写意图与 PK 行锁（heap + sidecar 实情）**
+
+- **主锁仍是行 PK**：生产 DML 以 `LockKey::row_pk_write_intent`（`table#<id>`）为主；正确性以最终写到的行为准。
+- **`index_eq_write_intent`**：在 `INSERT`/`UPDATE`/`SETATTR`/`SETATTRMULTI` 事务路径上，对发生变更的列按「旧值 / 新值」额外预留 `v2|idx|…` 键（`index` 字段使用**列名**作为逻辑索引名，与 eq sidecar 按列失效约定对齐）。冲突判定仍是 **`to_storage_key()` 字符串全等**，不做唯一性证明或桶级重叠推理。
+- **`range_write_intent` / `predicate_write_intent`**：可选粗粒度互斥。`range` 仅在 **AND 链、单列、`>=`/`<=`、整数 RHS** 时可由 `where_try_derive_closed_int_range` 推导闭区间；**不**比较区间端点是否重叠——两把 range 锁是否冲突仍看 **storage key 是否完全相同**。`predicate` 使用 `where_predicate_fingerprint_for_write_intent`，与 `SHOW PLAN` / `EXPLAIN WHERE` 输出的 `predicate_fingerprint` 同源；等价性同样仅为 **字符串相等**。
+- **事务内读路径接线**：在 `WHERE` / `SHOW PLAN` / `EXPLAIN WHERE` 中，若设置 `NEWDB_WHERE_RESERVE_PREDICATE=1` 或 `NEWDB_WHERE_RESERVE_RANGE=1` 且当前在事务中，会尝试对应 `tryReserveWriteLockKey`（便于观测 `lock_key_*_count` 与集成测试）。
+- **批量多行写**：`SETATTRMULTI(key, value, id…)` 在事务内对目标 id **排序去重** 后调用 `tryReserveWriteKeysBatchSorted`；`UPDATEWHERE(set_key, set_value, WHERE, …)` / `DELETEWHERE(attr, op, value, …)` 先用 `query_with_index` 得到匹配行，再对涉及的 **row id** 做同样的有序批量 PK 预留（并与 `UPDATEWHERE` 单列变更的 **index_eq** 叠加）。任一 PK 预留失败会 **仅回滚本批已成功部分** 的预留。事务内上述三条命令在默认配置下使用 **内部 SAVEPOINT** 保证语句级堆/undo 一致，并在失败时 **invalidate** 会话堆；**`NEWDB_TXN_STMT_SAVEPOINT=0`** 时仍退回旧语义（IO 中途失败可 `releaseWriteIntentStorageKeysForCurrentTxn` 且不撤销已 `append_row` 的行）。详见 [`TXN_ISOLATION_AND_LOCKING.md`](../txn/TXN_ISOLATION_AND_LOCKING.md) §4.2。无 DEFATTR 的老表布局下 `UPDATEWHERE` 仅允许改 `name` / `balance`。
+- **`UPDATEWHERE` 能力边界（产品评估结论）**：每条命令只更新 **单列** `set_key`。要对匹配到的多列一次性赋值，请对同一 WHERE 条件多次调用 `UPDATEWHERE`，或使用 `SETATTRMULTI` / 单行 `UPDATE(id, …)`（全列重写）。若未来需要「单次语法多列」，应另行定义不与逗号解析冲突的封装格式，并在计划中单独评审。
+- **二级唯一索引（未来）**：catalog 若增加 **unique secondary**，应在校验唯一性之前对 `(table, index_name, encoded_key)` 调用 `index_eq_write_intent`，并与 PK 预留约定统一加锁顺序（例如先索引键后 PK），在此文档与 `write_conflict_service.cc` 注释中保持一致。
+- **事务链已知边界**（无嵌套事务、`BEGIN`/`USE` 对齐与可选严格匹配、批量 DML 语句级 savepoint、Windows 同路径并发 `BEGIN`、SAVEPOINT 与直连协调器 footgun）：见 [`TXN_ISOLATION_AND_LOCKING.md`](../txn/TXN_ISOLATION_AND_LOCKING.md) §4。
 
 ### 7.3 WHERE：`newdb/cli/modules/where/executor/where.h` 等
 
@@ -1282,251 +1293,24 @@ void TxnCoordinator::flushWAL() {
     m_last_wal_flush_ms.store(now_ms, std::memory_order_relaxed);
 }
 ```
-### 11.8 `TxnCoordinator::recoverFromWAL`（`recovery_service.cc`）
+### 11.8 `TxnCoordinator::recoverFromWAL`（协调器堆恢复）
 
 **输入环境**：`NEWDB_RECOVER_TARGET_LSN`、`NEWDB_RECOVER_TARGET_TS_MS` 可截断重放窗口；后者通过扫描带 `record_ts_ms` 的记录换算为 LSN cutoff。
 
-**阶段**：
+**编排入口**：[`recovery_service.cc`](e:/db/DB/newdb/cli/modules/txn/coordinator/recovery/recovery_service.cc) 调用 `WalManager::read_all_records`、环境变量解析，再依次调用各子模块。
 
+**模块拆分**（`newdb/cli/modules/txn/coordinator/recovery/`）：
 
+- **`recovery_analyze`**：对解码后的 `WalDecodedRecord` 做纯分类，输出 `committed_by_txn` / `dangling_by_txn`、checkpoint 计数；每条 DML 转为 `TxnWalOp`（含 `undo_prev_lsn` / `before_row` / `after_row`）。
+- **`recovery_redo`**：已提交事务按表聚合，表内按 **`record_lsn` 升序、`op_seq` 升序** redo；`NEWDB_REDO_IDEMPOTENT_MODE=strict` 或 InnoDB 风格 profile 时用 per-object 最大 LSN 幂等，否则 `redo_guard`。
+- **`recovery_undo`**：悬挂事务 **per-txn** undo。从该事务 **最大 `record_lsn`（同 LSN 则取更大 `op_seq`）** 起沿 **`undo_prev_lsn`** 回溯；断链、环或无法覆盖全部操作时 **fallback** 为 **`record_lsn` 降序、`op_seq` 降序**（与旧版单事务内全局逆序一致）。若同一 `record_lsn` 出现多条记录（异常/遗留），解析 `undo_prev_lsn` 时在相同 LSN 的候选中取 **`op_seq` 严格小于当前记录** 的最大者作为前驱；若无则取该 LSN 下 **`op_seq` 最大** 的一条（兜底）。
+- **`heap_undo_apply`**：与运行时 `rollback` / savepoint 共用的单行堆撤销语义。
+- **`recovery_finalize`**：对每个悬挂 `txn_id` 设置 `m_txn_id` 后写 `TXN_ROLLBACK`，再 `RECOVERY_DONE` 与 `flushWAL`（回调注入）。
 
-**Redo 阶段**
+**多悬挂事务**：各事务按 **该事务内最大 LSN** 降序依次处理；与历史上「按表合并后全局 LSN 序」在交叉写多事务时可能不同（未提供 legacy 环境开关时以当前行为为准）。
 
+**指标**：`wal_recovery_undo_chain_fallback_txns` 为本次恢复中 **至少触发过一次 undo 链 fallback 的悬挂事务个数**。
 
-1. **`wm->read_all_records(schema, recs)`** 失败则写 `m_wal_recovery_policy` 并 `return false`。
-2. **统计**：`m_wal_recovery_records_scanned`、`analyze_ms`；可选 **`capture_recovery_scan_stats`** 填充 checkpoint 后段指标。
-3. **第一遍扫描 `recs`**：维护 `committed` / `rolled_back` 集合、`partial_cutoff_by_txn`（`TXN_ABORT_PARTIAL`）；对 **仅** `INSERT`/`UPDATE`/`DELETE` 且 `has_row` 的记录构建 `txn_records[txn_id]`（其它 WalOp 跳过堆链，与原文 §5 一致）。
-4. **划分**：已在 `committed` 的进入 **`committed_by_txn`**；否则进入 **`dangling_by_txn`**。对 **`TXN_ABORT_PARTIAL`** 的 cutoff：已提交事务删除 cutoff **之后** 的操作；悬挂事务删除 cutoff **之前** 的操作。
-5. **Redo（已提交）**：按表名聚合 `redo_by_table`，表内按 **`record_lsn` 升序、`op_seq` 升序** 排序。  
-   - **`NEWDB_REDO_IDEMPOTENT_MODE=strict`** 或 InnoDB 风格 profile 时，用 **`applied_max_lsn_by_object`** 做 per-object 幂等；否则用 `redo_guard` 字符串集合防重复。  
-   - `DELETE` → 写墓碑行 `__deleted=1`；否则若有 `after_row` 则 **`append_row`  Upsert**。
-6. **Undo（悬挂）**：按表聚合后按 **`record_lsn` 降序、`op_seq` 降序**（反向撤销）。`INSERT` → 墓碑撤销；`UPDATE`/`DELETE` → 优先用解码的 `before_row`，否则从 `old_value` 文本解析属性再 `append_row`。
-7. **Finalize / 指标**：后续代码更新 `finalize_ms`、`wal_recovery_last_elapsed_ms` 等（见文件后半）。
-
-
-
-**对应源码**（`newdb/cli/modules/txn/coordinator/recovery/recovery_service.cc` 28–169 行）
-
-```28:169:newdb/cli/modules/txn/coordinator/recovery/recovery_service.cc
-bool TxnCoordinator::recoverFromWAL() {
-    const auto recovery_started_at = std::chrono::steady_clock::now();
-    newdb::WalManager* wm = ensureWal();
-    if (!wm) {
-        return true;
-    }
-    const auto analyze_started_at = std::chrono::steady_clock::now();
-    std::uint64_t recover_target_lsn = 0;
-    std::uint64_t recover_target_ts_ms = 0;
-    if (const char* raw = std::getenv("NEWDB_RECOVER_TARGET_LSN")) {
-        try {
-            recover_target_lsn = static_cast<std::uint64_t>(std::stoull(raw));
-        } catch (...) {
-            recover_target_lsn = 0;
-        }
-    }
-    if (const char* raw = std::getenv("NEWDB_RECOVER_TARGET_TS_MS")) {
-        try {
-            recover_target_ts_ms = static_cast<std::uint64_t>(std::stoull(raw));
-        } catch (...) {
-            recover_target_ts_ms = 0;
-        }
-    }
-    newdb::TableSchema schema;
-    std::vector<newdb::WalDecodedRecord> recs;
-    const newdb::Status rd = wm->read_all_records(schema, recs);
-    if (!rd.ok) {
-        {
-            std::lock_guard<std::mutex> lk(m_wal_recovery_policy_mu);
-            m_wal_recovery_policy = std::string("cli_txn_reconcile|read_all_records_failed:") + rd.message;
-        }
-        return false;
-    }
-    if (recover_target_lsn == 0 && recover_target_ts_ms != 0) {
-        std::uint64_t cutoff = 0;
-        for (const auto& wr : recs) {
-            if (!wr.has_record_ts_ms) continue;
-            if (wr.record_ts_ms <= recover_target_ts_ms) {
-                cutoff = std::max(cutoff, wr.lsn);
-            }
-        }
-        recover_target_lsn = cutoff;
-    }
-    const auto analyze_elapsed_ms = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - analyze_started_at)
-            .count());
-    m_wal_recovery_records_scanned.store(static_cast<std::uint64_t>(recs.size()), std::memory_order_relaxed);
-    m_wal_recovery_analyze_ms.store(analyze_elapsed_ms, std::memory_order_relaxed);
-    {
-        newdb::WalRecoveryStats scan{};
-        std::uint64_t records_after_cp = 0;
-        if (wm->capture_recovery_scan_stats(&scan).ok) {
-            m_wal_recovery_segments_after_checkpoint.store(scan.indexed_segments, std::memory_order_relaxed);
-            if (scan.last_complete_checkpoint_lsn > 0) {
-                for (const auto& wr : recs) {
-                    if (wr.lsn > scan.last_complete_checkpoint_lsn) {
-                        ++records_after_cp;
-                    }
-                }
-            }
-            m_wal_recovery_records_after_checkpoint.store(records_after_cp, std::memory_order_relaxed);
-        }
-    }
-    struct TxnWalOp {
-        TxnRecord rec;
-        std::uint64_t op_seq{0};
-        std::uint64_t record_lsn{0};
-        std::uint64_t db_object_id{0};
-        bool has_before{false};
-        newdb::Row before_row;
-        bool has_after{false};
-        newdb::Row after_row;
-        newdb::WalOp wal_op{newdb::WalOp::UPDATE};
-    };
-    std::unordered_map<uint64_t, std::vector<TxnWalOp>> txn_records;
-    std::unordered_set<uint64_t> committed;
-    std::unordered_set<uint64_t> rolled_back;
-    std::unordered_map<uint64_t, std::uint64_t> partial_cutoff_by_txn;
-    std::uint64_t cp_begin = 0;
-    std::uint64_t cp_end = 0;
-    for (const auto& wr : recs) {
-        if (recover_target_lsn > 0 && wr.lsn > recover_target_lsn) {
-            continue;
-        }
-        if (wr.op == newdb::WalOp::COMMIT) {
-            committed.insert(wr.txn_id);
-            continue;
-        }
-        if (wr.op == newdb::WalOp::ROLLBACK) {
-            rolled_back.insert(wr.txn_id);
-            continue;
-        }
-        if (!wr.has_row) {
-            if (wr.op == newdb::WalOp::CHECKPOINT_BEGIN) {
-                ++cp_begin;
-            } else if (wr.op == newdb::WalOp::CHECKPOINT_END) {
-                ++cp_end;
-            } else if (wr.op == newdb::WalOp::TXN_ABORT_PARTIAL && wr.has_pitr_target_lsn) {
-                partial_cutoff_by_txn[wr.txn_id] = wr.pitr_target_lsn;
-            }
-            continue;
-        }
-        // Redo/undo chain: only heap table DML (INSERT/UPDATE/DELETE). Skip SESSION_SNAPSHOT,
-        // SAVEPOINT_*, PITR_MARK rows, and any other non-DML logical WAL entries.
-        if (wr.op != newdb::WalOp::INSERT && wr.op != newdb::WalOp::UPDATE &&
-            wr.op != newdb::WalOp::DELETE) {
-            continue;
-        }
-        TxnWalOp oprec;
-        TxnRecord& rec = oprec.rec;
-        rec.txn_id = static_cast<int64_t>(wr.txn_id);
-        rec.table_name = wr.table;
-        rec.key = std::to_string(wr.row.id);
-        const auto it_old = wr.row.attrs.find("__wal_old");
-        const auto it_new = wr.row.attrs.find("__wal_new");
-        const auto it_op = wr.row.attrs.find("__wal_op");
-        rec.old_value = (it_old != wr.row.attrs.end()) ? it_old->second : std::string{};
-        rec.new_value = (it_new != wr.row.attrs.end()) ? it_new->second : std::string{};
-        if (it_op != wr.row.attrs.end()) {
-            rec.operation = it_op->second;
-        } else if (wr.op == newdb::WalOp::INSERT) {
-            rec.operation = "INSERT";
-        } else if (wr.op == newdb::WalOp::DELETE) {
-            rec.operation = "DELETE";
-        } else {
-            rec.operation = "UPDATE";
-        }
-        oprec.op_seq = wr.op_seq_in_txn;
-        oprec.record_lsn = wr.lsn;
-        if (wr.has_db_object_id) {
-            oprec.db_object_id = wr.db_object_id;
-        } else {
-            oprec.db_object_id = static_cast<std::uint64_t>(std::hash<std::string>{}(wr.table));
-        }
-        oprec.has_before = wr.has_before_row;
-        oprec.before_row = wr.before_row;
-        oprec.has_after = wr.has_after_row;
-        oprec.after_row = wr.after_row;
-        oprec.wal_op = wr.op;
-        txn_records[wr.txn_id].push_back(std::move(oprec));
-    }
-```
-
-
-**Redo 阶段**
-
-
-**对应源码**（`newdb/cli/modules/txn/coordinator/recovery/recovery_service.cc` 217–283 行）
-
-```217:283:newdb/cli/modules/txn/coordinator/recovery/recovery_service.cc
-    const auto undo_started_at = std::chrono::steady_clock::now();
-    const auto redo_started_at = std::chrono::steady_clock::now();
-    std::map<std::string, std::vector<TxnWalOp>> redo_by_table;
-    for (const auto& kv : committed_by_txn) {
-        for (const auto& rec : kv.second) {
-            redo_by_table[rec.rec.table_name].push_back(rec);
-        }
-    }
-    auto upsert_row = [&](const std::string& data_file, const newdb::Row& row) {
-        (void)newdb::io::append_row(data_file.c_str(), row);
-    };
-    const bool strict_redo = [&]() -> bool {
-        if (const char* mode = std::getenv("NEWDB_REDO_IDEMPOTENT_MODE")) {
-            std::string m = mode;
-            for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            return (m == "strict");
-        }
-        if (const char* prof = std::getenv("NEWDB_BENCHMARK_PROFILE")) {
-            std::string p = prof;
-            for (auto& ch : p) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (p.find("innodb") != std::string::npos) return true;
-        }
-        return false;
-    }();
-    std::unordered_set<std::string> redo_guard; // lite: full key set
-    std::unordered_map<std::uint64_t, std::uint64_t> applied_max_lsn_by_object; // strict: per-object max lsn
-    std::uint64_t redo_apply_conflicts = 0;
-    for (auto& table_kv : redo_by_table) {
-        const std::string data_file = resolveDataFilePath(table_kv.first);
-        auto& ops = table_kv.second;
-        std::sort(ops.begin(), ops.end(), [](const TxnWalOp& a, const TxnWalOp& b) {
-            if (a.record_lsn != b.record_lsn) return a.record_lsn < b.record_lsn;
-            return a.op_seq < b.op_seq;
-        });
-        for (const auto& op : ops) {
-            if (strict_redo) {
-                const auto it = applied_max_lsn_by_object.find(op.db_object_id);
-                if (it != applied_max_lsn_by_object.end() && op.record_lsn <= it->second) {
-                    ++redo_apply_conflicts;
-                    continue;
-                }
-                applied_max_lsn_by_object[op.db_object_id] = std::max(applied_max_lsn_by_object[op.db_object_id], op.record_lsn);
-            } else {
-                const std::string key = std::to_string(op.db_object_id) + ":" + op.rec.key + ":" + std::to_string(op.record_lsn);
-                if (!redo_guard.insert(key).second) {
-                    ++redo_apply_conflicts;
-                    continue;
-                }
-            }
-            if (op.wal_op == newdb::WalOp::DELETE) {
-                newdb::Row tomb;
-                tomb.id = std::stoi(op.rec.key);
-                tomb.attrs["__deleted"] = "1";
-                upsert_row(data_file, tomb);
-            } else if (op.has_after) {
-                upsert_row(data_file, op.after_row);
-            }
-        }
-    }
-    const auto redo_elapsed_ms = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - redo_started_at)
-            .count());
-    m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
-    m_wal_recovery_apply_conflict_count.store(redo_apply_conflicts, std::memory_order_relaxed);
-    m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
-    m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
-```
 ### 11.9 `TxnCoordinator::tryReserveWriteLockKey`（`write_conflict_service.cc`）
 
 **前置**：非 `Active` 事务或空表名直接 `return true`（不预留）。

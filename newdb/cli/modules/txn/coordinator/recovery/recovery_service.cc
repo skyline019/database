@@ -3,6 +3,10 @@
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
+#include "cli/modules/txn/coordinator/recovery/recovery_analyze.h"
+#include "cli/modules/txn/coordinator/recovery/recovery_redo.h"
+#include "cli/modules/txn/coordinator/recovery/recovery_undo.h"
+#include "cli/modules/txn/coordinator/recovery/recovery_finalize.h"
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
@@ -11,19 +15,14 @@
 #include <newdb/page_io.h>
 #include <newdb/schema_io.h>
 
-#include <atomic>
+#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cstdlib>
-#include <filesystem>
-#include <fstream>
 #include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 bool TxnCoordinator::recoverFromWAL() {
@@ -62,7 +61,9 @@ bool TxnCoordinator::recoverFromWAL() {
     if (recover_target_lsn == 0 && recover_target_ts_ms != 0) {
         std::uint64_t cutoff = 0;
         for (const auto& wr : recs) {
-            if (!wr.has_record_ts_ms) continue;
+            if (!wr.has_record_ts_ms) {
+                continue;
+            }
             if (wr.record_ts_ms <= recover_target_ts_ms) {
                 cutoff = std::max(cutoff, wr.lsn);
             }
@@ -90,275 +91,51 @@ bool TxnCoordinator::recoverFromWAL() {
             st_->m_wal_recovery_records_after_checkpoint.store(records_after_cp, std::memory_order_relaxed);
         }
     }
-    struct TxnWalOp {
-        TxnRecord rec;
-        std::uint64_t op_seq{0};
-        std::uint64_t record_lsn{0};
-        std::uint64_t db_object_id{0};
-        bool has_before{false};
-        newdb::Row before_row;
-        bool has_after{false};
-        newdb::Row after_row;
-        newdb::WalOp wal_op{newdb::WalOp::UPDATE};
-    };
-    std::unordered_map<uint64_t, std::vector<TxnWalOp>> txn_records;
-    std::unordered_set<uint64_t> committed;
-    std::unordered_set<uint64_t> rolled_back;
-    std::unordered_map<uint64_t, std::uint64_t> partial_cutoff_by_txn;
-    std::uint64_t cp_begin = 0;
-    std::uint64_t cp_end = 0;
-    for (const auto& wr : recs) {
-        if (recover_target_lsn > 0 && wr.lsn > recover_target_lsn) {
-            continue;
-        }
-        if (wr.op == newdb::WalOp::COMMIT) {
-            committed.insert(wr.txn_id);
-            continue;
-        }
-        if (wr.op == newdb::WalOp::ROLLBACK) {
-            rolled_back.insert(wr.txn_id);
-            continue;
-        }
-        if (!wr.has_row) {
-            if (wr.op == newdb::WalOp::CHECKPOINT_BEGIN) {
-                ++cp_begin;
-            } else if (wr.op == newdb::WalOp::CHECKPOINT_END) {
-                ++cp_end;
-            } else if (wr.op == newdb::WalOp::TXN_ABORT_PARTIAL && wr.has_pitr_target_lsn) {
-                partial_cutoff_by_txn[wr.txn_id] = wr.pitr_target_lsn;
-            }
-            continue;
-        }
-        // Redo/undo chain: only heap table DML (INSERT/UPDATE/DELETE). Skip SESSION_SNAPSHOT,
-        // SAVEPOINT_*, PITR_MARK rows, and any other non-DML logical WAL entries.
-        if (wr.op != newdb::WalOp::INSERT && wr.op != newdb::WalOp::UPDATE &&
-            wr.op != newdb::WalOp::DELETE) {
-            continue;
-        }
-        TxnWalOp oprec;
-        TxnRecord& rec = oprec.rec;
-        rec.txn_id = static_cast<int64_t>(wr.txn_id);
-        rec.table_name = wr.table;
-        rec.key = std::to_string(wr.row.id);
-        const auto it_old = wr.row.attrs.find("__wal_old");
-        const auto it_new = wr.row.attrs.find("__wal_new");
-        const auto it_op = wr.row.attrs.find("__wal_op");
-        rec.old_value = (it_old != wr.row.attrs.end()) ? it_old->second : std::string{};
-        rec.new_value = (it_new != wr.row.attrs.end()) ? it_new->second : std::string{};
-        if (it_op != wr.row.attrs.end()) {
-            rec.operation = it_op->second;
-        } else if (wr.op == newdb::WalOp::INSERT) {
-            rec.operation = "INSERT";
-        } else if (wr.op == newdb::WalOp::DELETE) {
-            rec.operation = "DELETE";
-        } else {
-            rec.operation = "UPDATE";
-        }
-        oprec.op_seq = wr.op_seq_in_txn;
-        oprec.record_lsn = wr.lsn;
-        if (wr.has_db_object_id) {
-            oprec.db_object_id = wr.db_object_id;
-        } else {
-            oprec.db_object_id = static_cast<std::uint64_t>(std::hash<std::string>{}(wr.table));
-        }
-        oprec.has_before = wr.has_before_row;
-        oprec.before_row = wr.before_row;
-        oprec.has_after = wr.has_after_row;
-        oprec.after_row = wr.after_row;
-        oprec.wal_op = wr.op;
-        txn_records[wr.txn_id].push_back(std::move(oprec));
-    }
 
-    std::unordered_map<uint64_t, std::vector<TxnWalOp>> dangling_by_txn;
-    std::unordered_map<uint64_t, std::vector<TxnWalOp>> committed_by_txn;
-    for (auto& kv : txn_records) {
-        if (committed.find(kv.first) != committed.end()) {
-            committed_by_txn.emplace(kv.first, kv.second);
-            continue;
-        }
-        if (rolled_back.find(kv.first) != rolled_back.end()) {
-            continue;
-        }
-        dangling_by_txn.emplace(kv.first, kv.second);
-    }
-    for (auto& kv : committed_by_txn) {
-        const auto it = partial_cutoff_by_txn.find(kv.first);
-        if (it == partial_cutoff_by_txn.end()) continue;
-        const std::uint64_t cutoff = it->second;
-        auto& vec = kv.second;
-        vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const TxnWalOp& x) {
-            return x.record_lsn > cutoff;
-        }), vec.end());
-    }
-    for (auto& kv : dangling_by_txn) {
-        const auto it = partial_cutoff_by_txn.find(kv.first);
-        if (it == partial_cutoff_by_txn.end()) continue;
-        const std::uint64_t cutoff = it->second;
-        auto& vec = kv.second;
-        vec.erase(std::remove_if(vec.begin(), vec.end(), [&](const TxnWalOp& x) {
-            return x.record_lsn <= cutoff;
-        }), vec.end());
-    }
+    RecoveryAnalyzeOutput analyzed;
+    recovery_analyze_wal_records(recs, recover_target_lsn, analyzed);
+    const std::size_t dangling_count = recovery_count_dangling_ops(analyzed);
 
-    std::size_t dangling_count = 0;
-    for (const auto& kv : dangling_by_txn) {
-        dangling_count += kv.second.size();
-    }
-    st_->m_wal_recovery_dangling_txns.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
-                                       std::memory_order_relaxed);
-    st_->m_wal_recovery_redo_plan_pending_txn_count.store(static_cast<std::uint64_t>(dangling_by_txn.size()),
-                                                     std::memory_order_relaxed);
+    st_->m_wal_recovery_dangling_txns.store(static_cast<std::uint64_t>(analyzed.dangling_by_txn.size()),
+                                           std::memory_order_relaxed);
+    st_->m_wal_recovery_redo_plan_pending_txn_count.store(
+        static_cast<std::uint64_t>(analyzed.dangling_by_txn.size()), std::memory_order_relaxed);
 
     if (dangling_count > 0) {
         logging_console_printf("[WAL] Found %zu uncommitted operations, starting recovery...\n", dangling_count);
         st_->m_wal_recovery_undo_ops.fetch_add(static_cast<std::uint64_t>(dangling_count),
-                                          std::memory_order_relaxed);
+                                               std::memory_order_relaxed);
     }
 
     const auto undo_started_at = std::chrono::steady_clock::now();
     const auto redo_started_at = std::chrono::steady_clock::now();
     std::map<std::string, std::vector<TxnWalOp>> redo_by_table;
-    for (const auto& kv : committed_by_txn) {
+    for (const auto& kv : analyzed.committed_by_txn) {
         for (const auto& rec : kv.second) {
             redo_by_table[rec.rec.table_name].push_back(rec);
         }
     }
-    auto upsert_row = [&](const std::string& data_file, const newdb::Row& row) {
-        (void)newdb::io::append_row(data_file.c_str(), row);
-    };
-    const bool strict_redo = [&]() -> bool {
-        if (const char* mode = std::getenv("NEWDB_REDO_IDEMPOTENT_MODE")) {
-            std::string m = mode;
-            for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            return (m == "strict");
-        }
-        if (const char* prof = std::getenv("NEWDB_BENCHMARK_PROFILE")) {
-            std::string p = prof;
-            for (auto& ch : p) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-            if (p.find("innodb") != std::string::npos) return true;
-        }
-        return false;
-    }();
-    std::unordered_set<std::string> redo_guard; // lite: full key set
-    std::unordered_map<std::uint64_t, std::uint64_t> applied_max_lsn_by_object; // strict: per-object max lsn
-    std::uint64_t redo_apply_conflicts = 0;
-    for (auto& table_kv : redo_by_table) {
-        const std::string data_file = resolveDataFilePath(table_kv.first);
-        auto& ops = table_kv.second;
-        std::sort(ops.begin(), ops.end(), [](const TxnWalOp& a, const TxnWalOp& b) {
-            if (a.record_lsn != b.record_lsn) return a.record_lsn < b.record_lsn;
-            return a.op_seq < b.op_seq;
-        });
-        for (const auto& op : ops) {
-            if (strict_redo) {
-                const auto it = applied_max_lsn_by_object.find(op.db_object_id);
-                if (it != applied_max_lsn_by_object.end() && op.record_lsn <= it->second) {
-                    ++redo_apply_conflicts;
-                    continue;
-                }
-                applied_max_lsn_by_object[op.db_object_id] = std::max(applied_max_lsn_by_object[op.db_object_id], op.record_lsn);
-            } else {
-                const std::string key = std::to_string(op.db_object_id) + ":" + op.rec.key + ":" + std::to_string(op.record_lsn);
-                if (!redo_guard.insert(key).second) {
-                    ++redo_apply_conflicts;
-                    continue;
-                }
-            }
-            if (op.wal_op == newdb::WalOp::DELETE) {
-                newdb::Row tomb;
-                tomb.id = std::stoi(op.rec.key);
-                tomb.attrs["__deleted"] = "1";
-                upsert_row(data_file, tomb);
-            } else if (op.has_after) {
-                upsert_row(data_file, op.after_row);
-            }
-        }
-    }
+    const bool strict_redo = recovery_strict_redo_from_env();
+    const RecoveryRedoResult redo_stats = recovery_apply_committed_redo(
+        redo_by_table,
+        [this](const std::string& table_name) { return resolveDataFilePath(table_name); },
+        strict_redo);
     const auto redo_elapsed_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - redo_started_at)
             .count());
     st_->m_wal_recovery_redo_ms.store(redo_elapsed_ms, std::memory_order_relaxed);
-    st_->m_wal_recovery_apply_conflict_count.store(redo_apply_conflicts, std::memory_order_relaxed);
-    st_->m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(cp_begin), std::memory_order_relaxed);
-    st_->m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(cp_end), std::memory_order_relaxed);
+    st_->m_wal_recovery_apply_conflict_count.store(redo_stats.apply_conflicts, std::memory_order_relaxed);
+    st_->m_wal_recovery_checkpoint_begin_count.store(static_cast<std::uint64_t>(analyzed.checkpoint_begin),
+                                                     std::memory_order_relaxed);
+    st_->m_wal_recovery_checkpoint_end_count.store(static_cast<std::uint64_t>(analyzed.checkpoint_end),
+                                                    std::memory_order_relaxed);
 
-    std::map<std::string, std::vector<TxnWalOp>> ops_by_table;
-    for (const auto& kv : dangling_by_txn) {
-        for (const auto& rec : kv.second) {
-            ops_by_table[rec.rec.table_name].push_back(rec);
-        }
-    }
+    const RecoveryUndoResult undo_stats = recovery_apply_dangling_undo(
+        analyzed.dangling_by_txn,
+        [this](const std::string& table_name) { return resolveDataFilePath(table_name); });
+    st_->m_wal_recovery_undo_chain_fallback_txns.store(undo_stats.chain_fallback_txns, std::memory_order_relaxed);
 
-    auto parse_attrs = [](const std::string& packed) {
-        std::map<std::string, std::string> attrs;
-        std::size_t i = 0;
-        while (i < packed.size()) {
-            const std::size_t sep = packed.find('=', i);
-            if (sep == std::string::npos) {
-                break;
-            }
-            const std::size_t end = packed.find(';', sep + 1);
-            const std::string key = packed.substr(i, sep - i);
-            const std::string val =
-                (end == std::string::npos) ? packed.substr(sep + 1) : packed.substr(sep + 1, end - (sep + 1));
-            if (!key.empty()) {
-                attrs[key] = val;
-            }
-            if (end == std::string::npos) {
-                break;
-            }
-            i = end + 1;
-        }
-        return attrs;
-    };
-
-    for (auto& table_kv : ops_by_table) {
-        const std::string& table_name = table_kv.first;
-        std::vector<TxnWalOp>& table_ops = table_kv.second;
-        const std::string data_file = resolveDataFilePath(table_name);
-        std::sort(table_ops.begin(), table_ops.end(), [](const TxnWalOp& a, const TxnWalOp& b) {
-            if (a.record_lsn != b.record_lsn) return a.record_lsn > b.record_lsn;
-            return a.op_seq > b.op_seq;
-        });
-
-        for (auto it = table_ops.begin(); it != table_ops.end(); ++it) {
-            const auto& rec = it->rec;
-            if (rec.operation == "TXN_BEGIN") {
-                continue;
-            }
-            try {
-                const int id = std::stoi(rec.key);
-                if (rec.operation == "INSERT") {
-                    newdb::Row tombstone;
-                    tombstone.id = id;
-                    tombstone.attrs["__deleted"] = "1";
-                    (void)newdb::io::append_row(data_file.c_str(), tombstone);
-                    logging_console_printf("[WAL] Undo INSERT id=%d on %s\n", id, table_name.c_str());
-                } else if (rec.operation == "UPDATE" || rec.operation == "DELETE") {
-                    if (it->has_before) {
-                        (void)newdb::io::append_row(data_file.c_str(), it->before_row);
-                    } else {
-                        newdb::Row recovered;
-                        recovered.id = id;
-                        const auto attrs = parse_attrs(rec.old_value);
-                        for (const auto& kv : attrs) {
-                            if (kv.first != "__deleted") {
-                                recovered.attrs[kv.first] = kv.second;
-                            }
-                        }
-                        (void)newdb::io::append_row(data_file.c_str(), recovered);
-                    }
-                    logging_console_printf("[WAL] Undo %s id=%d on %s\n",
-                                           rec.operation.c_str(),
-                                           id,
-                                           table_name.c_str());
-                }
-            } catch (...) {
-                logging_console_printf("[WAL] Skip malformed WAL record key=%s\n", rec.key.c_str());
-            }
-        }
-    }
     const auto undo_elapsed_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - undo_started_at)
@@ -366,15 +143,21 @@ bool TxnCoordinator::recoverFromWAL() {
     st_->m_wal_recovery_undo_ms.store(undo_elapsed_ms, std::memory_order_relaxed);
 
     const auto finalize_started_at = std::chrono::steady_clock::now();
-    // ??dangling ???????????????????????????
-    for (const auto& kv : dangling_by_txn) {
-        const uint64_t txn = kv.first;
-        st_->m_txn_id.store(static_cast<int64_t>(txn));
-        writeWAL("TXN_ROLLBACK", "", "", "", "recovered");
+    std::vector<std::uint64_t> dangling_txn_ids;
+    dangling_txn_ids.reserve(analyzed.dangling_by_txn.size());
+    for (const auto& kv : analyzed.dangling_by_txn) {
+        dangling_txn_ids.push_back(kv.first);
     }
-    // ????????WAL??????????????
-    writeWAL("RECOVERY_DONE", "", "", "", "");
-    flushWAL();
+    RecoveryFinalizeCallbacks fin{};
+    fin.set_active_txn_id_for_wal = [this](std::uint64_t txn) {
+        st_->m_txn_id.store(static_cast<int64_t>(txn));
+    };
+    fin.write_txn_rollback_recovered = [this]() {
+        writeWAL("TXN_ROLLBACK", "", "", "", "recovered");
+    };
+    fin.write_recovery_done = [this]() { writeWAL("RECOVERY_DONE", "", "", "", ""); };
+    fin.flush_wal = [this]() { flushWAL(); };
+    recovery_finalize_dangling_txns(dangling_txn_ids, fin);
     const auto finalize_elapsed_ms = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - finalize_started_at)
@@ -451,7 +234,9 @@ Result<bool> TxnCoordinator::recoverToTime(const std::uint64_t target_ts_ms) {
             const newdb::Status rd = wm->read_all_records(schema, recs);
             if (rd.ok) {
                 for (const auto& wr : recs) {
-                    if (!wr.has_record_ts_ms) continue;
+                    if (!wr.has_record_ts_ms) {
+                        continue;
+                    }
                     if (wr.record_ts_ms <= target_ts_ms) {
                         cutoff_lsn = std::max(cutoff_lsn, wr.lsn);
                     }
@@ -485,8 +270,3 @@ Result<bool> TxnCoordinator::recoverToTime(const std::uint64_t target_ts_ms) {
     writeWAL("PITR_MARK", "", std::to_string(cutoff_lsn), "", std::to_string(target_ts_ms));
     return Result<bool>::Ok(true);
 }
-
-// ========== ?? VACUUM ==========
-
-
-

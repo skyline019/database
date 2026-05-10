@@ -3,6 +3,7 @@
 #include "cli/modules/txn/coordinator/txn_manager.h"
 #include "cli/modules/txn/coordinator/txn_coordinator_state.h"
 #include "cli/modules/txn/coordinator/internal/txn_internal.h"
+#include "cli/modules/txn/coordinator/recovery/heap_undo_apply.h"
 #include "cli/modules/common/logging/logging.h"
 #include "cli/modules/common/util/constants.h"
 #include "cli/modules/sidecar/common/sidecar_wal_lsn.h"
@@ -19,7 +20,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -91,7 +91,7 @@ Result<bool> TxnCoordinator::begin(const std::string& table_name) {
     std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
     
     if (st_->m_state.load() == TxnState::Active) {
-        return Result<bool>::Err("??????");
+        return Result<bool>::Err("already in active transaction (nested transactions are not supported)");
     }
     
     // ?????????ID????????????begin ??????
@@ -145,7 +145,7 @@ Result<bool> TxnCoordinator::commit() {
         std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
         
         if (st_->m_state.load() != TxnState::Active) {
-            return Result<bool>::Err("??????");
+            return Result<bool>::Err("no active transaction to commit");
         }
         
         writeWAL("TXN_COMMIT", st_->m_active_table, "", "", "");
@@ -209,60 +209,16 @@ Result<bool> TxnCoordinator::rollback() {
     std::lock_guard<std::mutex> lk(st_->m_txn_mutex);
     
     if (st_->m_state.load() != TxnState::Active) {
-        return Result<bool>::Err("??????");
+        return Result<bool>::Err("no active transaction to rollback");
     }
     
-    auto parse_attrs = [](const std::string& packed) {
-        std::map<std::string, std::string> attrs;
-        std::size_t i = 0;
-        while (i < packed.size()) {
-            const std::size_t sep = packed.find('=', i);
-            if (sep == std::string::npos) {
-                break;
-            }
-            const std::size_t end = packed.find(';', sep + 1);
-            const std::string key = packed.substr(i, sep - i);
-            const std::string val =
-                (end == std::string::npos) ? packed.substr(sep + 1) : packed.substr(sep + 1, end - (sep + 1));
-            if (!key.empty()) {
-                attrs[key] = val;
-            }
-            if (end == std::string::npos) {
-                break;
-            }
-            i = end + 1;
-        }
-        return attrs;
-    };
-
-    auto append_undo_record = [&](const TxnRecord& rec) {
-        const std::string data_file = resolveDataFilePath(rec.table_name);
-        try {
-            const int id = std::stoi(rec.key);
-            if (rec.operation == "INSERT") {
-                newdb::Row tomb;
-                tomb.id = id;
-                tomb.attrs["__deleted"] = "1";
-                (void)newdb::io::append_row(data_file.c_str(), tomb);
-                return;
-            }
-            newdb::Row row;
-            row.id = id;
-            const auto attrs = parse_attrs(rec.old_value);
-            for (const auto& kv : attrs) {
-                if (kv.first != "__deleted") {
-                    row.attrs[kv.first] = kv.second;
-                }
-            }
-            (void)newdb::io::append_row(data_file.c_str(), row);
-        } catch (...) {
-            // ignore malformed undo records
-        }
-    };
-
-    // ??????????????
     for (auto it = st_->m_txn_records.rbegin(); it != st_->m_txn_records.rend(); ++it) {
-        append_undo_record(*it);
+        const std::string data_file = resolveDataFilePath(it->table_name);
+        cli_txn_heap_undo::TxnWalUndoView view;
+        view.rec = &(*it);
+        view.has_before = false;
+        view.before_row = nullptr;
+        (void)cli_txn_heap_undo::append_undo_row_to_heap(data_file.c_str(), view);
     }
     
     writeWAL("TXN_ROLLBACK", st_->m_active_table, "", "", "");
@@ -334,44 +290,17 @@ Result<bool> TxnCoordinator::rollbackToSavepoint(const std::string& name) {
         if (it2 == st_->m_savepoints_lsn.end()) return 0;
         return it2->second;
     }();
-    auto parse_attrs = [](const std::string& packed) {
-        std::map<std::string, std::string> attrs;
-        std::size_t i = 0;
-        while (i < packed.size()) {
-            const std::size_t sep = packed.find('=', i);
-            if (sep == std::string::npos) break;
-            const std::size_t end = packed.find(';', sep + 1);
-            const std::string key = packed.substr(i, sep - i);
-            const std::string val =
-                (end == std::string::npos) ? packed.substr(sep + 1) : packed.substr(sep + 1, end - (sep + 1));
-            if (!key.empty()) attrs[key] = val;
-            if (end == std::string::npos) break;
-            i = end + 1;
-        }
-        return attrs;
-    };
     std::uint64_t undone = 0;
     for (auto it = st_->m_txn_records.rbegin(); it != st_->m_txn_records.rend(); ++it) {
         if (it->op_seq <= target_op_seq) break;
         const std::string data_file = resolveDataFilePath(it->table_name);
-        try {
-            const int id = std::stoi(it->key);
-            if (it->operation == "INSERT") {
-                newdb::Row tomb;
-                tomb.id = id;
-                tomb.attrs["__deleted"] = "1";
-                (void)newdb::io::append_row(data_file.c_str(), tomb);
-            } else {
-                newdb::Row row;
-                row.id = id;
-                const auto attrs = parse_attrs(it->old_value);
-                for (const auto& kv : attrs) {
-                    if (kv.first != "__deleted") row.attrs[kv.first] = kv.second;
-                }
-                (void)newdb::io::append_row(data_file.c_str(), row);
-            }
+        cli_txn_heap_undo::TxnWalUndoView view;
+        view.rec = &(*it);
+        view.has_before = false;
+        view.before_row = nullptr;
+        if (cli_txn_heap_undo::append_undo_row_to_heap(data_file.c_str(), view)) {
             ++undone;
-        } catch (...) {
+        } else {
             st_->m_undo_chain_fallback_count.fetch_add(1, std::memory_order_relaxed);
         }
     }

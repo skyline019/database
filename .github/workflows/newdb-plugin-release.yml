@@ -1,0 +1,50 @@
+# Manual or tag-triggered plugin bundle for GitHub Releases (host + backend + shared_bundle).
+# Complements PR CI; run after merge when publishing binaries. ABI revision must match
+# newdb/scripts/validate/check_c_api_abi.py (update this workflow when bumping).
+
+name: newdb-plugin-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "newdb-plugin-*"
+
+jobs:
+  abi-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate C API ABI
+        run: python3 newdb/scripts/validate/check_c_api_abi.py --expected-abi 1
+
+  plugin-bundle-linux:
+    needs: abi-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ pkg-config python3
+      - name: Configure (Release plugin)
+        run: >
+          cmake -S newdb -B build-plugin-rel -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DNEWDB_BUILD_SHARED=ON
+          -DNEWDB_C_API_PLUGIN_BACKEND=ON
+          -DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON
+          -DNEWDB_BUILD_TESTS=OFF
+      - name: Build
+        run: cmake --build build-plugin-rel --parallel
+      - name: Shared bundle
+        run: cmake --build build-plugin-rel --parallel --target shared_bundle
+      - name: Write release manifest
+        run: |
+          printf '%s\n' "{\"ref\":\"${GITHUB_REF_NAME}\",\"sha\":\"${GITHUB_SHA}\",\"abi_expected\":1,\"host\":\"libnewdb.so\",\"backend\":\"libnewdb_cli_backend.so\"}" > build-plugin-rel/shared_bundle/Release/RELEASE_MANIFEST.json
+      - name: Upload plugin bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-plugin-shared-bundle-linux-${{ github.ref_name }}-${{ github.run_id }}
+          path: build-plugin-rel/shared_bundle/Release
+          if-no-files-found: error
+          retention-days: 90

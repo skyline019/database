@@ -48,6 +48,10 @@ struct AppState {
 struct DllApi {
     _lib: Library,
     version: unsafe extern "C" fn() -> *const std::os::raw::c_char,
+    api_version_major: unsafe extern "C" fn() -> i32,
+    api_version_minor: unsafe extern "C" fn() -> i32,
+    api_version_patch: unsafe extern "C" fn() -> i32,
+    abi_version: unsafe extern "C" fn() -> i32,
     session_create: unsafe extern "C" fn(
         *const std::os::raw::c_char,
         *const std::os::raw::c_char,
@@ -55,11 +59,22 @@ struct DllApi {
     ) -> *mut std::ffi::c_void,
     session_destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
     session_set_table: unsafe extern "C" fn(*mut std::ffi::c_void, *const std::os::raw::c_char) -> i32,
+    session_last_error: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32,
     session_execute: unsafe extern "C" fn(
         *mut std::ffi::c_void,
         *const std::os::raw::c_char,
         *mut std::os::raw::c_char,
         usize,
+    ) -> i32,
+    session_runtime_stats: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *mut std::os::raw::c_char,
+        usize,
+    ) -> i32,
+    session_append_runtime_snapshot: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *const std::os::raw::c_char,
+        *const std::os::raw::c_char,
     ) -> i32,
     session_where_plan_json: unsafe extern "C" fn(
         *mut std::ffi::c_void,
@@ -71,6 +86,9 @@ struct DllApi {
 }
 
 static DLL_API: OnceCell<DllApi> = OnceCell::new();
+
+/// Must match `NEWDB_C_API_ABI_VERSION` in `engine/include/newdb/c_api.h`.
+const NEWDB_C_API_ABI_VERSION: i32 = 1;
 
 struct CliTermProcess {
     child: std::process::Child,
@@ -726,6 +744,10 @@ fn resolve_cli_backend_bundled_path() -> Option<PathBuf> {
     resolve_first_existing_leaf(cli_backend_plugin_leaves())
 }
 
+fn resolve_gtest_capi_dll() -> Option<PathBuf> {
+    resolve_first_existing_leaf(&["libgtest_capi.dll", "gtest_capi.dll"])
+}
+
 /// If `NEWDB_CLI_BACKEND_PATH` is unset/empty and a bundled backend exists, set it so `newdb_session_create` succeeds in plugin builds.
 fn ensure_newdb_cli_backend_env_from_bundle() {
     if std::env::var("NEWDB_CLI_BACKEND_PATH")
@@ -820,6 +842,35 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
                     lib.get(b"newdb_version_string\0").map_err(|e| e.to_string())?;
                 *sym
             };
+            let api_version_major = {
+                let sym: Symbol<unsafe extern "C" fn() -> i32> =
+                    lib.get(b"newdb_api_version_major\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let api_version_minor = {
+                let sym: Symbol<unsafe extern "C" fn() -> i32> =
+                    lib.get(b"newdb_api_version_minor\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let api_version_patch = {
+                let sym: Symbol<unsafe extern "C" fn() -> i32> =
+                    lib.get(b"newdb_api_version_patch\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let abi_version = {
+                let sym: Symbol<unsafe extern "C" fn() -> i32> =
+                    lib.get(b"newdb_abi_version\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let negotiate_abi: Symbol<unsafe extern "C" fn(i32) -> i32> =
+                lib.get(b"newdb_negotiate_abi\0").map_err(|e| e.to_string())?;
+            let ncode = negotiate_abi(NEWDB_C_API_ABI_VERSION);
+            if ncode != 1 {
+                return Err(format!(
+                    "newdb_negotiate_abi({}) returned {ncode} (GUI built for ABI {})",
+                    NEWDB_C_API_ABI_VERSION, NEWDB_C_API_ABI_VERSION
+                ));
+            }
             let session_create = {
                 let sym: Symbol<
                     unsafe extern "C" fn(
@@ -841,6 +892,11 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
                 > = lib.get(b"newdb_session_set_table\0").map_err(|e| e.to_string())?;
                 *sym
             };
+            let session_last_error = {
+                let sym: Symbol<unsafe extern "C" fn(*mut std::ffi::c_void) -> i32> =
+                    lib.get(b"newdb_session_last_error\0").map_err(|e| e.to_string())?;
+                *sym
+            };
             let session_execute = {
                 let sym: Symbol<
                     unsafe extern "C" fn(
@@ -850,6 +906,26 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
                         usize,
                     ) -> i32,
                 > = lib.get(b"newdb_session_execute\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let session_runtime_stats = {
+                let sym: Symbol<
+                    unsafe extern "C" fn(
+                        *mut std::ffi::c_void,
+                        *mut std::os::raw::c_char,
+                        usize,
+                    ) -> i32,
+                > = lib.get(b"newdb_session_runtime_stats\0").map_err(|e| e.to_string())?;
+                *sym
+            };
+            let session_append_runtime_snapshot = {
+                let sym: Symbol<
+                    unsafe extern "C" fn(
+                        *mut std::ffi::c_void,
+                        *const std::os::raw::c_char,
+                        *const std::os::raw::c_char,
+                    ) -> i32,
+                > = lib.get(b"newdb_session_append_runtime_snapshot\0").map_err(|e| e.to_string())?;
                 *sym
             };
             let session_where_plan_json = {
@@ -867,10 +943,17 @@ fn load_dll_api() -> Result<&'static DllApi, String> {
             Ok(DllApi {
                 _lib: lib,
                 version,
+                api_version_major,
+                api_version_minor,
+                api_version_patch,
+                abi_version,
                 session_create,
                 session_destroy,
                 session_set_table,
+                session_last_error,
                 session_execute,
+                session_runtime_stats,
+                session_append_runtime_snapshot,
                 session_where_plan_json,
             })
         }
@@ -1023,7 +1106,10 @@ fn ensure_dll_session(
     let log_name = as_cstring(&dll_log_path_for(st));
     let h = unsafe { (api.session_create)(data_dir.as_ptr(), table.as_ptr(), log_name.as_ptr()) };
     if h.is_null() {
-        return Err("newdb_session_create returned null".to_string());
+        return Err(
+            "newdb_session_create returned null — plugin preset: set NEWDB_CLI_BACKEND_PATH or place newdb_cli_backend.dll beside libnewdb.dll (run sync_runtime_binaries.ps1)"
+                .to_string(),
+        );
     }
     dll.handle = Some(h as usize);
     dll.data_dir = st.data_dir.clone();
@@ -1182,10 +1268,11 @@ fn execute_via_dll_session(
         let out_u8: Vec<u8> = out.into_iter().take_while(|b| *b != 0).map(|b| b as u8).collect();
         if ok == 0 {
             let msg = String::from_utf8_lossy(&out_u8).trim().to_string();
+            let code = (api.session_last_error)(handle as *mut std::ffi::c_void);
             if msg.is_empty() {
-                return Err("newdb_session_execute failed".to_string());
+                return Err(format!("newdb_session_execute failed (session_last_error={code})"));
             }
-            return Err(msg);
+            return Err(format!("{msg} (session_last_error={code})"));
         }
         out_u8
     };
@@ -3493,11 +3580,16 @@ fn query_page(
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DllInfo {
     loaded: bool,
     version: String,
     path: String,
     message: String,
+    api_version_major: i32,
+    api_version_minor: i32,
+    api_version_patch: i32,
+    abi_version: i32,
 }
 
 #[derive(Serialize)]
@@ -3526,6 +3618,14 @@ struct RuntimeArtifactInfo {
     build_profile: String,
     /// Tauri / GUI build: `debug` vs `release` (from `cfg!(debug_assertions)`).
     gui_package_kind: String,
+    /// Bundled GoogleTest C API shim DLL when synced (`libgtest_capi.dll`); empty if absent.
+    gtest_capi_dll_path: String,
+    gtest_capi_dll_modified: String,
+    /// From loaded `libnewdb` (`newdb_api_version_*`); `-1` when DLL not loaded.
+    c_api_version_major: i32,
+    c_api_version_minor: i32,
+    c_api_version_patch: i32,
+    c_api_abi_version: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3610,6 +3710,26 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
     } else {
         "release".to_string()
     };
+    let gtest_capi = resolve_gtest_capi_dll();
+    let (gtest_capi_dll_path, gtest_capi_dll_modified) = match &gtest_capi {
+        Some(p) => (
+            p.display().to_string(),
+            format_modified_time(p),
+        ),
+        None => (String::new(), "n/a".to_string()),
+    };
+    let (c_api_version_major, c_api_version_minor, c_api_version_patch, c_api_abi_version) =
+        match load_dll_api() {
+            Ok(api) => unsafe {
+                (
+                    (api.api_version_major)(),
+                    (api.api_version_minor)(),
+                    (api.api_version_patch)(),
+                    (api.abi_version)(),
+                )
+            },
+            Err(_) => (-1, -1, -1, -1),
+        };
     RuntimeArtifactInfo {
         gui_exe_path: gui_exe.display().to_string(),
         gui_exe_modified: format_modified_time(&gui_exe),
@@ -3628,7 +3748,90 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
         backend_git_commit,
         build_profile,
         gui_package_kind,
+        gtest_capi_dll_path,
+        gtest_capi_dll_modified,
+        c_api_version_major,
+        c_api_version_minor,
+        c_api_version_patch,
+        c_api_abi_version,
     }
+}
+
+#[tauri::command]
+fn c_api_runtime_stats(state: State<'_, AppState>) -> Result<String, String> {
+    configure_runtime_loader_paths();
+    ensure_newdb_cli_backend_env_from_bundle();
+    let api = load_dll_api()?;
+    let app = state.inner();
+    let st = app
+        .st
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    let mut dll = app
+        .dll
+        .lock()
+        .map_err(|_| "dll lock poisoned".to_string())?;
+    let h = ensure_dll_session(api, &st, &mut dll)?;
+    let mut buf = vec![0_i8; 512 * 1024];
+    let ok = unsafe {
+        (api.session_runtime_stats)(
+            h as *mut std::ffi::c_void,
+            buf.as_mut_ptr(),
+            buf.len(),
+        )
+    };
+    let out_u8: Vec<u8> = buf
+        .into_iter()
+        .take_while(|b| *b != 0)
+        .map(|b| b as u8)
+        .collect();
+    let text = String::from_utf8_lossy(&out_u8).trim().to_string();
+    if ok == 0 {
+        let code = unsafe { (api.session_last_error)(h as *mut std::ffi::c_void) };
+        return Err(if text.is_empty() {
+            format!("newdb_session_runtime_stats failed (session_last_error={code})")
+        } else {
+            format!("{text} (session_last_error={code})")
+        });
+    }
+    Ok(text)
+}
+
+#[tauri::command]
+fn c_api_append_runtime_snapshot(
+    state: State<'_, AppState>,
+    output_jsonl_path: String,
+    label: String,
+) -> Result<(), String> {
+    configure_runtime_loader_paths();
+    ensure_newdb_cli_backend_env_from_bundle();
+    let api = load_dll_api()?;
+    let app = state.inner();
+    let st = app
+        .st
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    let mut dll = app
+        .dll
+        .lock()
+        .map_err(|_| "dll lock poisoned".to_string())?;
+    let h = ensure_dll_session(api, &st, &mut dll)?;
+    let path_c = as_cstring(&output_jsonl_path);
+    let label_c = as_cstring(&label);
+    let ok = unsafe {
+        (api.session_append_runtime_snapshot)(
+            h as *mut std::ffi::c_void,
+            path_c.as_ptr(),
+            label_c.as_ptr(),
+        )
+    };
+    if ok == 0 {
+        let code = unsafe { (api.session_last_error)(h as *mut std::ffi::c_void) };
+        return Err(format!(
+            "newdb_session_append_runtime_snapshot failed (session_last_error={code})"
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3799,6 +4002,10 @@ fn dll_info() -> DllInfo {
                 version,
                 path,
                 message: "dll loaded".to_string(),
+                api_version_major: (api.api_version_major)(),
+                api_version_minor: (api.api_version_minor)(),
+                api_version_patch: (api.api_version_patch)(),
+                abi_version: (api.abi_version)(),
             }
         },
         Err(e) => DllInfo {
@@ -3806,6 +4013,10 @@ fn dll_info() -> DllInfo {
             version: "n/a".to_string(),
             path,
             message: e,
+            api_version_major: -1,
+            api_version_minor: -1,
+            api_version_patch: -1,
+            abi_version: -1,
         },
     }
 }
@@ -3858,6 +4069,8 @@ pub fn run() {
             query_page,
             dll_info,
             runtime_artifact_info,
+            c_api_runtime_stats,
+            c_api_append_runtime_snapshot,
             runtime_trend_dashboard_json,
             list_results_files,
             read_results_json,

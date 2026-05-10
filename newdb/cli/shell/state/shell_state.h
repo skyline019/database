@@ -54,6 +54,9 @@ public:
 
     void reset_session_heap_guard() noexcept;
 
+    /// Next internal savepoint suffix (`__newdb_stmt_<n>`) for batch DML under an active txn.
+    [[nodiscard]] std::uint64_t bump_txn_stmt_savepoint_seq() noexcept;
+
     TxnCoordinator& txn();
     [[nodiscard]] const TxnCoordinator& txn() const;
     WhereQueryContext& where_ctx();

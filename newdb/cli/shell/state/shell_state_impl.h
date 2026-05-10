@@ -39,4 +39,6 @@ struct ShellState::Impl {
     std::unique_ptr<ShellTxnWhereRuntime> txn_where_;
     std::unique_ptr<ShellLsmSidecarRuntime> lsm_sidecar_;
     ShellStatePathsAndIoFlags paths_and_io_;
+    /// Monotonic names for transaction-scoped implicit `SAVEPOINT` in batch DML handlers.
+    std::uint64_t txn_stmt_savepoint_seq{0};
 };

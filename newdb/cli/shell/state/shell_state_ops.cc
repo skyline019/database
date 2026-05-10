@@ -147,6 +147,8 @@ bool ShellState::emit_where_plan_json(const char* log_path,
         }
         std::ostringstream oss;
         oss << "{\"ok\":1";
+        const std::string pred_fp = where_predicate_fingerprint_for_write_intent(cond_vec);
+        oss << ",\"predicate_fingerprint\":\"" << json_escape_where_plan(pred_fp) << "\"";
         if (!plan.empty()) {
             oss << ",\"chosen_plan_id\":\"" << json_escape_where_plan(plan[chosen].id) << "\""
                 << ",\"chosen_reason\":\"" << json_escape_where_plan(plan[chosen].rationale) << "\""

@@ -723,11 +723,20 @@ void invalidate_covering_sidecars_for_data_file(const std::string& data_file) {
     std::size_t removed = 0;
     for (const auto& key_attr : schema.attrs) {
         for (const auto& inc_attr : schema.attrs) {
-            removed += fs::remove(data_file + ".cov." + key_attr.name + "." + inc_attr.name, ec) ? 1u : 0u;
+            const std::string cov = data_file + ".cov." + key_attr.name + "." + inc_attr.name;
+            removed += fs::remove(cov, ec) ? 1u : 0u;
+            ec.clear();
+            removed += fs::remove(cov + ".idx", ec) ? 1u : 0u;
             ec.clear();
             removed += fs::remove(data_file + ".covp." + key_attr.name + "." + inc_attr.name, ec) ? 1u : 0u;
             ec.clear();
         }
+        // COUNT(attr,=,value) uses include_attr "__count__", which is not a schema column; remove those agg sidecars.
+        const std::string cov_count = data_file + ".cov." + key_attr.name + ".__count__";
+        removed += fs::remove(cov_count, ec) ? 1u : 0u;
+        ec.clear();
+        removed += fs::remove(cov_count + ".idx", ec) ? 1u : 0u;
+        ec.clear();
     }
     const char* v = std::getenv("NEWDB_SIDECAR_INVALIDATE_VERBOSE");
     const bool verbose = (v == nullptr) ? true : (std::strcmp(v, "0") != 0);

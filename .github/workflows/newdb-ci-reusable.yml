@@ -243,6 +243,13 @@ jobs:
           --fail-if-bridge-above 5
           --fail-if-dispatch-above 10
 
+      - name: OBJECT brick cross-cli include budget
+        run: >
+          python3 newdb/tools/audit_object_includes.py
+          --fail-if-dispatch-cross-above 24
+          --fail-if-state-cross-above 15
+          --fail-if-max-cross-cli-above 24
+
       - name: Configure (clean build dir)
         run: cmake -S newdb -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
@@ -254,6 +261,8 @@ jobs:
           python3 newdb/scripts/validate/test_runtime_report_compact_gates.py
           build/newdb_runtime_report
 
+      # Default job env does not set NEWDB_*; avoids inheriting developer shell exports in self-hosted setups.
+      # See newdb/docs/testing/ENVIRONMENT_BASELINE.md and scripts/run_newdb_tests_cleanenv.* for local parity.
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
@@ -289,6 +298,22 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ pkg-config python3
+
+      - name: ShellState direct-include budget (shell_state.h)
+        run: python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+
+      - name: Bridge/dispatch include budget
+        run: >
+          python3 newdb/tools/count_bridge_dispatch_includes.py
+          --fail-if-bridge-above 5
+          --fail-if-dispatch-above 10
+
+      - name: OBJECT brick cross-cli include budget
+        run: >
+          python3 newdb/tools/audit_object_includes.py
+          --fail-if-dispatch-cross-above 24
+          --fail-if-state-cross-above 15
+          --fail-if-max-cross-cli-above 24
 
       - name: Configure (Release)
         run: cmake -S newdb -B build-rel-gate -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -345,6 +370,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ pkg-config python3
 
+      - name: ShellState / bridge / dispatch include budgets
+        run: |
+          python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+          python3 newdb/tools/count_bridge_dispatch_includes.py --fail-if-bridge-above 5 --fail-if-dispatch-above 10
+          python3 newdb/tools/audit_object_includes.py --fail-if-dispatch-cross-above 24 --fail-if-state-cross-above 15 --fail-if-max-cross-cli-above 24
+
       - name: Configure (Release + NEWDB_SHARED_SLIM)
         run: >
           cmake -S newdb -B build-slim -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -367,6 +398,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ pkg-config python3
 
+      - name: Include coupling budgets (plugin matrix)
+        run: |
+          python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+          python3 newdb/tools/count_bridge_dispatch_includes.py --fail-if-bridge-above 5 --fail-if-dispatch-above 10
+          python3 newdb/tools/audit_object_includes.py --fail-if-dispatch-cross-above 24 --fail-if-state-cross-above 15 --fail-if-max-cross-cli-above 24
+
       - name: Configure (NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN)
         run: >
           cmake -S newdb -B build-plugin -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -381,6 +418,17 @@ jobs:
         run: >
           ctest --test-dir build-plugin --output-on-failure
           -R CliBackendPluginSmoke
+
+      - name: Shared bundle (plugin host + backend + README)
+        run: cmake --build build-plugin --parallel --target shared_bundle
+
+      - name: Upload plugin shared_bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-plugin-shared-bundle-linux
+          path: build-plugin/shared_bundle/Release
+          if-no-files-found: error
+          retention-days: 14
 
   # Second-line gate: JSONL contract + storage/WAL recovery ceilings (see docs/ci/PERF_AND_CI_BUDGETS.md §3 / §4).
   linux-bench-gate-runtime-contract:
@@ -514,6 +562,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build clang pkg-config python3
 
+      - name: Include coupling budgets (clang)
+        run: |
+          python3 newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+          python3 newdb/tools/count_bridge_dispatch_includes.py --fail-if-bridge-above 5 --fail-if-dispatch-above 10
+          python3 newdb/tools/audit_object_includes.py --fail-if-dispatch-cross-above 24 --fail-if-state-cross-above 15 --fail-if-max-cross-cli-above 24
+
       - name: Configure
         env:
           CXX: clang++
@@ -559,6 +613,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Include coupling budgets (Windows plugin)
+        shell: pwsh
+        run: |
+          python newdb/tools/count_shell_state_includes.py --fail-if-count-above 10
+          python newdb/tools/count_bridge_dispatch_includes.py --fail-if-bridge-above 5 --fail-if-dispatch-above 10
+          python newdb/tools/audit_object_includes.py --fail-if-dispatch-cross-above 24 --fail-if-state-cross-above 15 --fail-if-max-cross-cli-above 24
+
       - name: Configure (NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN)
         shell: pwsh
         run: >
@@ -576,3 +637,15 @@ jobs:
       - name: Plugin backend smoke (exports + LoadLibrary)
         shell: pwsh
         run: ctest --test-dir build-plugin-win -C Release --output-on-failure -R CliBackendPluginSmoke
+
+      - name: Shared bundle (plugin host + backend + README)
+        shell: pwsh
+        run: cmake --build build-plugin-win --config Release --parallel --target shared_bundle
+
+      - name: Upload plugin shared_bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: newdb-plugin-shared-bundle-windows
+          path: build-plugin-win/shared_bundle/Release
+          if-no-files-found: error
+          retention-days: 14

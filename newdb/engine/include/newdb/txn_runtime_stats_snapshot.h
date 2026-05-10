@@ -44,6 +44,7 @@ struct TxnRuntimeStats {
     std::uint64_t wal_recovery_segments_after_checkpoint{0};
     std::uint64_t wal_recovery_redo_plan_pending_txn_count{0};
     std::uint64_t wal_recovery_apply_conflict_count{0};
+    std::uint64_t wal_recovery_undo_chain_fallback_txns{0};
     std::string wal_recovery_policy;
     std::uint64_t wal_group_commit_count{0};
     std::uint64_t wal_group_commit_batch_commits{0};

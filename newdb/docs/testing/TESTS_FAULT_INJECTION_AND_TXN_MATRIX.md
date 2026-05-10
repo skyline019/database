@@ -16,7 +16,17 @@
 
 | 场景 | GTest 文件 / 用例 | 覆盖点 |
 |------|-------------------|--------|
-| 第二协调器无法锁同表 | `test_txn_file_lock.cpp` — `SecondCoordinatorCannotAcquireSameTableLock` | `acquireLock` / OS 锁 |
+| 第二协调器无法锁同表 | `test_txn_file_lock.cpp` — `SecondCoordinatorCannotAcquireSameTableLock` | `acquireLock` / OS 锁；**失败时**断言 `file_lock_acquire_fail_count >= 1`（协调器 **B**） |
+| 同进程重复 `acquireLock` | `SameProcessSecondAcquireCountsReuse` | `file_lock_same_process_reuse_count` |
+
+### 2.2 Windows CI vs Linux CI（期望差异）
+
+| 用例 | Windows（典型） | Linux（单进程 GTest） |
+|------|-----------------|----------------------|
+| `SecondCoordinatorCannotAcquireSameTableLock` | `l2.isErr()` **必真**；**B** 的 `file_lock_acquire_fail_count >= 1` | `l2` 可能 Ok 或 Err；仅当 `l2.isErr()` 时断言失败计数 |
+| `SameTableConcurrentBeginRespectsProcessScopedLockSemantics` | `b.begin` **Err**；**B** 的 `txn_begin_lock_conflict_count >= 1` 且 `file_lock_acquire_fail_count >= 1` | `b.begin` 可 Ok；若 Err 则同上计数断言 |
+
+GitHub Actions：`windows-clean-room`（[`newdb-ci-reusable.yml`](../../../.github/workflows/newdb-ci-reusable.yml)）跑 Windows 路径；`linux-gcc` / `linux-clang` 跑 POSIX 路径。
 
 ## 2.1 隔离配置与 `isLocked` 基线
 
@@ -46,6 +56,13 @@
 - 在隔离目录运行 demo + **kill -9** 后重放 WAL（可脚本化，尚未统一收纳为一个 GTest）。
 - 对 **`WalRecoveryStats`** 断言：`checksum_failures`、`elapsed_ms` 预算（见 [STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md](../storage/STORAGE_GOVERNANCE_AND_RECOVERY_BUDGETS.md)）。
 
+### 4.1 `rollbackToSavepoint` / 堆 undo 失败（可量化）
+
+| 场景 | GTest | 预期观测（`TxnRuntimeStats` / `SHOW TUNING JSON`） | 运维动作 |
+|------|-------|---------------------------------------------------|----------|
+| undo 链上单条 `append_undo_row_to_heap` 失败（如非法 `key` 触发 `stoi` 异常） | `test_txn_undo_metrics.cpp` — `TxnUndoMetrics.InvalidRecordKeyIncrementsUndoChainFallbackCount` | `undo_chain_fallback_count >= 1`，`rollback_savepoint_count == 1`；返回值仍为 **Ok**（与 [`TXN_ISOLATION_AND_LOCKING.md`](../txn/TXN_ISOLATION_AND_LOCKING.md) §4.2 一致） | 整事务 **`ROLLBACK`**，排查堆 / 权限 / 记录损坏 |
+| WAL 恢复阶段 undo 链退化 | `test_demo_txn_wal.cpp` 等恢复矩阵 | `wal_recovery_undo_chain_fallback_txns`（恢复后 stats） | 同上，并查 WAL / 恢复日志 |
+
 **建议新增用例方向**（按需排期）：
 
 1. `TxnIsolationLevel` 切换后，同一会话两次读 **快照边界** 可区分 RC vs Snapshot（需引擎配合）。
@@ -60,6 +77,14 @@ ctest -L newdb --output-on-failure
 ctest -R 'TxnWriteConflict|TxnFileLock|TxnAutoVacuum|WalRecoveryIndexed|WalSegmentScanner|TxnShellMultiEntrySnapshot|ShowPlanTableStatsStaleShell|WhereHeapScanBudgetBinding|IndexCatalog|SidecarWalLsn' --output-on-failure
 # 与文件级方案 §8.2 对齐的 stats / sidecar 子集（可按需增减）：
 ctest -R 'WalSegmentScanner|WalRecoveryIndexed|TxnIsolationVisibility|EqSidecar|QueryTableStats|ShowPlanTableStatsStaleShell' --output-on-failure
+# 运维量化子集（嵌入契约、undo 计数器、与 §7 对齐）：
+ctest -R 'TxnEmbeddedContract|TxnUndoMetrics' --output-on-failure
+# 读路径 / 隔离基线（建议在干净环境下跑，见 ENVIRONMENT_BASELINE.md）：
+ctest -R 'TxnIsolationVisibility|TxnShellMultiEntrySnapshot|DemoWhereBatchDml' --output-on-failure
+# 协调器严格 API 边界：
+ctest -R 'TxnChainStrict' --output-on-failure
+# 加权成熟度得分（JSON 可选）：见 TXN_CHAIN_MATURITY.md
+python3 newdb/scripts/ci/txn_chain_maturity_report.py --build-dir build --json-out newdb/scripts/results/txn_maturity.json
 ```
 
 ## 6. 优先级与 CI 命令速查（P0–P2）
@@ -69,3 +94,30 @@ ctest -R 'WalSegmentScanner|WalRecoveryIndexed|TxnIsolationVisibility|EqSidecar|
 | P0 | runtime JSONL 契约 + gate | `validate_runtime_stats.py`、`ci_bench_gate.py`、`newdb_runtime_report` | `python3 newdb/scripts/validate/validate_runtime_stats.py <fixture.jsonl>` | `.github/workflows/newdb-ci.yml` 中 `linux-bench-gate-runtime-contract` |
 | P1 | 读视图 / snapshot 统计 | `test_txn_isolation_visibility.cpp`（含 readpath off 计数）、`SHOW PLAN` JSON 字段 | `ctest -R TxnIsolationVisibility --output-on-failure` | 同上 + `linux-index-catalog-enforce` |
 | P2 | 存储 soak / 健康度 | `test_storage_soak.cpp`（`StorageSoakLight`）、`StorageSoakHeavy`（`NEWDB_ENABLE_HEAVY_SOAK=1`） | `ctest -R StorageSoakLight` | Nightly：`NEWDB_ENABLE_HEAVY_SOAK=1 ctest -R StorageSoakHeavy` |
+| P2 | 嵌入 API / undo 量化 | `test_txn_embedded_contract.cpp`、`test_txn_undo_metrics.cpp` | `ctest -R 'TxnEmbeddedContract|TxnUndoMetrics'` | 随 `linux-gcc` / `windows-clean-room` 全量 `ctest` |
+| P2 | 事务链成熟度（加权得分） | [`txn_chain_maturity_report.py`](../../scripts/ci/txn_chain_maturity_report.py)、[`TXN_CHAIN_MATURITY.md`](TXN_CHAIN_MATURITY.md) | `python3 newdb/scripts/ci/txn_chain_maturity_report.py --build-dir build` | 可选归档 `txn_maturity.json` |
+| P2 | 协调器严格 API | `test_txn_chain_strict.cpp` — `TxnChainStrict` | `ctest -R TxnChainStrict` | 同上 |
+
+## 7. 嵌入 API 契约（不经 `process_command_line`）
+
+[`txn_manager.h`](../../cli/modules/txn/coordinator/txn_manager.h)：`rollbackToSavepoint` 注释要求 **绕过 shell dispatch 的调用方** 在成功后自行 **`Session::invalidate` / 重载** 会话堆，否则内存与磁盘可能不一致。
+
+| 操作 | 推荐：失效/重载会话堆 | 推荐观测 |
+|------|----------------------|----------|
+| `rollbackToSavepoint` | 是 | `rollback_savepoint_count`；与磁盘对比用 `load_heap_file` |
+| 用户显式 `ROLLBACK TO SAVEPOINT`（CLI） | 否（handler 已 `shell_invalidate_session_table`） | 同上 |
+| `rollback()` / `commit()` | CLI 路径已处理；嵌入直连需自审 | `TxnState`、WAL |
+| `recoverFromWAL()` | 是（所有持有该表 `HeapTable` 缓存的会话） | `wal_recovery_*` 字段 |
+
+| GTest | 断言意图 |
+|-------|----------|
+| `TxnEmbeddedContract.RollbackToSavepointWithoutSessionInvalidateLeavesStaleHeap` | 仅协调器 undo 后 **不** `invalidate` → 会话堆与 `load_heap_file` **不一致**（文档化风险） |
+| `TxnEmbeddedContract.InvalidateAndReloadAlignsHeapWithDiskAfterSavepointRollback` | `invalidate` + `ensure_loaded` 后一致 |
+
+## 8. 环境变量基线与可重复性
+
+大量 `NEWDB_*` 由 `std::getenv` 读取；**父 shell 若 export 了读路径关闭等变量，子进程中的 GTest 会继承**，导致假阳性/假阴性（例如 `TxnIsolationVisibility` 与 `last_snapshot_source`）。
+
+- **变量清单与默认值语义**：见同目录 [`ENVIRONMENT_BASELINE.md`](ENVIRONMENT_BASELINE.md)。
+- **推荐本地跑法**：[`scripts/run_newdb_tests_cleanenv.sh`](../scripts/run_newdb_tests_cleanenv.sh)、[`scripts/run_newdb_tests_cleanenv.ps1`](../scripts/run_newdb_tests_cleanenv.ps1)（清除常见 `NEWDB_TXN_*` / `NEWDB_VISCHK` 后调用 `ctest` 或可执行文件）。
+- **CI**：工作流默认不设置这些变量；显式设置的 job（如 `NEWDB_INDEX_CATALOG_ENFORCE=1`）以 `env:` 块为准。详见 [`.github/workflows/newdb-ci-reusable.yml`](../../../.github/workflows/newdb-ci-reusable.yml)。

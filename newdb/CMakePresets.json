@@ -1,6 +1,6 @@
 {
   "version": 3,
-  "cmakeMinimumRequired": { "major": 3, "minor": 16, "patch": 0 },
+  "cmakeMinimumRequired": { "major": 3, "minor": 20, "patch": 0 },
   "configurePresets": [
     {
       "name": "base",
@@ -40,6 +40,92 @@
         "NEWDB_C_API_PLUGIN_BACKEND": "ON",
         "NEWDB_BUILD_CLI_BACKEND_PLUGIN": "ON"
       }
+    },
+    {
+      "name": "plugin-shared-release",
+      "inherits": "plugin-shared",
+      "displayName": "Plugin release (CMAKE_BUILD_TYPE=Release; official shipping preset)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "plugin-shipping-cache",
+      "hidden": true,
+      "displayName": "Plugin shipping (shared flags)",
+      "description": "NEWDB_C_API_PLUGIN_BACKEND + NEWDB_BUILD_CLI_BACKEND_PLUGIN, Release tests on; paths per platform preset.",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "NEWDB_BUILD_TESTS": "ON",
+        "NEWDB_BUILD_SHARED": "ON",
+        "NEWDB_SHARED_SLIM": "OFF",
+        "NEWDB_C_API_PLUGIN_BACKEND": "ON",
+        "NEWDB_BUILD_CLI_BACKEND_PLUGIN": "ON"
+      }
+    },
+    {
+      "name": "plugin-shipping-mingw",
+      "inherits": "plugin-shipping-cache",
+      "displayName": "Plugin shipping: MinGW (Ninja, Release)",
+      "description": "Windows: put MinGW-w64 g++/gcc ahead in PATH, then cmake --preset / --build / --test.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-clean-plugin-mingw",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "plugin-shipping-msvc",
+      "inherits": "plugin-shipping-cache",
+      "displayName": "Plugin shipping: MSVC VS 18 2026 (x64 Release)",
+      "description": "Windows: Visual Studio 2026 toolset; multi-config — use build/test preset configuration Release.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build-clean-plugin-msvc",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "plugin-shipping-linux-gcc",
+      "inherits": "plugin-shipping-cache",
+      "displayName": "Plugin shipping: Linux GCC (Ninja, Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-clean-plugin-linux-gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "plugin-shipping-linux-clang",
+      "inherits": "plugin-shipping-cache",
+      "displayName": "Plugin shipping: Linux Clang (Ninja, Release)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-clean-plugin-linux-clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
     }
   ],
   "buildPresets": [
@@ -57,6 +143,35 @@
       "name": "plugin-shared-rel",
       "configurePreset": "plugin-shared",
       "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "plugin-shared-release-rel",
+      "configurePreset": "plugin-shared-release",
+      "configuration": "Release"
+    },
+    {
+      "name": "plugin-shipping-mingw-rel",
+      "displayName": "Build: plugin-shipping-mingw (Release)",
+      "configurePreset": "plugin-shipping-mingw",
+      "configuration": "Release"
+    },
+    {
+      "name": "plugin-shipping-msvc-rel",
+      "displayName": "Build: plugin-shipping-msvc (Release)",
+      "configurePreset": "plugin-shipping-msvc",
+      "configuration": "Release"
+    },
+    {
+      "name": "plugin-shipping-linux-gcc-rel",
+      "displayName": "Build: plugin-shipping-linux-gcc (Release)",
+      "configurePreset": "plugin-shipping-linux-gcc",
+      "configuration": "Release"
+    },
+    {
+      "name": "plugin-shipping-linux-clang-rel",
+      "displayName": "Build: plugin-shipping-linux-clang (Release)",
+      "configurePreset": "plugin-shipping-linux-clang",
+      "configuration": "Release"
     }
   ],
   "testPresets": [
@@ -65,6 +180,76 @@
       "configurePreset": "full-shared",
       "configuration": "RelWithDebInfo",
       "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "slim-shared-rel",
+      "configurePreset": "slim-shared",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "plugin-shared-rel",
+      "configurePreset": "plugin-shared",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "plugin-shared-release-rel",
+      "configurePreset": "plugin-shared-release",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "plugin-shipping-mingw-rel",
+      "displayName": "Test: plugin-shipping-mingw (Release)",
+      "configurePreset": "plugin-shipping-mingw",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "plugin-shipping-msvc-rel",
+      "displayName": "Test: plugin-shipping-msvc (Release)",
+      "configurePreset": "plugin-shipping-msvc",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "plugin-shipping-linux-gcc-rel",
+      "displayName": "Test: plugin-shipping-linux-gcc (Release)",
+      "configurePreset": "plugin-shipping-linux-gcc",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "plugin-shipping-linux-clang-rel",
+      "displayName": "Test: plugin-shipping-linux-clang (Release)",
+      "configurePreset": "plugin-shipping-linux-clang",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
     }
   ]
 }

@@ -46,6 +46,9 @@ public:
     Result<bool> commit();
     Result<bool> rollback();
     Result<bool> savepoint(const std::string& name);
+    /// Rolls back heap/WAL records after `name` per in-memory `m_txn_records`. Callers that bypass the
+    /// shell dispatch layer must refresh or invalidate any in-process `HeapTable` cache for the affected
+    /// table (CLI handlers call `shell_invalidate_session_table` after a user `ROLLBACK TO SAVEPOINT`).
     Result<bool> rollbackToSavepoint(const std::string& name);
     Result<bool> releaseSavepoint(const std::string& name);
     Result<bool> recoverToLsn(std::uint64_t target_lsn);
@@ -74,8 +77,15 @@ public:
     void recordOperation(const std::string& operation, const std::string& table,
                          const std::string& key, const std::string& old_val, const std::string& new_val);
     bool tryReserveWriteKey(const std::string& table_name, int id, std::string* reason = nullptr);
+    /// Sorts and de-duplicates `row_ids`, then reserves PK row intents in order. On first failure, releases
+    /// only the keys successfully acquired in this batch (statement-level partial rollback of reservations).
+    bool tryReserveWriteKeysBatchSorted(const std::string& table_name,
+                                        std::vector<int> row_ids,
+                                        std::string* reason = nullptr);
     /// Extended write-intent reservation (range / predicate / secondary index). Uses the same global map as row PK.
     bool tryReserveWriteLockKey(const LockKey& lk, std::string* reason = nullptr);
+    /// Drop reservations for `storage_keys` when owned by this txn (global map + `m_reserved_write_keys`).
+    void releaseWriteIntentStorageKeysForCurrentTxn(const std::vector<std::string>& storage_keys);
     void setWriteConflictPolicy(WriteConflictPolicy policy);
     WriteConflictPolicy writeConflictPolicy() const;
     void setWriteConflictWaitTimeoutMs(std::uint64_t ms);

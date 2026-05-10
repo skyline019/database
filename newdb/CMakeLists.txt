@@ -111,6 +111,28 @@ function(newdb_verify_core_engine_sources_exclude_cli target_name)
 endfunction()
 newdb_verify_core_engine_sources_exclude_cli(newdb_core)
 
+# WHERE parse/plan/execute stack (Track Q): standalone STATIC for link-level decoupling from shell OBJECT bricks.
+add_library(newdb_query STATIC
+    cli/modules/where/parser/condition.cc
+    cli/modules/where/executor/match/match_impl.cc
+    cli/modules/where/executor/cache/cache_impl.cc
+    cli/modules/where/executor/policy/policy_service.cc
+    cli/modules/where/executor/plan/plan_impl.cc
+    cli/modules/where/executor/plan/plan_impl_support.cc
+    cli/modules/where/executor/plan/plan_query_index.cc
+    cli/modules/where/executor/plan/plan_scan_estimate.cc
+    cli/modules/where/executor/plan/where_plan_catalog.cc
+    cli/modules/where/executor/stats/table_stats.cc
+)
+set_target_properties(newdb_query PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(newdb_query PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
+    "${NEWDB_REPO_ROOT}"
+)
+target_link_libraries(newdb_query PUBLIC newdb_core)
+newdb_force_include_waterfall_config(newdb_query)
+
 option(NEWDB_BUILD_SHARED "Build shared library (C ABI) for cross-language usage" ON)
 # Slim: engine-only `newdb_shared` (c_api_slim.cpp). Plugin/full matrix: docs/dev/CI_SLIM_FULL_MATRIX.md
 option(NEWDB_SHARED_SLIM "newdb_shared links only newdb_core (minimal C ABI; no newdb_capi_adapter)" OFF)
@@ -176,7 +198,7 @@ newdb_force_include_waterfall_config(newdb_runtime_report)
 #   3) newdb_shell_dispatch
 #   4) newdb_shell_common
 #   5) newdb_shell_catalog
-#   6) newdb_shell_where
+#   6) newdb_query (STATIC; links PUBLIC with adapter — not an OBJECT brick)
 #   7) newdb_shell_txn
 #   8) newdb_shell_sidecar
 # `newdb_shell` then adds REPL-only OBJECTs: newdb_shell_bootstrap_repl -> links PUBLIC newdb_capi_adapter.
@@ -238,23 +260,16 @@ newdb_shell_add_object_library(newdb_shell_common
 newdb_shell_add_object_library(newdb_shell_catalog
     cli/modules/catalog/schema_catalog.cc
 )
-newdb_shell_add_object_library(newdb_shell_where
-    cli/modules/where/parser/condition.cc
-    cli/modules/where/executor/match/match_impl.cc
-    cli/modules/where/executor/cache/cache_impl.cc
-    cli/modules/where/executor/policy/policy_service.cc
-    cli/modules/where/executor/plan/plan_impl.cc
-    cli/modules/where/executor/plan/plan_impl_support.cc
-    cli/modules/where/executor/plan/plan_query_index.cc
-    cli/modules/where/executor/plan/plan_scan_estimate.cc
-    cli/modules/where/executor/plan/where_plan_catalog.cc
-    cli/modules/where/executor/stats/table_stats.cc
-)
 newdb_shell_add_object_library(newdb_shell_txn
     cli/modules/txn/coordinator/txn_manager.cc
     cli/modules/txn/coordinator/core/core_impl.cc
     cli/modules/txn/coordinator/lock/lock_service.cc
     cli/modules/txn/coordinator/wal/wal_service.cc
+    cli/modules/txn/coordinator/recovery/recovery_analyze.cc
+    cli/modules/txn/coordinator/recovery/recovery_redo.cc
+    cli/modules/txn/coordinator/recovery/recovery_undo.cc
+    cli/modules/txn/coordinator/recovery/heap_undo_apply.cc
+    cli/modules/txn/coordinator/recovery/recovery_finalize.cc
     cli/modules/txn/coordinator/recovery/recovery_service.cc
     cli/modules/txn/coordinator/write_conflict/write_conflict_service.cc
     cli/modules/txn/coordinator/vacuum/vacuum_service.cc
@@ -273,15 +288,18 @@ newdb_shell_add_object_library(newdb_shell_sidecar
 )
 
 # Logical build-layer edges between shell OBJECT targets (usage requirements / documentation).
+# PRIVATE edges mirror direct #include closure where practical (see Plugin decoupling plan).
 target_link_libraries(newdb_shell_catalog PRIVATE newdb_shell_common)
-target_link_libraries(newdb_shell_where PRIVATE newdb_shell_common newdb_shell_catalog)
 target_link_libraries(newdb_shell_sidecar PRIVATE newdb_shell_common newdb_shell_catalog)
 target_link_libraries(newdb_shell_txn PRIVATE newdb_shell_common)
-target_link_libraries(newdb_shell_dispatch PRIVATE newdb_shell_state newdb_shell_common)
+target_link_libraries(newdb_shell_state PRIVATE newdb_shell_common newdb_shell_txn newdb_query
+    newdb_shell_sidecar)
+target_link_libraries(newdb_shell_dispatch PRIVATE newdb_shell_state newdb_shell_common newdb_query
+    newdb_shell_catalog newdb_shell_txn newdb_shell_sidecar)
 target_link_libraries(newdb_shell_bootstrap_capi PRIVATE newdb_shell_state newdb_shell_dispatch
-    newdb_shell_common)
+    newdb_shell_common newdb_shell_txn)
 target_link_libraries(newdb_shell_bootstrap_repl PRIVATE newdb_shell_dispatch newdb_shell_state
-    newdb_shell_common)
+    newdb_shell_common newdb_shell_txn)
 
 add_library(newdb_capi_adapter STATIC
     $<TARGET_OBJECTS:newdb_shell_state>
@@ -289,7 +307,6 @@ add_library(newdb_capi_adapter STATIC
     $<TARGET_OBJECTS:newdb_shell_dispatch>
     $<TARGET_OBJECTS:newdb_shell_common>
     $<TARGET_OBJECTS:newdb_shell_catalog>
-    $<TARGET_OBJECTS:newdb_shell_where>
     $<TARGET_OBJECTS:newdb_shell_txn>
     $<TARGET_OBJECTS:newdb_shell_sidecar>
 )
@@ -299,7 +316,7 @@ target_include_directories(newdb_capi_adapter PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/engine/include"
     "${NEWDB_REPO_ROOT}"
 )
-target_link_libraries(newdb_capi_adapter PUBLIC newdb_core)
+target_link_libraries(newdb_capi_adapter PUBLIC newdb_core newdb_query)
 newdb_force_include_waterfall_config(newdb_capi_adapter)
 
 # Interactive REPL TU only; embedding via full `newdb_shared` links `newdb_capi_adapter` (no `demo_shell.cc`).
@@ -316,6 +333,14 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/tools/count_shell_state_includes.py"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         COMMENT "Count newdb/**/*.cc|cpp that #include shell_state.h (Wave 9+ baseline)")
+    add_custom_target(newdb_audit_object_includes
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools/audit_object_includes.py"
+            --fail-if-dispatch-cross-above 24
+            --fail-if-state-cross-above 15
+            --fail-if-max-cross-cli-above 24
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Cross-brick cli/ include budget for OBJECT bricks + newdb_query")
 endif()
 
 add_library(newdb_demo_lib ALIAS newdb_shell)
@@ -393,12 +418,19 @@ if(NEWDB_BUILD_TESTS)
     include(FetchContent)
     # Prefer a local tree when provided (-Dgoogletest_SOURCE_DIR=... or
     # -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=...) so offline / blocked-GitHub builds work.
+    # Then prefer googletest vendored next to newdb under ../gtest_capi/ (same repo).
     set(_newdb_googletest_src "")
     if(DEFINED FETCHCONTENT_SOURCE_DIR_GOOGLETEST AND FETCHCONTENT_SOURCE_DIR_GOOGLETEST
             AND EXISTS "${FETCHCONTENT_SOURCE_DIR_GOOGLETEST}/CMakeLists.txt")
         set(_newdb_googletest_src "${FETCHCONTENT_SOURCE_DIR_GOOGLETEST}")
     elseif(googletest_SOURCE_DIR AND EXISTS "${googletest_SOURCE_DIR}/CMakeLists.txt")
         set(_newdb_googletest_src "${googletest_SOURCE_DIR}")
+    elseif(EXISTS "${NEWDB_REPO_ROOT}/gtest_capi/third_party/googletest/CMakeLists.txt")
+        set(_newdb_googletest_src "${NEWDB_REPO_ROOT}/gtest_capi/third_party/googletest")
+    elseif(EXISTS "${NEWDB_REPO_ROOT}/gtest_capi/googletest/CMakeLists.txt")
+        set(_newdb_googletest_src "${NEWDB_REPO_ROOT}/gtest_capi/googletest")
+    elseif(EXISTS "${NEWDB_REPO_ROOT}/gtest_capi/_deps/googletest-src/CMakeLists.txt")
+        set(_newdb_googletest_src "${NEWDB_REPO_ROOT}/gtest_capi/_deps/googletest-src")
     endif()
     if(_newdb_googletest_src)
         message(STATUS "googletest: using local SOURCE_DIR (${_newdb_googletest_src})")
@@ -444,11 +476,16 @@ if(NEWDB_BUILD_TESTS)
     # Link both gtest and gtest_main so flag symbols are consistently resolved
     # when gtest is built as shared libraries on MSVC.
     target_link_libraries(gtest_capi PRIVATE GTest::gtest GTest::gtest_main)
+    set_target_properties(gtest_capi PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(gtest_capi PRIVATE GTEST_C_API_SHARED_BUILD)
     if(NEWDB_GTEST_BUILD_SHARED_DLL)
         target_compile_definitions(gtest_capi PRIVATE GTEST_LINKED_AS_SHARED_LIBRARY=1)
     endif()
-    if(WIN32)
-        target_compile_definitions(gtest_capi PRIVATE GTEST_C_API_SHARED_BUILD)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(gtest_capi PRIVATE
+            -fvisibility=hidden
+            -fvisibility-inlines-hidden
+        )
     endif()
     set_target_properties(gtest_capi PROPERTIES OUTPUT_NAME "gtest_capi")
 
@@ -467,6 +504,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_demo_logging_history.cpp
         tests/test_demo_txn_wal.cpp
         tests/test_demo_where.cpp
+        tests/test_demo_where_batch_dml.cpp
         tests/test_demo_schema_catalog.cpp
         tests/test_demo_cli.cpp
         tests/test_demo_mdb_stop.cpp
@@ -481,6 +519,9 @@ if(NEWDB_BUILD_TESTS)
         tests/test_wal_concurrency.cpp
         tests/test_wal_recovery_indexed.cpp
         tests/test_txn_file_lock.cpp
+        tests/test_txn_embedded_contract.cpp
+        tests/test_txn_undo_metrics.cpp
+        tests/test_txn_chain_strict.cpp
         tests/test_txn_isolation_config.cpp
         tests/test_txn_isolation_visibility.cpp
         tests/test_txn_shell_multi_entry_snapshot.cpp
@@ -502,6 +543,7 @@ if(NEWDB_BUILD_TESTS)
         tests/test_query_table_stats.cpp
         tests/test_index_catalog.cpp
         tests/test_wal_segment_scanner.cpp
+        tests/test_recovery_undo_chain.cpp
         tests/test_table_storage_health.cpp
         tests/test_page_cache.cpp
         tests/test_memory_registry.cpp
@@ -643,6 +685,10 @@ if(NEWDB_BUILD_TESTS)
         list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS gtest_main)
     endif()
 endif()
+# Official plugin release ships host + backend in one directory (see plugin_backend_packaging.md).
+if(NEWDB_BUILD_CLI_BACKEND_PLUGIN AND TARGET newdb_cli_backend)
+    list(APPEND NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS newdb_cli_backend)
+endif()
 set(NEWDB_SHARED_BUNDLE_TARGETS
     ${NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS}
     ${NEWDB_SHARED_BUNDLE_LIBRARY_TARGETS}
@@ -664,6 +710,9 @@ if(MINGW)
     )
     if(NEWDB_BUILD_SHARED)
         list(APPEND _newdb_mingw_link_targets newdb_shared)
+    endif()
+    if(NEWDB_BUILD_CLI_BACKEND_PLUGIN AND TARGET newdb_cli_backend)
+        list(APPEND _newdb_mingw_link_targets newdb_cli_backend)
     endif()
     if(NEWDB_BUILD_TESTS)
         list(APPEND _newdb_mingw_link_targets newdb_tests newdb_capi_slim_tests newdb_capi_integration_tests gtest_capi)
@@ -735,6 +784,34 @@ foreach(_exe_target IN LISTS NEWDB_SHARED_BUNDLE_EXECUTABLE_TARGETS)
     endif()
 endforeach()
 
+if(NEWDB_BUILD_CLI_BACKEND_PLUGIN AND TARGET newdb_cli_backend)
+    string(APPEND _newdb_bundle_script_content
+        "file(WRITE \"\${_bundle_dir}/README_PLUGIN.txt\""
+        " \"Plugin release layout (same directory):\\n\""
+        " \"  Host: $<TARGET_FILE_NAME:newdb_shared>\\n\""
+        " \"  Backend: $<TARGET_FILE_NAME:newdb_cli_backend>\\n\\n\""
+        " \"Before newdb_session_create, set NEWDB_CLI_BACKEND_PATH to the absolute path of the backend file.\\n\""
+        " \"Docs: newdb/docs/dev/C_API_PLUGIN_BACKEND.md and newdb/scripts/ci/plugin_backend_packaging.md\\n\")\n"
+    )
+    if(WIN32)
+        string(APPEND _newdb_bundle_script_content
+            "file(WRITE \"\${_bundle_dir}/set_newdb_plugin_env.cmd\""
+            " \"@echo off\\r\\nsetlocal\\r\\n\""
+            " \"set \\\"NEWDB_CLI_BACKEND_PATH=%~dp0$<TARGET_FILE_NAME:newdb_cli_backend>\\\"\\r\\n\""
+            " \"set \\\"PATH=%~dp0;%PATH%\\\"\\r\\n\""
+            " \"echo NEWDB_CLI_BACKEND_PATH=%NEWDB_CLI_BACKEND_PATH%\\r\\n\")\n"
+        )
+    endif()
+    set(_newdb_bundle_install_plugin_md "${CMAKE_CURRENT_SOURCE_DIR}/scripts/ci/INSTALL_PLUGIN.md")
+    if(EXISTS "${_newdb_bundle_install_plugin_md}")
+        string(APPEND _newdb_bundle_script_content
+            "if(EXISTS \"${_newdb_bundle_install_plugin_md}\")\n"
+            "  file(COPY \"${_newdb_bundle_install_plugin_md}\" DESTINATION \"\${_bundle_dir}\")\n"
+            "endif()\n"
+        )
+    endif()
+endif()
+
 if(MINGW)
     get_filename_component(_newdb_mingw_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
     string(APPEND _newdb_bundle_script_content
@@ -768,6 +845,23 @@ add_custom_target(shared_bundle
     COMMENT "Bundling self-contained shared bundle artifacts"
 )
 add_dependencies(shared_bundle ${NEWDB_SHARED_BUNDLE_TARGETS})
+
+option(NEWDB_INSTALL_PLUGIN_RELEASE "Install newdb_shared + newdb_cli_backend under CMAKE_INSTALL_PREFIX (plugin pair)" OFF)
+if(NEWDB_INSTALL_PLUGIN_RELEASE AND NEWDB_BUILD_SHARED AND NEWDB_BUILD_CLI_BACKEND_PLUGIN AND TARGET newdb_cli_backend)
+    include(GNUInstallDirs OPTIONAL)
+    if(NOT DEFINED CMAKE_INSTALL_LIBDIR)
+        set(CMAKE_INSTALL_LIBDIR "lib")
+    endif()
+    set(_newdb_install_plugin_subdir "newdb")
+    install(TARGETS newdb_shared newdb_cli_backend
+        RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}/${_newdb_install_plugin_subdir}"
+        LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/${_newdb_install_plugin_subdir}"
+        ARCHIVE DESTINATION "${CMAKE_INSTALL_LIBDIR}/${_newdb_install_plugin_subdir}")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/scripts/ci/INSTALL_PLUGIN.md")
+        install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/scripts/ci/INSTALL_PLUGIN.md"
+            DESTINATION "${CMAKE_INSTALL_LIBDIR}/${_newdb_install_plugin_subdir}")
+    endif()
+endif()
 
 # Backward compatibility alias.
 add_custom_target(newdb_bundle DEPENDS shared_bundle)

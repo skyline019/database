@@ -94,6 +94,10 @@ void ShellState::reset_session_heap_guard() noexcept {
     }
 }
 
+std::uint64_t ShellState::bump_txn_stmt_savepoint_seq() noexcept {
+    return ++impl_->txn_stmt_savepoint_seq;
+}
+
 TxnCoordinator& ShellState::txn() {
     return impl_->txn_where_->bundle.txn;
 }

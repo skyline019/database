@@ -10,7 +10,7 @@
 - There are **no** intentional `cli/` includes from files listed in `newdb_core` today. If you add engine code under `engine/`, keep this rule.
 - **C API (full)**: [`engine/src/api/c/c_api.cpp`](../../engine/src/api/c/c_api.cpp) is **not** part of `newdb_core`. With `NEWDB_BUILD_SHARED` and not `NEWDB_SHARED_SLIM`, `newdb_shared` links **`newdb_capi_adapter`** (dispatch / bridge stack; **no** interactive [`demo_shell.cc`](../../cli/shell/repl/demo_shell.cc)). [`NewdbCApiCliSession`](../../engine/include/newdb/c_api_cli_bridge.h) uses [`newdb_engine_session_t`](../../engine/include/newdb/engine_session_handle.h); [`ShellState`](../../cli/shell/state/shell_state.h) borrows `Session` via [`ShellStateEngineBorrowedTag`](../../cli/shell/state/shell_state.h). `c_api.cpp` still avoids direct `cli/` includes.
 - **Slim shared library**: `NEWDB_SHARED_SLIM=ON` builds [`c_api_slim.cpp`](../../engine/src/api/c/c_api_slim.cpp) only against `newdb_core` (stub session API).
-- **WHERE planner / `newdb_session_where_plan_json`**: stays in `cli/modules/where` for the foreseeable roadmap; there is no engine-only substitute without re-homing the planner. Capability tier and rationale: [`C_API_CAPABILITY_TIERS.md`](C_API_CAPABILITY_TIERS.md).
+- **WHERE planner / `newdb_session_where_plan_json`**: implementation sources remain under `cli/modules/where` but are built as the **`newdb_query`** static library and linked through **`newdb_capi_adapter`** ([`NEWDB_QUERY_LAYER.md`](../architecture/NEWDB_QUERY_LAYER.md)). There is still no engine-only substitute without re-homing the planner into `newdb_core`. Capability tier: [`C_API_CAPABILITY_TIERS.md`](C_API_CAPABILITY_TIERS.md).
 
 ## Non-goals (short-term decoupling)
 

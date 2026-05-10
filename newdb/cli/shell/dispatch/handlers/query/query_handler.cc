@@ -25,9 +25,11 @@
 #include "cli/modules/catalog/schema_catalog.h"
 #include "cli/shell/state/shell_state_heap_read_guard.h"
 #include "cli/shell/state/shell_state_facade.h"
+#include "cli/shell/state/shell_state_ops.h"
 #include "cli/shell/dispatch/services/lsm/lsm_lite_service.h"
 #include "cli/modules/common/view/table_view.h"
 #include "cli/modules/txn/coordinator/txn_manager.h"
+#include "cli/modules/txn/coordinator/write_conflict/lock_key.h"
 #include "cli/modules/common/util/utils.h"
 #include "cli/modules/where/executor/where.h"
 #include "cli/modules/where/executor/stats/table_stats.h"
@@ -49,6 +51,44 @@ bool txn_isolation_readpath_enabled() {
     return true;
 }
 
+bool env_flag_enabled(const char* v) {
+    if (v == nullptr || v[0] == '\0') {
+        return false;
+    }
+    std::string s = v;
+    for (auto& ch : s) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return s == "1" || s == "true" || s == "yes" || s == "on";
+}
+
+void maybe_reserve_where_coarse_write_intents(TxnCoordinator& txn,
+                                              const std::string& current_table,
+                                              const newdb::TableSchema& schema,
+                                              const std::vector<WhereCond>& conds,
+                                              const char* log_file) {
+    if (!txn.inTransaction() || current_table.empty()) {
+        return;
+    }
+    std::string reason;
+    if (env_flag_enabled(std::getenv("NEWDB_WHERE_RESERVE_PREDICATE"))) {
+        const std::string fp = where_predicate_fingerprint_for_write_intent(conds);
+        const LockKey lk = LockKey::predicate_write_intent(current_table, "_where", fp);
+        if (!txn.tryReserveWriteLockKey(lk, &reason)) {
+            log_and_print(log_file, "[WHERE] predicate intent: %s\n", reason.c_str());
+        }
+    }
+    if (env_flag_enabled(std::getenv("NEWDB_WHERE_RESERVE_RANGE"))) {
+        if (const auto rp = where_try_derive_closed_int_range(schema, conds)) {
+            const LockKey lk =
+                LockKey::range_write_intent(current_table, rp->column, rp->begin_inclusive, rp->end_inclusive);
+            if (!txn.tryReserveWriteLockKey(lk, &reason)) {
+                log_and_print(log_file, "[WHERE] range intent: %s\n", reason.c_str());
+            }
+        }
+    }
+}
+
 std::string json_string_escape(const std::string& s) {
     std::string o;
     o.reserve(s.size() + 8);
@@ -57,6 +97,25 @@ std::string json_string_escape(const std::string& s) {
             o.push_back('\\');
         }
         o.push_back(c);
+    }
+    return o;
+}
+
+std::string json_string_escape_with_control(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 16);
+    static const char* hx = "0123456789abcdef";
+    for (const unsigned char uc : s) {
+        if (uc == '\\' || uc == '"') {
+            o.push_back('\\');
+            o.push_back(static_cast<char>(uc));
+        } else if (uc < 0x20u) {
+            o += "\\u00";
+            o.push_back(hx[uc >> 4u]);
+            o.push_back(hx[uc & 0xfu]);
+        } else {
+            o.push_back(static_cast<char>(uc));
+        }
     }
     return o;
 }
@@ -176,6 +235,13 @@ bool handle_query_where_count_commands(ShellState& st,
                                        const std::string& current_table,
                                        newdb::HeapTable& tbl) {
     ShellStateFacade f(st);
+    if (tbl.is_heap_storage_backed()) {
+        const newdb::Status mat = newdb_materialize_heap_if_lazy(tbl, f.schema(), &st);
+        if (!mat.ok) {
+            log_and_print(log_file, "[WHERE/COUNT] %s\n", mat.message.c_str());
+            return true;
+        }
+    }
     const HeapReadViewGuard _heap_read_view(st, tbl);
     TableStats where_stats_buf{};
     const TableStats* where_stats_hint = nullptr;
@@ -246,7 +312,8 @@ bool handle_query_where_count_commands(ShellState& st,
                           err_msg.c_str());
             return true;
         }
-        const HeapReadViewGuard _heap_read_view_plan(st, tbl);
+        const std::string predicate_fp = where_predicate_fingerprint_for_write_intent(conds);
+        maybe_reserve_where_coarse_write_intents(f.txn(), current_table, f.schema(), conds, log_file);
         const TxnRuntimeStats plan_stats = f.txn().runtimeStats();
         const std::uint64_t fb0 = f.where().fallback_scans.load(std::memory_order_relaxed);
         const std::uint64_t eq0 = f.where().plan_eq_sidecar_count.load(std::memory_order_relaxed);
@@ -315,9 +382,10 @@ bool handle_query_where_count_commands(ShellState& st,
             const std::string plan_id_esc = json_string_escape(plan_id_chosen);
             const std::string snap_esc = json_string_escape(plan_stats.last_snapshot_source);
             const std::string chosen_reason_esc = json_string_escape(chosen_reason);
+            const std::string pred_fp_esc = json_string_escape_with_control(predicate_fp);
             std::ostringstream json;
             json << "{\"plan_id\":\"" << plan_id_esc << "\",\"chosen_reason\":\"" << chosen_reason_esc
-                 << "\",\"logical_rows\":" << logical_rows
+                 << "\",\"predicate_fingerprint\":\"" << pred_fp_esc << "\",\"logical_rows\":" << logical_rows
                  << ",\"matched_rows\":" << matched_idx.size() << ",\"estimated_scan_rows\":" << estimated_scan_rows
                  << ",\"plan_candidates_considered\":"
                  << static_cast<unsigned>(plan_candidates_considered == 0u ? 1u : plan_candidates_considered)
@@ -335,7 +403,7 @@ bool handle_query_where_count_commands(ShellState& st,
         } else {
             log_and_print(log_file,
                           "[EXPLAIN WHERE] plan_id=%s matched=%zu logical_rows=%zu delta{fallback_scans=%llu eq_sidecar=%llu "
-                          "id_pk=%llu plan_fallback=%llu rows_scanned=%llu rows_returned=%llu}\n",
+                          "id_pk=%llu plan_fallback=%llu rows_scanned=%llu rows_returned=%llu} predicate_fingerprint=%s\n",
                           plan_id.empty() ? "?" : plan_id.c_str(),
                           matched_idx.size(),
                           tbl.logical_row_count(),
@@ -344,7 +412,8 @@ bool handle_query_where_count_commands(ShellState& st,
                           static_cast<unsigned long long>(id1 - id0),
                           static_cast<unsigned long long>(pf1 - pf0),
                           static_cast<unsigned long long>(sc1 - sc0),
-                          static_cast<unsigned long long>(rt1 - rt0));
+                          static_cast<unsigned long long>(rt1 - rt0),
+                          json_string_escape_with_control(predicate_fp).c_str());
         }
         return true;
     }
@@ -404,6 +473,7 @@ bool handle_query_where_count_commands(ShellState& st,
                           "[WHERE] usage: WHERE(attr, op, value [, AND|OR, attr, op, value] ...)\n");
             return true;
         }
+        maybe_reserve_where_coarse_write_intents(f.txn(), current_table, f.schema(), conds, log_file);
         const std::vector<std::size_t> matched_idx = query_with_index(tbl, f.schema(), conds, &f.where());
         if (where_policy_last_blocked(&f.where())) {
             log_and_print(log_file, "[WHERE] blocked: %s\n", where_policy_last_message(&f.where()).c_str());
@@ -619,7 +689,6 @@ bool handle_query_find_commands(ShellState& st,
                                 const std::string& eff_data,
                                 newdb::HeapTable& tbl) {
     ShellStateFacade f(st);
-    const HeapReadViewGuard _heap_read_view(st, tbl);
     if (strncasecmp_ascii(line, "FIND(", 5) == 0) {
         std::vector<std::string> args;
         if (!parse_comma_args(line + 4, args) || args.size() != 1) {
@@ -631,6 +700,12 @@ bool handle_query_find_commands(ShellState& st,
             log_and_print(log_file, "[FIND] argument must be integer id.\n");
             return true;
         }
+        const newdb::Status find_mat = newdb_materialize_heap_if_lazy(tbl, f.schema(), &st);
+        if (!find_mat.ok) {
+            log_and_print(log_file, "[FIND] %s\n", find_mat.message.c_str());
+            return true;
+        }
+        const HeapReadViewGuard heap_read_view(st, tbl);
         const auto lsm_hit = lsm_lite_find_by_id(st, eff_data, id);
         if (lsm_hit.has_value()) {
             if (lsm_hit->deleted) {
@@ -665,6 +740,12 @@ bool handle_query_find_commands(ShellState& st,
         }
         const std::string pk = f.schema().primary_key.empty() ? "id" : f.schema().primary_key;
         const std::string& val = args[0];
+        const newdb::Status pk_mat = newdb_materialize_heap_if_lazy(tbl, f.schema(), &st);
+        if (!pk_mat.ok) {
+            log_and_print(log_file, "[FINDPK] %s\n", pk_mat.message.c_str());
+            return true;
+        }
+        const HeapReadViewGuard heap_read_view_pk(st, tbl);
         newdb::Row scratch;
         const newdb::Row* found = nullptr;
         for (std::size_t i = 0; i < tbl.logical_row_count(); ++i) {

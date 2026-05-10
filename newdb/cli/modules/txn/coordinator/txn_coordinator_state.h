@@ -114,6 +114,8 @@ struct TxnCoordinatorState {
     std::atomic<std::uint64_t> m_wal_recovery_segments_after_checkpoint{0};
     std::atomic<std::uint64_t> m_wal_recovery_redo_plan_pending_txn_count{0};
     std::atomic<std::uint64_t> m_wal_recovery_apply_conflict_count{0};
+    /// Last `recoverFromWAL` run: dangling txns that used LSN-sort fallback (broken `undo_prev_lsn` chain).
+    std::atomic<std::uint64_t> m_wal_recovery_undo_chain_fallback_txns{0};
     mutable std::mutex m_wal_recovery_policy_mu;
     std::string m_wal_recovery_policy;
     std::atomic<std::uint64_t> m_wal_group_commit_count{0};

@@ -5,7 +5,7 @@
 | 目录 | 内容 |
 |------|------|
 | [`api/`](api/) | C API：ABI 矩阵、错误处理、线程安全 |
-| [`architecture/`](architecture/) | [模块边界与装配图](architecture/MODULE_BOUNDARIES.md)（`newdb_shell_*` OBJECT、`newdb_capi_adapter`、plugin/slim）；[全仓库数据流总览](architecture/PROJECT_DATAFLOW_WHOLE.md) 与 [逐项详解](architecture/PROJECT_DATAFLOW_WHOLE_详解.md)；设计点映射见 [NEWDB_DESIGN_POINT_TO_FILE_MAP.md](architecture/NEWDB_DESIGN_POINT_TO_FILE_MAP.md) |
+| [`architecture/`](architecture/) | [模块边界与装配图](architecture/MODULE_BOUNDARIES.md)（`newdb_shell_*` OBJECT、`newdb_query`、`newdb_capi_adapter`、plugin/slim）；[解耦路线图索引](architecture/DECOUPLING_ROADMAP.md)；[全仓库数据流总览](architecture/PROJECT_DATAFLOW_WHOLE.md) 与 [逐项详解](architecture/PROJECT_DATAFLOW_WHOLE_详解.md)；设计点映射见 [NEWDB_DESIGN_POINT_TO_FILE_MAP.md](architecture/NEWDB_DESIGN_POINT_TO_FILE_MAP.md) |
 | [`txn/`](txn/) | 事务隔离、锁与 catalog 运维语义 |
 | [`testing/`](testing/) | 故障注入与事务/WAL 测试矩阵 |
 | [`storage/`](storage/) | 存储治理、恢复与运行时预算 |

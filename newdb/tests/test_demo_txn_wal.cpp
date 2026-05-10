@@ -100,6 +100,36 @@ bool run_wal_crash_point_and_expect_failure(const std::string& point) {
 }
 }
 
+TEST(DemoTxnWal, RecoveryUndoesMultiUpdateChainLeavingOriginalRow) {
+    const auto dir = newdb::test::unique_temp_subdir("newdb_txn_wal_undo_chain_e2e");
+    std::filesystem::create_directories(dir);
+    const std::string bin = (dir / "users.bin").string();
+    ASSERT_TRUE(newdb::io::create_heap_file(bin.c_str(), {newdb::Row{1, {{"n", "a"}}, {}}}).ok);
+
+    TxnCoordinator tx;
+    tx.set_workspace_root(dir.string());
+    ASSERT_TRUE(tx.begin("users").isOk());
+    tx.recordOperation("UPDATE", "users", "1", "n=a", "n=b");
+    ASSERT_TRUE(newdb::io::append_row(bin.c_str(), newdb::Row{1, {{"n", "b"}}, {}}).ok);
+    tx.recordOperation("UPDATE", "users", "1", "n=b", "n=c");
+    ASSERT_TRUE(newdb::io::append_row(bin.c_str(), newdb::Row{1, {{"n", "c"}}, {}}).ok);
+    tx.flushWAL();
+
+    ASSERT_TRUE(tx.recoverFromWAL());
+    const TxnRuntimeStats stats = tx.runtimeStats();
+    EXPECT_EQ(stats.wal_recovery_undo_chain_fallback_txns, 0u);
+
+    newdb::HeapTable tbl;
+    newdb::TableSchema sch;
+    sch.primary_key = "id";
+    ASSERT_TRUE(newdb::io::load_heap_file(bin.c_str(), "users", sch, tbl).ok);
+    const newdb::Row* r = tbl.find_by_id(1);
+    ASSERT_NE(r, nullptr);
+    const auto itn = r->attrs.find("n");
+    ASSERT_NE(itn, r->attrs.end());
+    EXPECT_EQ(itn->second, "a");
+}
+
 TEST(DemoTxnWal, RecoveryIsIdempotentAcrossRestarts) {
     const auto dir = newdb::test::unique_temp_subdir("newdb_txn_wal");
     std::filesystem::create_directories(dir);

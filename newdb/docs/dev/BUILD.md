@@ -2,14 +2,14 @@
 
 本文描述 `newdb/CMakeLists.txt` 常用配置、MSVC 静态 CRT（`/MT`）、MinGW 全量链接与测试命令。
 
-## C API 产物矩阵（slim / plugin / full）
+## C API 产物矩阵（官方发行 / slim / full embed）
 
-- **默认（full embed）**：`-DNEWDB_BUILD_SHARED=ON`、`-DNEWDB_SHARED_SLIM=OFF`、且未开 plugin 时，`newdb_shared` 静态链入 `newdb_capi_adapter`（dispatch / bridge / txn / WHERE / sidecar；不含交互 REPL 单独 TU）。完整 C API，**不宣称**与 CLI 代码静态解耦。参见 [MODULE_BOUNDARIES.md](../architecture/MODULE_BOUNDARIES.md) §Shared library modes。
+- **官方发行（推荐）：Plugin 成对交付**：`-DNEWDB_C_API_PLUGIN_BACKEND=ON`、`-DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON`、`-DNEWDB_BUILD_SHARED=ON`（且 **非** slim）时，宿主 `newdb_shared` **仅**链 `newdb_core`，完整会话能力由同树构建的 **`newdb_cli_backend` 共享库**在运行时加载；集成方在 `newdb_session_create` 前设置 **`NEWDB_CLI_BACKEND_PATH`**（绝对路径）。详见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)、[plugin_backend_packaging.md](../../scripts/ci/plugin_backend_packaging.md)、[INSTALL_PLUGIN.md](../../scripts/ci/INSTALL_PLUGIN.md)。**打包目录**：`cmake --build <dir> --target shared_bundle` 在 `shared_bundle/<Config>/` 下复制宿主库、backend、`README_PLUGIN.txt`、以及 `INSTALL_PLUGIN.md`（Windows 另有 `set_newdb_plugin_env.cmd`）。发行安装可选用 `-DNEWDB_INSTALL_PLUGIN_RELEASE=ON` 将二者安装到 `lib/newdb/`（见 CMakeLists 选项）。
 - **瘦构建（slim）**：`-DNEWDB_SHARED_SLIM=ON` 时，共享库仅链 `newdb_core` 与 `engine/src/api/c/c_api_slim.cpp`（桩会话 API；不链 `newdb_capi_adapter`）。输出名仍为 `newdb`（Windows）或与平台一致的 `libnewdb`。
-- **Plugin（运行时 CLI backend）**：`-DNEWDB_C_API_PLUGIN_BACKEND=ON` 且 `-DNEWDB_BUILD_CLI_BACKEND_PLUGIN=ON` 时，`newdb_shared` **仅**链 `newdb_core`，会话侧能力由运行时加载的 `newdb_cli_backend` 提供（`NEWDB_CLI_BACKEND_PATH`）。详见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)。
-- **选型**：只要引擎校验 / ABI → slim；要与 GUI/脚本共享进程且不愿静态拉入 CLI → plugin；要开箱即用单 DLL → full embed。
+- **Full embed（单库 / 便于本地一体调试）**：默认 `-DNEWDB_BUILD_SHARED=ON`、`-DNEWDB_SHARED_SLIM=OFF`、且未开 plugin 时，`newdb_shared` 静态链入 `newdb_capi_adapter`（dispatch / bridge / txn / WHERE / sidecar；不含交互 REPL 单独 TU）。完整 C API，**不宣称**与 CLI 代码静态解耦。参见 [MODULE_BOUNDARIES.md](../architecture/MODULE_BOUNDARIES.md) §Shared library modes。
+- **选型**：对外交付 / GUI 同进程集成 → **plugin**；只要引擎校验 / ABI → slim；仅本地或特殊场景要单 DLL → full embed。
 - **回归**：开启 `-DNEWDB_BUILD_TESTS=ON` 时会构建 `newdb_capi_slim_tests`（编译定义 `NEWDB_C_API_SLIM=1`），在进程内覆盖瘦 C API 的版本、`newdb_check_schema_file`、execute 错误文案与 runtime stats 桩 JSON。
-- **CMake Presets**（仓库 [`CMakePresets.json`](CMakePresets.json)）：`full-shared`（默认 embed）、`slim-shared`（`NEWDB_SHARED_SLIM=ON`）、`plugin-shared`（`NEWDB_C_API_PLUGIN_BACKEND=ON` + `NEWDB_BUILD_CLI_BACKEND_PLUGIN=ON`）。示例：`cmake --preset full-shared`，`cmake --build --preset full-shared-rel`；plugin：`cmake --preset plugin-shared`，`cmake --build --preset plugin-shared-rel`，运行前设置 **`NEWDB_CLI_BACKEND_PATH`**（见 [C_API_PLUGIN_BACKEND.md](C_API_PLUGIN_BACKEND.md)）。
+- **CMake Presets**（仓库 [`CMakePresets.json`](CMakePresets.json)）：`plugin-shared` / **`plugin-shared-release`**（官方发行矩阵）、`slim-shared`、`full-shared`（单库 embed）。示例：`cmake --preset plugin-shared-release`，`cmake --build --preset plugin-shared-release-rel`，再 `cmake --build --preset plugin-shared-release-rel --target shared_bundle`。`testPresets` 供 CMake 3.25+ 的 `ctest --preset <name>` 使用。plugin 运行前设置 **`NEWDB_CLI_BACKEND_PATH`**。
 - **Windows + gtest DLL**：`newdb_capi_slim_tests` 与 `newdb_tests` 一样在 `NEWDB_GTEST_BUILD_SHARED_DLL=ON` 时 POST_BUILD 复制运行时 DLL 到可执行文件目录，便于 `ctest -R CApiSlim` 无需手改 `PATH`。从 Visual Studio「测试资源管理器」或直接在 IDE 里运行 `newdb_capi_slim_tests.exe` 时，请确认 exe 输出目录下已有复制的 `gtest*.dll`（与 POST_BUILD 一致），或将该目录加入 PATH；命令行回归仍以 **`ctest`** 为准。
 - **为何不在 CMake 里给 `gtest_discover_tests` 配统一 `ENVIRONMENT PATH=`**：discovered 测试条目与 `newdb_capi_slim_tests` 输出目录在多配置生成器 + GTest 发现模式下不一一对应；强行注入 `'PATH=' $<TARGET_FILE_DIR:...>` 仍可能在 IDE/CTest 混用场景遗漏。当前以 POST_BUILD 复制 DLL 与在上文 PATH 说明为准。
 - **GUI / 校验脚本**：`newdb/scripts/validate` 为运行时契约与校验脚本的 **canonical**；`rust_gui/scripts/validate` 与 `rust_gui/src-tauri/resources/scripts/validate` 为打包镜像，CI 通过 `scripts/validate/check_rust_gui_validate_mirror.py` 对齐。[`rust_gui/src/commandPolicy.ts`](../../rust_gui/src/commandPolicy.ts) 仅在 GUI 源码树维护一份，无打包副本时不要求镜像门禁。
@@ -26,7 +26,7 @@ CLI/shell 按编译单元拆成若干 **`newdb_shell_*` OBJECT 库**，在 **`ne
 | `newdb_shell_dispatch` | `process_command_line`、路由与各 handler / support / services |
 | `newdb_shell_common` | logging、utils、table_view、import 等跨模块基础 |
 | `newdb_shell_catalog` | schema catalog |
-| `newdb_shell_where` | WHERE 解析与执行计划 / 统计 |
+| `newdb_query` | **STATIC**：WHERE 解析、执行计划、统计（源在 `cli/modules/where`）；由 `newdb_capi_adapter` **PUBLIC** 链接 |
 | `newdb_shell_txn` | 事务协调器与各子服务 |
 | `newdb_shell_sidecar` | 索引 sidecar、可见性、存储健康等 |
 
@@ -91,7 +91,11 @@ powershell -ExecutionPolicy Bypass -File scripts/ci/verify_clean_reconfigure.ps1
 
 ## GoogleTest 离线源码（可选）
 
-若环境无法稳定访问 GitHub，可在**已成功下载过一次**的构建目录中复用源码树，例如：
+**推荐（仓库内）**：将 googletest 源码放在与 `newdb/` 同级的 **`gtest_capi/third_party/googletest/`**（顶层含 `CMakeLists.txt`）。`newdb` 配置测试时会自动使用该目录，无需传变量。亦支持 **`gtest_capi/googletest/`** 或已有的 **`gtest_capi/_deps/googletest-src/`**。
+
+**自研跨平台 C 封装（`gtest_capi`）**：在仓库根目录的 **`gtest_capi/`** 可独立 `cmake` 出共享库（Windows 为 `gtest_capi.dll` / MinGW 为 `libgtest_capi.dll`，Linux 为 `libgtest_capi.so`），供其它语言或进程经 **C ABI** 驱动 GoogleTest。头文件为 **`gtest_capi/include/gtest_capi.h`**；在 Windows 上仅链接该 DLL 时编译定义 **`GTEST_C_API_SHARED_USE`**。安装规则：`cmake --install`（可选关 `-DGTEST_CAPI_INSTALL=OFF`）。
+
+否则可在**已成功下载过一次**的构建目录中复用源码树，例如：
 
 ```bash
 cmake -S . -B build-mt -DNEWDB_MSVC_STATIC_RUNTIME=ON \

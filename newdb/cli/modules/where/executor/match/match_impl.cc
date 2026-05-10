@@ -20,6 +20,7 @@
 #include <numeric>
 #include <optional>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 #include <unordered_map>
 #include <list>
@@ -301,5 +302,95 @@ bool parse_agg_args_with_optional_where(const std::vector<std::string>& args,
     return true;
 }
 
+namespace {
 
+const char* where_cond_op_canonical_tag(const CondOp op) {
+    switch (op) {
+    case CondOp::Eq:
+        return "EQ";
+    case CondOp::Ne:
+        return "NE";
+    case CondOp::Gt:
+        return "GT";
+    case CondOp::Lt:
+        return "LT";
+    case CondOp::Ge:
+        return "GE";
+    case CondOp::Le:
+        return "LE";
+    case CondOp::Contains:
+        return "CONTAINS";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+} // namespace
+
+std::string where_predicate_fingerprint_for_write_intent(const std::vector<WhereCond>& conds) {
+    std::string out = "wfp1";
+    for (std::size_t i = 0; i < conds.size(); ++i) {
+        if (i > 0) {
+            out.push_back('\x1e');
+            out += conds[i].logic_with_prev;
+            out.push_back('\x1f');
+        }
+        const WhereCond& c = conds[i];
+        out += c.attr;
+        out.push_back('\x1f');
+        out += where_cond_op_canonical_tag(c.op);
+        out.push_back('\x1f');
+        out += c.value;
+    }
+    return out;
+}
+
+std::optional<WhereClosedIntRangeParts> where_try_derive_closed_int_range(const newdb::TableSchema& schema,
+                                                                          const std::vector<WhereCond>& conds) {
+    if (!all_and_chain(conds) || conds.empty()) {
+        return std::nullopt;
+    }
+    std::string col;
+    bool has_ge = false;
+    bool has_le = false;
+    long long lo = 0;
+    long long hi = 0;
+    for (const auto& c : conds) {
+        if (c.op != CondOp::Ge && c.op != CondOp::Le) {
+            return std::nullopt;
+        }
+        if (col.empty()) {
+            col = c.attr;
+        } else if (c.attr != col) {
+            return std::nullopt;
+        }
+        const newdb::AttrType t = schema.type_of(col);
+        if (!(col == "id" || t == newdb::AttrType::Int)) {
+            return std::nullopt;
+        }
+        long long v = 0;
+        if (!prepare_int_rhs(c.value, v)) {
+            return std::nullopt;
+        }
+        if (c.op == CondOp::Ge) {
+            if (!has_ge || v > lo) {
+                lo = v;
+            }
+            has_ge = true;
+        } else {
+            if (!has_le || v < hi) {
+                hi = v;
+            }
+            has_le = true;
+        }
+    }
+    if (!has_ge || !has_le || lo > hi) {
+        return std::nullopt;
+    }
+    WhereClosedIntRangeParts p;
+    p.column = col;
+    p.begin_inclusive = std::to_string(lo);
+    p.end_inclusive = std::to_string(hi);
+    return p;
+}
 

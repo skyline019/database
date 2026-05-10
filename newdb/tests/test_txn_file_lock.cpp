@@ -40,6 +40,9 @@ TEST(TxnFileLock, SecondCoordinatorCannotAcquireSameTableLock) {
     // POSIX fcntl lock semantics can be process-scoped; keep assertion conservative in single-process test.
     EXPECT_TRUE(l2.isErr() || l2.isOk());
 #endif
+    if (l2.isErr()) {
+        EXPECT_GE(b.runtimeStats().file_lock_acquire_fail_count, 1u);
+    }
 
     ASSERT_TRUE(a.releaseLock(data_file.string()).isOk());
     (void)b.releaseLock(data_file.string());

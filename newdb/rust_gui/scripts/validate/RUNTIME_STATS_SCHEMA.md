@@ -62,6 +62,7 @@ Keys whose values are sourced from the CLI bridge fragment [`_generated_runtime_
 - `wal_recovery_segments_after_checkpoint` (int >= 0, optional): 参与索引的 WAL 段数（`WalRecoveryStats::indexed_segments` 镜像）
 - `wal_recovery_redo_plan_pending_txn_count` (int >= 0, optional): 重放计划阶段观测到的未提交事务数（与 CLI reconcile 中 `dangling_by_txn` 规模一致）
 - `wal_recovery_apply_conflict_count` (int >= 0, optional): redo 应用阶段因幂等/去重跳过的操作次数
+- `wal_recovery_undo_chain_fallback_txns` (int >= 0, optional): 最近一次 `recoverFromWAL` 中因 `undo_prev_lsn` 链不完整而对该数目的 dangling 事务退回 LSN 全序 undo 的次数
 - `wal_group_commit_count` (int >= 0): group commit flush 次数
 - `wal_group_commit_batch_commits` (int >= 0): group commit 累计批次提交事务数
 - `wal_group_commit_pending_commits` (int >= 0): 尚未 flush 的待批提交事务数

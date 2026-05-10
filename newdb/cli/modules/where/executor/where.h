@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <list>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -133,3 +134,16 @@ std::vector<std::size_t> build_candidate_slots(const newdb::HeapTable& tbl,
 
 bool where_policy_last_blocked(const WhereQueryContext* ctx = nullptr);
 std::string where_policy_last_message(const WhereQueryContext* ctx = nullptr);
+
+/// Stable opaque fingerprint for `LockKey::predicate_write_intent` (string equality = conflict; no semantic overlap).
+std::string where_predicate_fingerprint_for_write_intent(const std::vector<WhereCond>& conds);
+
+struct WhereClosedIntRangeParts {
+    std::string column;
+    std::string begin_inclusive;
+    std::string end_inclusive;
+};
+
+/// AND-only chain on a single int column (or `id`) using only `>=` / `<=` with integer RHS — closed interval.
+std::optional<WhereClosedIntRangeParts> where_try_derive_closed_int_range(const newdb::TableSchema& schema,
+                                                                          const std::vector<WhereCond>& conds);

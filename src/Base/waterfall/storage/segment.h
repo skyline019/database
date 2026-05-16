@@ -8,7 +8,14 @@
 //
 #pragma once
 
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4244)
+#endif
 #include <roaring/roaring.h>
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#endif
 #include <waterfall/utils/slice.h>
 #include <waterfall/utils/arena.h>
 #include "error.h"

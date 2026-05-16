@@ -69,11 +69,6 @@ void sst_bloom_add_key(std::array<std::uint8_t, kSstBloomBytes>* out, std::strin
   }
 }
 
-void sst_bloom_build_from_keys(const std::map<std::string, std::string>& sorted, std::array<std::uint8_t, kSstBloomBytes>* out) {
-  out->fill(0);
-  for (const auto& kv : sorted) sst_bloom_add_key(out, kv.first);
-}
-
 bool sst_bloom_might_contain(const std::array<std::uint8_t, kSstBloomBytes>& bits, std::string_view key) {
   bool any = false;
   for (std::size_t i = 0; i < kSstBloomBytes; ++i) {

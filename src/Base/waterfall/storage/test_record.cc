@@ -7,6 +7,9 @@
 // @email niexiaowen@uestc.edu.cn
 //
 #include <gtest/gtest.h>
+
+#include <cstdint>
+
 #include "record.h"
 #include <waterfall/utils/leb128.h>
 
@@ -415,12 +418,12 @@ TEST_F(RecordPayloadTest, FieldOffsetsEncoding)
     // 验证编码后的偏移量
     unsigned char *p = payload.get_payload();
     unsigned int length_bytes;
-    unsigned long decoded_length = utils::decode_uleb128(p, &length_bytes);
+    std::uint64_t decoded_length = utils::decode_uleb128(p, &length_bytes);
     p += length_bytes; // 跳过长度编码
     EXPECT_EQ(decoded_length, small.size() + medium.size() + large.size());
 
     unsigned int offset1_bytes, offset2_bytes, offset3_bytes;
-    unsigned long offset1_decoded, offset2_decoded, offset3_decoded;
+    std::uint64_t offset1_decoded, offset2_decoded, offset3_decoded;
     offset3_decoded = utils::decode_uleb128(p, &offset3_bytes);
     p += offset3_bytes;
     offset2_decoded = utils::decode_uleb128(p, &offset2_bytes);
@@ -465,7 +468,7 @@ TEST_F(RecordPayloadTest, EmptyFieldOffsetCalculation)
     // 验证编码结构
     unsigned char *p = payload.get_payload();
     unsigned int length_bytes;
-    unsigned long decoded_length = utils::decode_uleb128(p, &length_bytes);
+    std::uint64_t decoded_length = utils::decode_uleb128(p, &length_bytes);
     p += length_bytes;
     EXPECT_EQ(
         decoded_length,
@@ -484,7 +487,7 @@ TEST_F(RecordPayloadTest, EmptyFieldOffsetCalculation)
 
     // 验证偏移量编码
     unsigned int offset1_types, offset2_types, offset3_types, offset4_types;
-    unsigned long offset1, offset2, offset3, offset4;
+    std::uint64_t offset1, offset2, offset3, offset4;
     offset4 = utils::decode_uleb128(p, &offset4_types);
     p += offset4_types;
     EXPECT_EQ(offset4, offset4_expected);
@@ -553,7 +556,7 @@ TEST_F(RecordPayloadTest, LargeValueUleb128Encoding)
     // 验证总长度使用多字节uleb128编码
     unsigned char *p = payload.get_payload();
     unsigned int length_bytes;
-    unsigned long decoded_length = utils::decode_uleb128(p, &length_bytes);
+    std::uint64_t decoded_length = utils::decode_uleb128(p, &length_bytes);
 
     EXPECT_EQ(decoded_length, 200);
     EXPECT_GT(length_bytes, 1); // 应该使用多字节编码
@@ -581,12 +584,12 @@ TEST_F(RecordPayloadTest, FieldDataIntegrity)
     // 验证字段数据完整拷贝（包括空字节）
     unsigned char *p = payload.get_payload();
     unsigned int length_bytes;
-    unsigned long decoded_length = utils::decode_uleb128(p, &length_bytes);
+    std::uint64_t decoded_length = utils::decode_uleb128(p, &length_bytes);
     p += length_bytes; // 跳过总长度
     EXPECT_EQ(decoded_length, special_size);
 
     unsigned int offset_bytes;
-    unsigned long offset_decoded = utils::decode_uleb128(p, &offset_bytes);
+    std::uint64_t offset_decoded = utils::decode_uleb128(p, &offset_bytes);
     p += offset_bytes; // 跳过偏移量编码
     EXPECT_EQ(offset_decoded, 0);
 

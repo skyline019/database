@@ -56,8 +56,25 @@ if(STRUCTDB_BUILD_CAPI_SHARED)
   )
   target_include_directories(structdb_capi_shared_smoke PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
   target_link_libraries(structdb_capi_shared_smoke PRIVATE structdb_capi_shared gtest_capi)
+  if(_structdb_gtest_capi_type STREQUAL "SHARED_LIBRARY")
+    target_compile_definitions(structdb_capi_shared_smoke PRIVATE GTEST_C_API_SHARED_USE)
+    target_link_libraries(structdb_capi_shared_smoke PRIVATE GTest::gtest)
+  endif()
   add_test(NAME structdb_capi_shared_smoke COMMAND structdb_capi_shared_smoke)
   if(WIN32)
+    if(_structdb_gtest_capi_type STREQUAL "SHARED_LIBRARY")
+      add_custom_command(TARGET structdb_capi_shared_smoke POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:gtest>"
+          "$<TARGET_FILE_DIR:structdb_capi_shared_smoke>/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:gtest_main>"
+          "$<TARGET_FILE_DIR:structdb_capi_shared_smoke>/"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          "$<TARGET_FILE:gtest_capi>"
+          "$<TARGET_FILE_DIR:structdb_capi_shared_smoke>/"
+        VERBATIM)
+    endif()
     add_custom_command(TARGET structdb_capi_shared_smoke POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "$<TARGET_FILE:structdb_capi_shared>"

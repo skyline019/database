@@ -7,6 +7,10 @@
 // @email niexiaowen@uestc.edu.cn
 //
 #include <gtest/gtest.h>
+
+#include <cstdint>
+#include <limits>
+
 #include "leb128.h"
 
 namespace wf::utils {
@@ -27,49 +31,49 @@ class LEB128Test : public ::testing::Test
 TEST_F(LEB128Test, ULEB128EncodeDecode)
 {
     // 测试小数值
-    unsigned long value1 = 0;
+    std::uint64_t value1 = 0;
     unsigned int len1 = encode_uleb128(value1, buffer);
     EXPECT_EQ(len1, 1);
     EXPECT_EQ(buffer[0], 0x00);
 
-    unsigned long decoded1 = decode_uleb128(buffer);
+    std::uint64_t decoded1 = decode_uleb128(buffer);
     EXPECT_EQ(decoded1, value1);
 
     // 测试中等数值
-    unsigned long value2 = 127;
+    std::uint64_t value2 = 127;
     unsigned int len2 = encode_uleb128(value2, buffer);
     EXPECT_EQ(len2, 1);
     EXPECT_EQ(buffer[0], 0x7F);
 
-    unsigned long decoded2 = decode_uleb128(buffer);
+    std::uint64_t decoded2 = decode_uleb128(buffer);
     EXPECT_EQ(decoded2, value2);
 
     // 测试需要多个字节的数值
-    unsigned long value3 = 128;
+    std::uint64_t value3 = 128;
     unsigned int len3 = encode_uleb128(value3, buffer);
     EXPECT_EQ(len3, 2);
     EXPECT_EQ(buffer[0], 0x80);
     EXPECT_EQ(buffer[1], 0x01);
 
-    unsigned long decoded3 = decode_uleb128(buffer);
+    std::uint64_t decoded3 = decode_uleb128(buffer);
     EXPECT_EQ(decoded3, value3);
 
     // 测试更大的数值
-    unsigned long value4 = 624485; // 0x98985
+    std::uint64_t value4 = 624485; // 0x98985
     unsigned int len4 = encode_uleb128(value4, buffer);
     EXPECT_EQ(len4, 3);
     EXPECT_EQ(buffer[0], 0xE5);
     EXPECT_EQ(buffer[1], 0x8E);
     EXPECT_EQ(buffer[2], 0x26);
 
-    unsigned long decoded4 = decode_uleb128(buffer);
+    std::uint64_t decoded4 = decode_uleb128(buffer);
     EXPECT_EQ(decoded4, value4);
 }
 
 // 测试ULEB128填充功能
 TEST_F(LEB128Test, ULEB128Padding)
 {
-    unsigned long value = 127;
+    std::uint64_t value = 127;
 
     // 测试填充到3字节
     unsigned int len = encode_uleb128(value, buffer, 3);
@@ -78,7 +82,7 @@ TEST_F(LEB128Test, ULEB128Padding)
     EXPECT_EQ(buffer[1], 0x80); // 修正：0 | 0x80 = 0x80
     EXPECT_EQ(buffer[2], 0x00); // 修正：0 = 0x00
 
-    unsigned long decoded = decode_uleb128(buffer);
+    std::uint64_t decoded = decode_uleb128(buffer);
     EXPECT_EQ(decoded, value);
 
     // 测试填充到5字节
@@ -180,7 +184,7 @@ TEST_F(LEB128Test, ErrorHandling)
 
     // 测试缓冲区不足
     buffer[0] = 0x80; // 需要更多字节
-    unsigned long uresult = decode_uleb128(buffer, nullptr, end, &error);
+    std::uint64_t uresult = decode_uleb128(buffer, nullptr, end, &error);
     EXPECT_EQ(uresult, 0);
     EXPECT_STREQ(error, "malformed uleb128, extends past end");
 
@@ -193,11 +197,11 @@ TEST_F(LEB128Test, ErrorHandling)
 TEST_F(LEB128Test, BoundaryValues)
 {
     // 测试ULEB128最大值附近的值
-    unsigned long max_uleb128 = 0xFFFFFFFFFFFFFFFF;
+    const std::uint64_t max_uleb128 = std::numeric_limits<std::uint64_t>::max();
     unsigned int len = encode_uleb128(max_uleb128, buffer);
     EXPECT_GT(len, 0);
 
-    unsigned long decoded = decode_uleb128(buffer);
+    std::uint64_t decoded = decode_uleb128(buffer);
     EXPECT_EQ(decoded, max_uleb128);
 
     // 测试SLEB128边界值
@@ -222,9 +226,9 @@ TEST_F(LEB128Test, LengthParameter)
     unsigned int n = 0;
 
     // 测试ULEB128长度返回
-    unsigned long value = 624485;
+    std::uint64_t value = 624485;
     encode_uleb128(value, buffer);
-    unsigned long decoded = decode_uleb128(buffer, &n);
+    std::uint64_t decoded = decode_uleb128(buffer, &n);
     EXPECT_EQ(decoded, value);
     EXPECT_EQ(n, 3);
 
@@ -239,6 +243,8 @@ TEST_F(LEB128Test, LengthParameter)
 // 测试ULEB128长度计算
 TEST_F(LEB128Test, ULEB128LengthCalculation)
 {
+    constexpr std::uint64_t umax = std::numeric_limits<std::uint64_t>::max();
+
     // 测试基本边界值
     EXPECT_EQ(uleb128_length(0), 1);
     EXPECT_EQ(uleb128_length(1), 1);
@@ -271,20 +277,18 @@ TEST_F(LEB128Test, ULEB128LengthCalculation)
     EXPECT_EQ(uleb128_length(72057594037927936), 9);
 
     // 测试极大值和特殊值
-    EXPECT_EQ(
-        uleb128_length(ULONG_MAX - 2), encode_uleb128(ULONG_MAX - 2, buffer));
-    EXPECT_EQ(
-        uleb128_length(ULONG_MAX - 1), encode_uleb128(ULONG_MAX - 1, buffer));
-    EXPECT_EQ(uleb128_length(ULONG_MAX), encode_uleb128(ULONG_MAX, buffer));
+    EXPECT_EQ(uleb128_length(umax - 2), encode_uleb128(umax - 2, buffer));
+    EXPECT_EQ(uleb128_length(umax - 1), encode_uleb128(umax - 1, buffer));
+    EXPECT_EQ(uleb128_length(umax), encode_uleb128(umax, buffer));
 
     // 测试随机值
     EXPECT_EQ(uleb128_length(12345), encode_uleb128(12345, buffer));
     EXPECT_EQ(uleb128_length(987654), encode_uleb128(987654, buffer));
     EXPECT_EQ(uleb128_length(123456789), encode_uleb128(123456789, buffer));
-    EXPECT_EQ(uleb128_length(9876543210), encode_uleb128(9876543210, buffer));
+    EXPECT_EQ(uleb128_length(9876543210ULL), encode_uleb128(9876543210ULL, buffer));
 
     // 验证长度计算与编码结果一致（扩展测试集）
-    unsigned long test_values[] = {
+    const std::uint64_t test_values[] = {
         0,
         1,
         126,
@@ -306,14 +310,14 @@ TEST_F(LEB128Test, ULEB128LengthCalculation)
         4398046511104,
         562949953421311,
         562949953421312,
-        72057594037927935,
-        72057594037927936,
-        ULONG_MAX - 1,
-        ULONG_MAX,
+        72057594037927935ULL,
+        72057594037927936ULL,
+        umax - 1,
+        umax,
         12345,
         987654,
         123456789,
-        9876543210};
+        9876543210ULL};
 
     for (auto value : test_values) {
         unsigned int encoded_len = encode_uleb128(value, buffer);

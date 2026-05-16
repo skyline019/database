@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 #include "error.h"
 
 #if !defined(unlikely)
@@ -28,41 +30,39 @@
 namespace wf::utils {
 
 /// Utility function to calculate the length in bytes of a ULEB128 encoded
-/// value.
-/// Uses simple conditional checks.
-inline unsigned int uleb128_length(unsigned long value)
+/// value (full 64-bit range; avoids LLP64 `unsigned long` / `size_t` mismatches).
+inline unsigned int uleb128_length(std::uint64_t value)
 {
-    if (value < 128UL) // 2^7
+    if (value < (1ULL << 7))
         return 1;
-    else if (value < 16384UL) // 2^14
+    if (value < (1ULL << 14))
         return 2;
-    else if (value < 2097152UL) // 2^21
+    if (value < (1ULL << 21))
         return 3;
-    else if (value < 268435456UL) // 2^28
+    if (value < (1ULL << 28))
         return 4;
-    else if (value < 34359738368UL) // 2^35
+    if (value < (1ULL << 35))
         return 5;
-    else if (value < 4398046511104UL) // 2^42
+    if (value < (1ULL << 42))
         return 6;
-    else if (value < 562949953421312UL) // 2^49
+    if (value < (1ULL << 49))
         return 7;
-    else if (value < 72057594037927936UL) // 2^56
+    if (value < (1ULL << 56))
         return 8;
-    else if (value < 9223372036854775808UL) // 2^63 ✅ 修正这里
+    if (value < (1ULL << 63))
         return 9;
-    else
-        return 10; // 2^63 ~ 2^64-1
+    return 10;
 }
 
 /// Utility function to encode a ULEB128 value to a buffer. Returns
 /// the length in bytes of the encoded value.
 inline unsigned int
-encode_uleb128(unsigned long value, unsigned char *p, unsigned int padto = 0)
+encode_uleb128(std::uint64_t value, unsigned char *p, unsigned int padto = 0)
 {
     unsigned char *orig_p = p;
     unsigned int count = 0;
     do {
-        unsigned char Byte = value & 0x7f;
+        unsigned char Byte = static_cast<unsigned char>(value & 0x7f);
         value >>= 7;
         count++;
         if (value != 0 || count < padto)
@@ -84,14 +84,14 @@ encode_uleb128(unsigned long value, unsigned char *p, unsigned int padto = 0)
 ///
 /// If \p error is non-null, it will point to a static error message,
 /// if an error occurred. It will not be modified on success.
-inline unsigned long decode_uleb128(
+inline std::uint64_t decode_uleb128(
     const unsigned char *p,
     unsigned int *n = nullptr,
     const unsigned char *end = nullptr,
     const char **error = nullptr)
 {
     const unsigned char *orig_p = p;
-    unsigned long value = 0;
+    std::uint64_t value = 0;
     unsigned int shift = 0;
     do {
         if (unlikely(p == end)) {
@@ -99,7 +99,7 @@ inline unsigned long decode_uleb128(
             value = 0;
             break;
         }
-        unsigned long Slice = *p & 0x7f;
+        const std::uint64_t Slice = static_cast<std::uint64_t>(*p & 0x7f);
         if (unlikely(shift >= 63) &&
             ((shift == 63 && (Slice << shift >> shift) != Slice) ||
              (shift > 63 && Slice != 0))) {

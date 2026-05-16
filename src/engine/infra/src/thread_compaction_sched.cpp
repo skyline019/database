@@ -14,7 +14,9 @@ void apply_compaction_background_thread_scheduling(bool enable, const char* thre
   if (thread_name && thread_name[0] != '\0') {
     (void)pthread_setname_np(pthread_self(), thread_name);
   }
-  (void)nice(10);
+  if (nice(10) == -1) {
+    // Ignore priority adjustment failure (capabilities / container limits).
+  }
   sched_param sp{};
   sp.sched_priority = 0;
   (void)pthread_setschedparam(pthread_self(), SCHED_IDLE, &sp);

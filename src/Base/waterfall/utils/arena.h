@@ -123,7 +123,7 @@ class arena_allocator
     }
 
     // 释放内存（arena通常不释放单个对象）
-    void deallocate(T *p, size_type n) noexcept
+    void deallocate(T *, size_type) noexcept
     {
         // arena分配器不释放单个对象
     }

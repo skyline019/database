@@ -42,7 +42,8 @@ target_link_libraries(structdb_infra PUBLIC
 )
 
 if(MSVC)
-  target_compile_options(structdb_infra PRIVATE /W4 /permissive-)
+  # fmt/spdlog headers trigger C4127 (constant conditional) under /W4; not actionable here.
+  target_compile_options(structdb_infra PRIVATE /W4 /permissive- /wd4127)
 else()
   target_compile_options(structdb_infra PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()

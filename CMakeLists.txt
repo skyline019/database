@@ -18,6 +18,12 @@ option(STRUCTDB_FETCH_FMT_SPDLOG_BENCHMARK
   "Use CMake FetchContent for fmt, spdlog, and Google Benchmark (OFF = ThirdParty/ vendors)"
   OFF)
 
+# Static .a members are linked straight into libstructdb_capi_shared.so; on ELF they must be PIC
+# or the linker rejects TLS relocations (e.g. R_X86_64_TPOFF32 from infra/tracer.cpp).
+if(STRUCTDB_BUILD_CAPI_SHARED AND NOT MSVC)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 if(MSVC AND STRUCTDB_STATIC_MSVC_RUNTIME)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()

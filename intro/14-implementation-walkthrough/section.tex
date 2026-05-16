@@ -1,0 +1,211 @@
+\section{关键实现导读（核心数据结构与方法）}
+\label{sec:impl-walkthrough}
+
+\noindent\textbf{体例（核心摘录）：}只收录与\textbf{门面生命周期、写路径预算、压力到调度器映射}直接相关的\textbf{配置快照头部字段}、\textbf{RAII 预算类}与\textbf{少量完整方法}；\texttt{startup} 中大量重复的 \texttt{storage\_->set\_*} 以注释一笔带过。\textbf{字段全集}见第 \ref{sec:runtime-params} 节表与 \fpath{config.hpp}；\textbf{解析链}见第 \ref{sec:parsing-entry} 节。
+
+% ------------------------------------------------------------------
+\subsection{核心数据结构：\texttt{EngineConfigSnapshot}（节选）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=12]
+struct EngineConfigSnapshot {
+  std::uint64_t version{0};
+  std::string data_dir{"_data"};
+  std::uint64_t memtable_limit_bytes{8 * 1024 * 1024};
+  structdb::storage::MemTableBackend memtable_backend{structdb::storage::MemTableBackend::SkipList};
+  bool fsync_every_write{false};
+  unsigned storage_open_flags{0};
+  // ... WAL 裁剪、L0--L4 合并、I/O 后端、节流、压力阈值、MDB/24A、kv_put 异步队列等
+  // ... 数十成员，见 config.hpp 与本手册「引擎内存配置」节长表 ...
+  std::uint32_t kv_put_async_queue_depth{0};
+};
+\end{lstlisting}
+
+\textbf{说明：}\texttt{Engine::startup} / \texttt{kv\_put} 只\textbf{读取}该快照的字段子集；\texttt{structdb\_app} 仅在 argv 路径写入 \texttt{data\_dir}（见第 \ref{sec:parsing-entry} 节）。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{WalMutationBudget} 与 WAL 队列槽（RAII）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=25]
+Engine::WalMutationBudget::WalMutationBudget(Engine* e, std::uint64_t approx_wal_frame_bytes) : eng(e) {
+  if (!eng) return;
+  const auto snap = eng->config().snapshot();
+  slots = eng->wal_scheduler_slots_for_frame_bytes_(approx_wal_frame_bytes, snap);
+  if (slots) eng->wal_scheduler_acquire_blocking_(slots);
+}
+
+Engine::WalMutationBudget::~WalMutationBudget() {
+  if (eng && slots) eng->wal_scheduler_release_slots_(slots);
+}
+
+std::uint32_t Engine::wal_scheduler_slots_for_frame_bytes_(...) const { /* 换算 + 上限，见仓库 L36--48 */ }
+
+void Engine::wal_scheduler_acquire_blocking_(std::uint32_t slots) {
+  if (slots == 0 || !orch_) return;
+  for (;;) {
+    std::string why;
+    if (orch_->scheduler().budget().try_acquire(scheduler::ResourceType::WalQueueDepth,
+                                                static_cast<std::int64_t>(slots), &why)) {
+      return;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+\end{lstlisting}
+
+\textbf{要点：}这是\textbf{数据结构式}的写路径闸门：构造借槽、析构归还；\texttt{try\_acquire} 失败则忙等 1ms，与调度器 \texttt{WalQueueDepth} 资源一一对应。槽换算细节（按字节除、每 op 上限、百万硬顶）见仓库 L36--48。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{Engine::startup}（骨架）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=126]
+bool Engine::startup(std::string* error_out) {
+  auto snap = config_.snapshot();
+  if (snap.data_dir.empty()) { /* ... */ }
+  // const std::filesystem::path data_dir_path = ...（u8path 见仓库 L134--137）
+  storage_ = std::make_shared<storage::StorageEngine>(data_dir_path);
+  storage_->set_exclusive_directory_lock(snap.exclusive_data_dir_lock);
+  storage_->set_wal_io_backend(snap.io_backend);
+  // ... open 前：分段上限、memtable_backend ...
+  if (!storage_->open(error_out, snap.storage_open_flags)) return false;
+  // ... open 后：WAL/合并节流/并行读/L0--L4 开关等 20+ 次 storage_->set_*（见仓库 L146--168） ...
+  if (snap.enable_compaction_worker) { /* start_compaction_worker */ }
+
+  auto budget = std::make_shared<scheduler::ResourceBudget>();
+  auto sched = std::make_shared<scheduler::ExecutionScheduler>(budget);
+  auto exec = std::make_shared<runtime::GraphExecutor>();
+  exec->register_operator("noop", /* ... */);
+  exec->register_operator("flush_memtable", /* ... */);
+  exec->register_operator("checkpoint", /* ... */);
+  exec->register_operator("drain_l0_compaction", /* ... */);
+  orchestrator::PlanBuilder builder = [defer_l0_compact](std::uint64_t epoch) { /* noop 或 noop+drain */ };
+  orch_ = std::make_shared<orchestrator::Orchestrator>(sched, exec, std::move(builder));
+  orch_->set_before_graph_execute([this]() { sync_scheduler_budget_from_storage_pressure(); });
+  if (!orch_->run_default(&err)) return false;
+  sync_scheduler_budget_from_storage_pressure();
+  if (snap.kv_put_async_queue_depth > 0) { /* 启动 kv_put_worker_thread_ */ }
+  infra::trace_install_from_env_once();
+  return true;
+}
+\end{lstlisting}
+
+\textbf{要点：}顺序语义：\textbf{存储可打开} $\rightarrow$ \textbf{注入节流与合并策略} $\rightarrow$ \textbf{注册算子与默认图} $\rightarrow$ \textbf{首次 run\_default} $\rightarrow$ \textbf{压力同步} $\rightarrow$ \textbf{可选异步写线程}。中间 \texttt{set\_*} 块是\textbf{配置快照到存储引擎}的机械映射，故不全文照印。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{shutdown}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=222]
+void Engine::shutdown() {
+  mdb_chain_txn_active_hint_.store(false, std::memory_order_relaxed);
+  stop_kv_put_worker_join_();
+  if (storage_) storage_->close();
+  orch_.reset();
+  storage_.reset();
+  services_.clear();
+}
+\end{lstlisting}
+
+\textbf{要点：}与 \texttt{startup} 逆序释放资源；先停异步写线程，再关存储，避免并发 \texttt{put} 悬在已关闭引擎上。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{kv\_put}（24A + 异步队列 + 同步 WAL 预算）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=236]
+bool Engine::kv_put(const std::string& key, const std::string& value, bool fsync_wal) {
+  if (!storage_) return false;
+  const auto snap = config_.snapshot();
+  const bool hint = mdb_chain_txn_active_hint_.load(std::memory_order_relaxed);
+  if (hint && snap.mdb_chain_rollback_on_mdb_rollback && snap.mdb_persist_in_begin && key_is_mdb_catalog(key)) {
+    if (snap.observe_embed_bypass_during_mdb_chain_txn) { /* fetch_add 计数 + 可选 log_debug */ }
+    if (snap.strict_reject_direct_kv_put_during_mdb_chain_txn) {
+      return false;
+    }
+  }
+  if (snap.kv_put_async_queue_depth > 0) {
+    // 有界队列 + future::get()，队列满立即 false；线程内仍走 WalMutationBudget（见 kv_put_worker_loop_）
+  }
+  {
+    const std::uint64_t est = storage::StorageEngine::estimate_put_wal_frame_bytes(key, value);
+    WalMutationBudget budget(this, est);
+    const bool ok = storage_->put(key, value, fsync_wal);
+    if (ok) sync_scheduler_budget_from_storage_pressure();
+    return ok;
+  }
+}
+\end{lstlisting}
+
+\textbf{要点：}24A 仅对 \texttt{mdb\$*} 键在链式事务 hint 打开时生效；同步路径三件套：\textbf{估计 WAL 帧} $\rightarrow$ \textbf{预算 RAII} $\rightarrow$ \textbf{put + 压力回调}。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{sync\_scheduler\_budget\_from\_storage\_pressure}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=332]
+void Engine::sync_scheduler_budget_from_storage_pressure() {
+  if (!orch_ || !storage_) return;
+  const auto snap = config_.snapshot();
+  structdb::storage::StoragePressureSnapshot p{};
+  storage_->read_storage_pressure_snapshot(&p);
+
+  std::int64_t wal_delta = 0;
+  if (snap.storage_pressure_l0_soft_start > 0 && p.l0_files >= snap.storage_pressure_l0_soft_start) {
+    wal_delta -= static_cast<std::int64_t>((p.l0_files - snap.storage_pressure_l0_soft_start + 1) * 64);
+  }
+  if (snap.storage_pressure_wal_bytes_soft_start > 0 && p.wal_bytes >= snap.storage_pressure_wal_bytes_soft_start) {
+    // ... excess / step，扣减 wal_delta（见仓库 L342--347） ...
+  }
+  orch_->scheduler().budget().set_wal_queue_depth_pressure_delta(wal_delta);
+
+  std::int64_t cs_delta = 0;
+  // ... compaction 队列百分比 + pending_deferred_l0（见仓库 L351--358） ...
+  orch_->scheduler().budget().set_compaction_slots_pressure_delta(cs_delta);
+}
+\end{lstlisting}
+
+\textbf{要点：}从存储层\textbf{只读压力快照}，算出两个\textbf{增量}写回调度器预算；具体阈值字段含义对照 \texttt{EngineConfigSnapshot} 表。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{kv\_get}、\texttt{kv\_visit\_prefix}（读路径无 WAL 预算）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=231]
+bool Engine::kv_get(const std::string& key, std::string* value_out, std::uint64_t read_max_seq) const {
+  if (!storage_) return false;
+  return storage_->get(key, value_out, read_max_seq);
+}
+
+void Engine::kv_visit_prefix(std::string_view prefix,
+                             const std::function<bool(std::string_view, std::string_view)>& visitor,
+                             std::uint64_t read_max_seq) const {
+  if (!storage_) return;
+  storage_->visit_prefix(prefix, visitor, read_max_seq);
+}
+\end{lstlisting}
+
+\textbf{要点：}门面\textbf{不}在读路径上申请 \texttt{WalMutationBudget}；读可见性完全由 \texttt{StorageEngine::get}/\texttt{visit\_prefix} 与 \texttt{read\_max\_seq} 参数化（与 \texttt{mdb\_storage\_read\_seq\_for\_script} 组合，见第 \ref{sec:parsing-entry} 节）。头文件重载将缺省 \texttt{read\_max\_seq} 设为 \texttt{numeric\_limits<uint64\_t>::max()}，即``读到最新已提交''。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{kv\_remove}（墓碑 WAL 估计 + 预算）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=277]
+bool Engine::kv_remove(const std::string& key, bool fsync_wal) {
+  if (!storage_) return false;
+  const std::uint64_t est =
+      storage::StorageEngine::estimate_put_wal_frame_bytes(key, std::string(storage::versioned_kv::kTomb));
+  WalMutationBudget budget(this, est);
+  const bool ok = storage_->remove(key, fsync_wal);
+  if (ok) sync_scheduler_budget_from_storage_pressure();
+  return ok;
+}
+\end{lstlisting}
+
+\textbf{要点：}删除与写入共享同一 WAL 帧大小估计函数，值载荷替换为版本化 KV 的\textbf{墓碑常量}；成功删除后同样刷新调度器压力视图。
+
+% ------------------------------------------------------------------
+\subsection{维护与重入：\texttt{drain\_l0\_compaction\_queue} 与 \texttt{rerun\_default\_pipeline}}
+
+\texttt{Engine::drain\_l0\_compaction\_queue} 在配置 \texttt{enable\_compaction\_worker} 为真时转调 \texttt{StorageEngine::enqueue\_drain\_l0\_compaction\_and\_wait}（带 worker 等待与优先级）；否则走同步 \texttt{drain\_pending\_l0\_compactions}。这是 Phase13 ``推迟 L0 合并'' 与运维 API 的\textbf{显式排空}入口。
+
+\texttt{rerun\_default\_pipeline} 在已构造 \texttt{Orchestrator} 时调用 \texttt{orch\_->replan\_and\_run}，用于在存储状态或配置变化后\textbf{重新执行}默认维护图（与 \texttt{startup} 末首次 \texttt{run\_default} 对称，但不含存储 open）。
+
+% ------------------------------------------------------------------
+\subsection{\texttt{storage\_pressure\_snapshot}（观测面）}
+
+\texttt{Engine::storage\_pressure\_snapshot} 将 \texttt{StorageEngine::read\_storage\_pressure\_snapshot} 结果写出，并在锁内附加门面异步写队列当前深度与容量（\texttt{facade\_kv\_put\_queue\_depth} / \texttt{facade\_kv\_put\_queue\_cap}），使单一结构体同时承载\textbf{L0/WAL/合并队列}与\textbf{门面队列}压力，便于 GUI 或测试断言。

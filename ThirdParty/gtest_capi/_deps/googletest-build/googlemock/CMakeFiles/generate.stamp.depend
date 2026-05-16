@@ -1,0 +1,10 @@
+# CMake generation dependency list for this directory.
+E:/CMake/share/cmake-4.3/Modules/CheckCSourceCompiles.cmake
+E:/CMake/share/cmake-4.3/Modules/CheckIncludeFile.cmake
+E:/CMake/share/cmake-4.3/Modules/CheckLibraryExists.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPackageHandleStandardArgs.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPackageMessage.cmake
+E:/CMake/share/cmake-4.3/Modules/FindThreads.cmake
+E:/db/DB/newdb/build/_deps/googletest-src/googlemock/CMakeLists.txt
+E:/db/DB/newdb/build/_deps/googletest-src/googlemock/cmake/gmock.pc.in
+E:/db/DB/newdb/build/_deps/googletest-src/googlemock/cmake/gmock_main.pc.in

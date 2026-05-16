@@ -1,0 +1,1 @@
+StructDB GUI 额外脚本目录。请将 CMake 生成的 structdb_capi_shared.dll、structdb_app.exe 同步到 ../bin/（见 gui/rust_gui/scripts/sync_runtime_binaries.ps1）。微基准与集成测试请在仓库根用 CMake 构建并运行 structdb_bench / structdb_tests（见 tests/CMakeLists.txt、benchmarks/CMakeLists.txt）。

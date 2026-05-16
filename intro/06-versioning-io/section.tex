@@ -1,0 +1,131 @@
+\section{版本化编码、WAL 帧与 MemTable 语义}
+\label{sec:mod-versioning}
+
+\subsection{\texttt{versioned\_kv} 命名空间}
+
+\fpath{src/engine/storage/include/structdb/storage/versioned_kv.hpp}
+
+\begin{itemize}
+  \item \texttt{kTomb}：逻辑删除 tomb 常量 \texttt{mdb:tomb}。
+  \item \texttt{kVerPrefix}：物理存储前缀 \texttt{mdbver1:}。
+  \item \texttt{key\_versions\_persist(key)}：\textbf{仅} \texttt{mdb\$*} 前缀键参与 \texttt{commit\_seq} 包裹；测试可用非 \texttt{mdb\$} 原始键绕过版本层。
+  \item \texttt{wrap\_payload(payload, commit\_seq)}：编码为 \texttt{mdbver1:<16-hex-seq>:payload}。
+  \item \texttt{unwrap\_visible(stored, read\_max\_seq, body\_out, commit\_seq\_out?)}：若 \texttt{commit\_seq > read\_max\_seq} 或 tomb 则视为不可见；\texttt{read\_max\_seq == max()} 表示不裁剪上界。
+\end{itemize}
+
+\textbf{算法要点}：读路径在 MemTable/SST 上取多版本候选后，用 \texttt{read\_max\_seq} 与 tomb 规则\textbf{选出单一可见逻辑体}；与 MVCC 全行版本链\textbf{不等价}（见 \fpath{Docs/POLICY.md}）。
+
+\subsection{逻辑表键空间 \texttt{mdb\_keyspace}}
+
+\fpath{src/engine/storage/include/structdb/storage/mdb_keyspace.hpp}
+
+\begin{itemize}
+  \item 前缀常量：\texttt{kV2}、\texttt{kRow}、\texttt{kSchema}、\texttt{kRowIndex}、\texttt{kCatalog}、\texttt{kSecIdx}（预留）。
+  \item 工厂：\texttt{row\_key(table,pk)}、\texttt{schema\_key(table)}、\texttt{row\_index\_key(table)}、\texttt{catalog\_key(table)}。
+\end{itemize}
+
+\subsection{WAL 记录布局（\texttt{WalWriter}）}
+
+\fpath{src/engine/storage/include/structdb/storage/wal.hpp}
+
+\begin{itemize}
+  \item 管道约束：单条 \texttt{append\_record} 内 \textbf{uint32 小端长度前缀 + payload} 连续追加，\texttt{fsync=true} 时在返回前把该记录刷稳。
+  \item \textbf{Compaction 通道}不调用 \texttt{WalWriter}；合并只读写 SST/临时文件（与 WAL fd 隔离）。
+  \item \texttt{wal\_replay\_from\_offset(wal\_path, start\_offset, ...)}：从偏移重放；\textbf{尾部不完整帧忽略}（崩溃尾安全）。
+  \item 节流：\texttt{set\_fsync\_min\_interval\_ms}、\texttt{set\_append\_max\_bytes\_per\_second}/\texttt{burst}；统计量 \texttt{append\_throttle\_sleep\_ns\_total}、\texttt{append\_frame\_bytes\_committed\_total}。
+\end{itemize}
+
+\subsection{\texttt{MemTable}（\texttt{Map} 后端）}
+
+\fpath{src/engine/storage/include/structdb/storage/memtable.hpp}
+
+\begin{itemize}
+  \item 底层 \texttt{std::map<std::string,std::string,std::less<>>}；\textbf{非线程安全}，由 \texttt{StorageEngine::mu\_} 保护或只读冻结视图。
+  \item \texttt{has\_key} vs \texttt{get}：区分缺失与 tomb 占位。
+  \item \texttt{merge\_missing\_from(donor)}：flush 物化失败时把 donor 中\textbf{本表缺失}键合并回来（rollback 合并策略）。
+  \item \texttt{seal\_dump(chunk\_writer)}：按序序列化 length-prefixed kv，供 SST 物化。
+  \item \texttt{for\_each\_sorted\_prefix} / \texttt{...\_overlay}：前缀范围扫描与跨层 overlay（MemTable 覆盖旧冻结表）。
+\end{itemize}
+
+\subsection{\texttt{MemTableBackend::SkipList}}
+
+另一后端实现于 \fpath{src/engine/storage/include/structdb/storage/memtable_skiplist.hpp} / \fpath{src/engine/storage/src/memtable_skiplist.cpp}；在相同 \texttt{IMemTable} 接口下替换热路径数据结构，默认由 \texttt{EngineConfigSnapshot::memtable\_backend} 选择。
+
+\subsection{学术解析：版本化与读视图的语义位置}
+
+本模块位于 L5 内部，是 \texttt{StorageEngine::get/put} 与物理字节串之间的\textbf{编解码与可见性层}。\texttt{wrap\_payload}/\texttt{unwrap\_visible} 将 \texttt{commit\_seq} 嵌入 \texttt{mdb\$*} 键对应值，使\textbf{单调提交序列}成为读裁剪的\textbf{唯一标量参数}；这与经典 MVCC 的「多版本元组链」不同：StructDB 在实现上选择\textbf{前缀键空间 + 版本化 blob} 以简化嵌入表与 WAL 重放（见 \fpath{Docs/POLICY.md} 与 \fpath{versioned\_kv.hpp} 注释）。\textbf{方法层面}：\texttt{unwrap\_visible} 在 MemTable 与 SST 迭代器汇合后执行\textbf{确定性}择一；失败路径（tomb、越界 seq）统一为 miss，避免调用方分支爆炸。
+
+\subsection{核心代码：\texttt{versioned\_kv} 头文件契约}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=10]
+inline constexpr std::string_view kTomb = "mdb:tomb";
+inline constexpr std::string_view kVerPrefix = "mdbver1:";
+bool key_versions_persist(std::string_view key);
+std::string wrap_payload(std::string_view payload, std::uint64_t commit_seq);
+bool unwrap_visible(std::string_view stored, std::uint64_t read_max_seq, std::string* body_out,
+                    std::uint64_t* commit_seq_out = nullptr);
+inline std::uint64_t read_seq_latest() { return (std::numeric_limits<std::uint64_t>::max)(); }
+\end{lstlisting}
+
+\textbf{解释：}仅 \texttt{mdb\$*} 键走版本持久化；\texttt{kTomb} 为逻辑删除占位；\texttt{read\_seq\_latest()} 即 \texttt{UINT64\_MAX}，表示读路径不裁剪提交序上界。
+
+\subsection{核心代码：\texttt{wrap\_payload} 与 \texttt{unwrap\_visible}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=35]
+std::string wrap_payload(std::string_view payload, std::uint64_t commit_seq) {
+  std::ostringstream o;
+  o << kVerPrefix;
+  write_hex16(o, commit_seq);
+  o << ':';
+  o.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+  return o.str();
+}
+
+bool unwrap_visible(std::string_view stored, std::uint64_t read_max_seq, std::string* body_out,
+                    std::uint64_t* commit_seq_out) {
+  if (stored == kTomb) return false;
+  if (stored.compare(0, kVerPrefix.size(), kVerPrefix) != 0) {
+    if (body_out) body_out->assign(stored.begin(), stored.end());
+    return true;  // 非版本化原始键（测试路径）
+  }
+  // ... 解析 16 位 hex commit_seq ...
+  if (cap != read_seq_latest() && seq > cap) return false;
+  if (body_out) body_out->assign(stored.begin() + colon + 1, stored.end());
+  return true;
+}
+\end{lstlisting}
+
+\textbf{解释：}物理值格式为 \texttt{mdbver1:<16-hex-seq>:payload}；\texttt{unwrap} 时若 \texttt{commit\_seq > read\_max\_seq}（且非 latest）则不可见；tomb 恒不可见。非 \texttt{mdbver1:} 前缀按\textbf{原始字节}返回，供非 \texttt{mdb\$} 测试键绕过版本层。
+
+\subsection{核心代码：WAL 追加管道注释}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=19]
+/// (1) append little-endian uint32_t record length;
+/// (2) append payload bytes contiguously;
+/// (3) when fsync is true, sync() before return.
+/// Compaction channel: merge I/O does NOT call WalWriter::append_record.
+class WalWriter {
+ public:
+  bool append_record(const void* data, std::size_t len, bool fsync);
+  bool sync();
+  void set_fsync_min_interval_ms(std::uint32_t ms);
+  void set_append_max_bytes_per_second(std::uint64_t bytes_per_sec);
+};
+\end{lstlisting}
+
+\textbf{解释：}每条 WAL 记录 = 4 字节小端长度 + 载荷；\texttt{fsync=true} 时在返回前落盘，定义\textbf{记录级耐久边界}。合并物化只读写 SST/临时文件，与 WAL fd \textbf{隔离}，避免 I/O 争用（第 \ref{sec:mod-compaction-recovery} 节）。
+
+\subsection{核心代码：\texttt{MemTable} 接口要点}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=14]
+/// Threading: not synchronized; under StorageEngine::mu_ or frozen flush view.
+class MemTable final : public IMemTable {
+ public:
+  bool has_key(std::string_view key) const override;
+  bool get_raw(std::string_view key, std::string* stored_out) const override;
+  void merge_missing_from(const IMemTable& donor) override;
+  bool seal_dump(const std::function<bool(const void*, std::size_t)>& chunk_writer) const override;
+};
+\end{lstlisting}
+
+\textbf{解释：}\texttt{get\_raw} 返回含 tomb 的存储字节；\texttt{get} 经 \texttt{unwrap\_visible} 才得逻辑值。\texttt{merge\_missing\_from} 在 flush 失败时将 donor 中缺失键合并回本表，实现\textbf{物化失败回滚}。\texttt{seal\_dump} 按 key 序 length-prefixed 序列化，供 SST 物化（第 \ref{sec:mod-storage} 节 \texttt{flush\_memtable}）。

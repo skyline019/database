@@ -1,0 +1,49 @@
+\section{文档定位与约定}
+
+\subsection{本文不是「在 WSL 里编数据库」}
+
+\begin{itemize}
+  \item \textbf{StructDB 引擎与 C++ 客户端库} 的\textbf{目标名、链接关系、可选开关与依赖}，以仓库根及各子目录 \fpath{CMakeLists.txt} 为准（摘要见第 \ref{sec:cmake-build} 节）；\fpath{README.md} 仅为\textbf{人机可读}的操作提示。\textbf{GUI} 打包与宿主环境见 \fpath{gui/rust_gui/README.md}；不变式与耐久语义见 \fpath{Docs/POLICY.md}（Windows MSVC、Linux GCC、交叉编译等\textbf{不在}本 PDF 中展开为逐步操作手册）。
+  \item 本目录 \fpath{intro/build\_wsl.sh} 与 \fpath{intro/README.md} 中的 \textbf{WSL} 段落，\textbf{仅指}：在 Ubuntu/WSL 上安装 TeX Live 并用 \texttt{latexmk} 生成 \textbf{\texttt{intro/out/structdb-intro.pdf}}。
+\end{itemize}
+
+\subsection{与 Markdown 文档的关系}
+
+\begin{itemize}
+  \item 第 \ref{sec:doc-academic}--\ref{sec:core-corpus} 节给出\textbf{学术体例、整体分层架构图、源码核心模块导航表}；第 \ref{sec:repo-tree} 节给出\textbf{目录树、数据/控制平面投影、GUI/C API 边界}；后续各章按模块展开方法语义。
+  \item \textbf{权威长文}（事务链、WAL 重放判别、checkpoint v2、各 PHASE 里程碑）仍在 \fpath{Docs/} 与 \fpath{Docs/phases/}；与本文关系见第 \ref{sec:doc-academic} 节。
+  \item 本 PDF 目标：\textbf{按源码模块}给出类型与 API；对\textbf{解析链、门面热路径}等附\textbf{核心数据结构 + 关键方法}源码摘录（\textbf{非}全文件逐行），并配中文解析，便于离线阅读时与 Git 行号对照。
+  \item 若本 PDF 与 \fpath{Docs/POLICY.md} 或某 \fpath{PHASE*.md} 冲突，\textbf{以 Markdown + 当前源码为准}。
+\end{itemize}
+
+\subsection{符号与路径}
+
+\begin{itemize}
+  \item \fpath{src/engine/facade/include/...} 等路径均相对于仓库根。
+  \item \texttt{mdb\$} 表示键前缀字面量 \texttt{mdb} + \texttt{\$}（LaTeX 中转义）。
+\end{itemize}
+
+\subsection{核心代码体例：各章均附摘录与讲解}
+
+\textbf{约定：}自第 \ref{sec:doc-academic} 节起，\textbf{每一章}在文字架构说明之外，均包含至少一处 \texttt{lstlisting} 形式的\textbf{核心源码摘录}（数据结构、枢纽方法或 CMake/测试锚点），并附\textbf{逐段中文语义解析}。摘录原则如下：
+
+\begin{itemize}
+  \item \textbf{行号}：\texttt{firstnumber=} 对齐仓库当前 \fpath{.cpp/.hpp} 行号，便于 IDE 跳转；中间以 \texttt{// ...} 或正文``省略''标注机械重复段。
+  \item \textbf{非全文件}：枚举全集、冗长 \texttt{set\_*} 映射、日志字符串不照印；完整上下文以 Git 为准。
+  \item \textbf{权威冲突}：摘录解释若与 \fpath{Docs/POLICY.md} 不一致，以 Markdown + 源码为准。
+\end{itemize}
+
+下列为 \fpath{intro/main.tex} 中全局 \texttt{lstset} 配置（决定 PDF 中代码块排版），与正文摘录风格一致：
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=25]
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  breaklines=true,
+  frame=single,
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{black!60},
+}
+\end{lstlisting}
+
+\textbf{说明：}实际 PDF 使用 \texttt{listings} 宏包渲染 C++；上框为 LaTeX 源中的配置片段本身，非 C++ 引擎代码。

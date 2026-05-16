@@ -1,0 +1,114 @@
+{
+  "context": {
+    "date": "2026-05-13T23:20:21+08:00",
+    "host_name": "VOYAGERSTAR",
+    "executable": "E:\\db\\StructDB\\build_phase29\\benchmarks\\Release\\structdb_bench.exe",
+    "num_cpus": 20,
+    "mhz_per_cpu": 2918,
+    "caches": [
+      {
+        "type": "Data",
+        "level": 1,
+        "size": 49152,
+        "num_sharing": 2
+      },
+      {
+        "type": "Instruction",
+        "level": 1,
+        "size": 32768,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 2,
+        "size": 1310720,
+        "num_sharing": 2
+      },
+      {
+        "type": "Unified",
+        "level": 3,
+        "size": 25165824,
+        "num_sharing": 20
+      }
+    ],
+    "load_avg": [],
+    "library_version": "v1.9.5",
+    "library_build_type": "release",
+    "json_schema_version": 1
+  },
+  "benchmarks": [
+    {
+      "name": "BM_MemTablePut",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_MemTablePut",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 100000,
+      "real_time": 3.8631299976259470e+02,
+      "cpu_time": 1.5625000000000000e+02,
+      "time_unit": "ns"
+    },
+    {
+      "name": "BM_WalAppendRecordNoFsync",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_WalAppendRecordNoFsync",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 100000,
+      "real_time": 4.2534339998383075e+03,
+      "cpu_time": 1.0937500000000000e+03,
+      "time_unit": "ns"
+    },
+    {
+      "name": "BM_CompactionPickL0Batch/8",
+      "family_index": 2,
+      "per_family_instance_index": 0,
+      "run_name": "BM_CompactionPickL0Batch/8",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 1000000,
+      "real_time": 5.8841399993980303e+01,
+      "cpu_time": 0.0000000000000000e+00,
+      "time_unit": "ns",
+      "items_per_second": Infinity
+    },
+    {
+      "name": "BM_CompactionPickL0Batch/64",
+      "family_index": 2,
+      "per_family_instance_index": 1,
+      "run_name": "BM_CompactionPickL0Batch/64",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 1000000,
+      "real_time": 6.4942999975755811e+01,
+      "cpu_time": 0.0000000000000000e+00,
+      "time_unit": "ns",
+      "items_per_second": Infinity
+    },
+    {
+      "name": "BM_CompactionPickL0Batch/512",
+      "family_index": 2,
+      "per_family_instance_index": 2,
+      "run_name": "BM_CompactionPickL0Batch/512",
+      "run_type": "iteration",
+      "repetitions": 1,
+      "repetition_index": 0,
+      "threads": 1,
+      "iterations": 100000,
+      "real_time": 6.4592999988235533e+01,
+      "cpu_time": 1.5625000000000000e+02,
+      "time_unit": "ns",
+      "items_per_second": 6.4000000000000000e+06
+    }
+  ]
+}

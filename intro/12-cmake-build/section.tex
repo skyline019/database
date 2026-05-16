@@ -1,0 +1,86 @@
+\section{数据库与 C++ 工程：以 \texttt{CMakeLists.txt} 为准}
+\label{sec:cmake-build}
+
+\subsection{约定}
+
+\begin{itemize}
+  \item \textbf{可执行文件、静态/共享库、测试与基准目标}如何声明、链接哪些 \texttt{structdb\_*} 目标、受哪些 \texttt{option} 控制，以仓库根 \fpath{CMakeLists.txt} 及由其 \texttt{add\_subdirectory} 引入的各子目录 \fpath{CMakeLists.txt} 为\textbf{唯一工程真相源}。
+  \item 根 \fpath{README.md}、\fpath{Docs/POLICY.md} 等 Markdown 提供\textbf{操作说明与语义约束}；若与 CMake 中的目标名、默认开关不一致，\textbf{以 CMake 与当前源码为准}。
+\end{itemize}
+
+\subsection{根目录 \texttt{option}（节选）}
+
+下列开关定义于根 \fpath{CMakeLists.txt}（\texttt{cmake\_minimum\_required} 之后），影响是否编测试、共享 C API、第三方来源等：
+
+\begin{itemize}
+  \item \texttt{STRUCTDB\_STATIC\_MSVC\_RUNTIME}（MSVC 下 \texttt{/MT} 与 gtest 堆一致性）。
+  \item \texttt{STRUCTDB\_BUILD\_TESTS} / \texttt{STRUCTDB\_BUILD\_BENCHMARKS} / \texttt{STRUCTDB\_ENABLE\_PERF\_GATE}。
+  \item \texttt{STRUCTDB\_BUILD\_CAPI\_SHARED}：是否额外生成 \texttt{structdb\_capi\_shared} 及烟测目标。
+  \item \texttt{STRUCTDB\_FETCH\_FMT\_SPDLOG\_BENCHMARK}：\texttt{FetchContent} 与 \fpath{ThirdParty/} vendor 二选一（由 \fpath{cmake/StructDBThirdParty.cmake} 实现细节）。
+\end{itemize}
+
+\subsection{\texttt{add\_subdirectory} 与引擎分层}
+
+根文件按\textbf{依赖方向}依次加入：\fpath{ThirdParty/crc32c-main}、\fpath{ThirdParty/CRoaring-master}、\fpath{ThirdParty/gtest\_capi}，随后
+
+\fpath{src/Base}（\texttt{wf\_waterfall}）$\rightarrow$ \fpath{src/engine/infra} $\rightarrow$ \texttt{planner} $\rightarrow$ \texttt{scheduler} $\rightarrow$ \texttt{runtime} $\rightarrow$ \texttt{orchestrator} $\rightarrow$ \texttt{facade} $\rightarrow$ \texttt{storage} $\rightarrow$ \fpath{src/client/embed} $\rightarrow$ \fpath{src/client/mdb} $\rightarrow$ \fpath{src/c\_api} $\rightarrow$ \fpath{src/app}。
+
+测试目录 \fpath{tests/}、基准 \fpath{benchmarks/} 仅在对应 \texttt{option} 打开时加入。
+
+\subsection{应用入口目标}
+
+\fpath{src/app/CMakeLists.txt} 定义可执行文件 \texttt{structdb\_app}（单文件 \fpath{main.cpp}），链接 \texttt{structdb\_facade}、\texttt{structdb\_infra}、\texttt{structdb\_client\_mdb}、\texttt{structdb\_client\_embed}。其\textbf{命令行解析}见第 \ref{sec:parsing-entry} 节，\textbf{与} \texttt{EngineConfigSnapshot} \textbf{字段表无关}（后者见第 \ref{sec:runtime-params} 节）。
+
+\subsection{静态库目标一览与传递依赖}
+
+表 \ref{tab:cmake-targets} 列出引擎相关 \texttt{structdb\_*} 静态库（名称以各目录 \fpath{CMakeLists.txt} 中 \texttt{add\_library} 为准）。\textbf{链接规则：}下游若 \texttt{PUBLIC} 链接某库，则自动获得其 \texttt{PUBLIC} 头文件目录与传递依赖；\texttt{structdb\_capi} 与 \texttt{structdb\_capi\_shared} 均 \texttt{PUBLIC} 链接 \texttt{structdb\_client\_mdb}、\texttt{structdb\_client\_embed}、\texttt{structdb\_facade}、\texttt{structdb\_infra}，故 FFI 宿主只需链接共享库或静态 \texttt{structdb\_capi} 即可解析 MDB/Embed/Facade 符号。
+
+{\footnotesize
+\begin{longtable}{@{}p{0.34\linewidth}p{0.60\linewidth}@{}}
+\caption{主要 \texttt{structdb\_*} CMake 目标与学术角色}\label{tab:cmake-targets}\\
+\toprule
+\textbf{目标（典型）} & \textbf{角色 / 备注} \\
+\midrule
+\endhead
+\texttt{wf\_waterfall} & \fpath{src/Base/} 静态库；页/段等底层结构；\texttt{structdb\_storage} 显式 \texttt{PUBLIC} 链接。 \\
+\texttt{structdb\_infra} & I/O、追踪、长任务；被几乎所有引擎 TU 依赖。 \\
+\texttt{structdb\_planner}、\texttt{structdb\_scheduler}、\texttt{structdb\_runtime}、\texttt{structdb\_orchestrator} & 控制平面四层；\texttt{structdb\_facade} 链接 orchestrator 与 storage。 \\
+\texttt{structdb\_storage} & 数据平面；不依赖 MDB/Embed。 \\
+\texttt{structdb\_facade} & \texttt{Engine}、配置快照、服务容器。 \\
+\texttt{structdb\_client\_embed}、\texttt{structdb\_client\_mdb} & L2 客户端；依赖 facade（及间接 storage）。 \\
+\texttt{structdb\_capi} / \texttt{structdb\_capi\_shared} & C ABI 薄封装；同 TU \fpath{structdb_capi.cpp}，共享目标定义 \texttt{STRUCTDB\_CAPI\_BUILDING}，消费者定义 \texttt{STRUCTDB\_CAPI\_SHARED}（Windows 导入符号）。 \\
+\texttt{structdb\_app} & 可执行；最小 C++ 宿主。 \\
+\bottomrule
+\end{longtable}
+}
+
+\noindent\textbf{说明：}若某子目录目标名与上表字面略有出入，以该目录 \fpath{CMakeLists.txt} 为准；上表服务于\textbf{论文级导航}而非替代构建文件。
+
+\subsection{根 \texttt{option} 对产物集合的影响}
+
+\begin{itemize}
+  \item \texttt{STRUCTDB\_BUILD\_TESTS=OFF}：不加入 \fpath{tests/}，不产生 \texttt{structdb\_tests} / \texttt{mdb\_tests} / \texttt{capi\_shared\_smoke} 等。
+  \item \texttt{STRUCTDB\_BUILD\_BENCHMARKS=OFF}：不加入 \fpath{benchmarks/}。
+  \item \texttt{STRUCTDB\_BUILD\_CAPI\_SHARED=OFF}：仅静态 \texttt{structdb\_capi}；GUI 若硬依赖共享库需打开该选项（非 MSVC 下静态库亦可能需 PIC，见 \fpath{src/c\_api/CMakeLists.txt}）。
+  \item \texttt{STRUCTDB\_ENABLE\_PERF\_GATE=ON}：注册依赖 Python 的 perf gate 测试（见根 \texttt{CMakeLists.txt} 注释与 \fpath{Docs/POLICY.md}）。
+\end{itemize}
+
+\subsection{核心代码：根 \texttt{option} 与测试门控}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=8]
+option(STRUCTDB_BUILD_TESTS "Build StructDB tests" ON)
+option(STRUCTDB_BUILD_BENCHMARKS "Build StructDB microbenchmarks" ON)
+option(STRUCTDB_BUILD_CAPI_SHARED
+  "Also build structdb_capi_shared (FFI) ..." ON)
+option(STRUCTDB_FETCH_FMT_SPDLOG_BENCHMARK
+  "Use CMake FetchContent for fmt, spdlog, ..." OFF)
+
+if(STRUCTDB_BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+if(STRUCTDB_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()
+\end{lstlisting}
+
+\textbf{解释：}\texttt{STRUCTDB\_FETCH\_*} 默认 \texttt{OFF} 表示离线友好 vendor 路径（\fpath{ThirdParty/}）；\texttt{STRUCTDB\_BUILD\_CAPI\_SHARED} 控制 GUI/FFI 所需的共享库目标；测试与基准\textbf{独立}门控，便于最小引擎库构建。

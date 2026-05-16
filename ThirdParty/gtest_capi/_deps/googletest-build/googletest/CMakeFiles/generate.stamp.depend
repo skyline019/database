@@ -1,0 +1,18 @@
+# CMake generation dependency list for this directory.
+E:/CMake/share/cmake-4.3/Modules/BasicConfigVersion-AnyNewerVersion.cmake.in
+E:/CMake/share/cmake-4.3/Modules/CMakePackageConfigHelpers.cmake
+E:/CMake/share/cmake-4.3/Modules/CheckCSourceCompiles.cmake
+E:/CMake/share/cmake-4.3/Modules/CheckIncludeFile.cmake
+E:/CMake/share/cmake-4.3/Modules/CheckLibraryExists.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPackageHandleStandardArgs.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPackageMessage.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPython/Support.cmake
+E:/CMake/share/cmake-4.3/Modules/FindPython3.cmake
+E:/CMake/share/cmake-4.3/Modules/FindThreads.cmake
+E:/CMake/share/cmake-4.3/Modules/Internal/CheckSourceCompiles.cmake
+E:/CMake/share/cmake-4.3/Modules/WriteBasicConfigVersionFile.cmake
+E:/db/DB/newdb/build/_deps/googletest-src/googletest/CMakeLists.txt
+E:/db/DB/newdb/build/_deps/googletest-src/googletest/cmake/Config.cmake.in
+E:/db/DB/newdb/build/_deps/googletest-src/googletest/cmake/gtest.pc.in
+E:/db/DB/newdb/build/_deps/googletest-src/googletest/cmake/gtest_main.pc.in
+E:/db/DB/newdb/build/_deps/googletest-src/googletest/cmake/internal_utils.cmake

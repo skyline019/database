@@ -1,0 +1,189 @@
+\section{编排栈：Planner / Orchestrator / Scheduler / GraphExecutor}
+\label{sec:mod-orchestration}
+
+\subsection{Planner：\texttt{ExecutionPlan} 与 DAG}
+
+\fpath{src/engine/planner/include/structdb/planner/execution_plan.hpp}
+
+\begin{itemize}
+  \item \texttt{OperatorNode}：\texttt{id}、\texttt{name}（与 \texttt{GraphExecutor} 注册名对齐）、\texttt{idempotent}、\texttt{parallel\_ok}、\texttt{estimated\_cost}（用于预算探测权重）、\texttt{dependencies}（前驱算子 id 列表）、\texttt{logical\_inputs}/\texttt{logical\_outputs}（数据流绑定占位）。
+  \item \texttt{ExecutionPlan::make\_linear(epoch, names)}：工厂生成链式依赖（每节点依赖上一节点）。
+  \item \texttt{validate\_dag(error\_out)}：校验 id 唯一、依赖存在、无环。
+\end{itemize}
+
+\subsection{Scheduler：预算与背压}
+
+\fpath{src/engine/scheduler/include/structdb/scheduler/budget.hpp}、\fpath{scheduler.hpp}
+
+\begin{itemize}
+  \item \texttt{ResourceType}：\texttt{MemTableBytes}、\texttt{WalQueueDepth}、\texttt{PagePinCount}、\texttt{OpenFiles}、\texttt{CompactionSlots}。
+  \item \texttt{BudgetConfig} 默认值：MemTable 64MiB、\texttt{wal\_queue\_depth=1024}、\texttt{page\_pin\_budget=4096}、\texttt{open\_files\_budget=512}、\texttt{compaction\_slots=2}。
+  \item \texttt{ResourceBudget::try\_acquire/release}：带互斥锁的计数器；\texttt{set\_wal\_queue\_depth\_pressure\_delta} / \texttt{set\_compaction\_slots\_pressure\_delta} 支持\textbf{负增量}收紧有效上限（Phase 14/21C）。
+  \item \texttt{BackpressureReason}：\texttt{MemTableFull}、\texttt{WalBacklogged}、\texttt{PagePinsExhausted}、\texttt{TooManyOpenFiles}、\texttt{CompactionBusy}。
+  \item \texttt{ExecutionScheduler}：维护 \texttt{active\_plan} 与 \texttt{active\_epoch}；\texttt{acquire\_for\_node}/\texttt{release\_for\_node} 在图执行前后与算子协作。
+\end{itemize}
+
+\subsection{Runtime：\texttt{GraphExecutor}}
+
+\fpath{src/engine/runtime/include/structdb/runtime/graph_executor.hpp}
+
+\begin{itemize}
+  \item \texttt{register\_operator(name, shared\_ptr<IOperator>)}：名称表。
+  \item \texttt{execute(plan, sched, use\_budget\_probe, error\_out, diag\_out)}：拓扑序执行；\texttt{use\_budget\_probe} 为真时按节点 \texttt{estimated\_cost} 缩放 MemTable 字节探测等；\texttt{GraphExecuteDiagnostics} 给出 \texttt{GraphExecuteOutcome} 与失败节点 id / 背压原因。
+  \item \texttt{GraphExecuteOutcome}：\texttt{Ok}、\texttt{PlanRejected}、\texttt{NoActivePlan}、\texttt{Cancelled}、\texttt{MissingNodeIndex}、\texttt{Backpressure}、\texttt{MissingOperator}、\texttt{PrepareFailed}、\texttt{ExecuteFailed}。
+  \item \texttt{request\_cancel()}：协作式取消（节点之间检查）。
+\end{itemize}
+
+\subsection{Orchestrator}
+
+\fpath{src/engine/orchestrator/include/structdb/orchestrator/orchestrator.hpp}
+
+\begin{itemize}
+  \item 组合 \texttt{ExecutionScheduler} + \texttt{GraphExecutor} + \texttt{PlanBuilder}（\texttt{std::function<ExecutionPlan(uint64\_t epoch)>}）。
+  \item \texttt{run\_default}：当前 epoch 执行 builder 产出的计划。
+  \item \texttt{replan\_and\_run}：\texttt{plan\_epoch\_} 自增后重新构建并执行。
+  \item 回调：\texttt{set\_on\_backpressure}、\texttt{set\_before\_graph\_execute}（\texttt{Engine::startup} 用于压力同步）。
+\end{itemize}
+
+\subsection{与 \texttt{structdb\_tests} 的衔接}
+
+\fpath{tests/structdb_tests.cpp} 中 \texttt{Orchestrator.BackpressureCallbackFires}：构造零 MemTable 预算的 \texttt{ResourceBudget}，执行仅 \texttt{noop} 计划仍因预算探测失败，断言 \texttt{diag.outcome == Backpressure} 且回调命中。此类用例验证\textbf{失败路径}（非 Happy path）。
+
+\subsection{学术解析：\texttt{OperatorNode} 与 \texttt{ExecutionPlan} 的图语义}
+
+\texttt{ExecutionPlan::nodes} 诱导有向图 $G=(V,E)$：顶点为 \texttt{OperatorNode::id}；若节点 $u$ 出现在 $v.\texttt{dependencies}$ 中，则存在边 $(u,v)$，表示 $u$ 必须在 $v$ 之前完成。\texttt{make\_linear} 工厂生成链式依赖（拓扑序唯一）。\texttt{validate\_dag} 校验：id 唯一、依赖存在、无环——否则计划在执行前被拒绝，对应 \texttt{GraphExecuteOutcome::PlanRejected}。
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=14]
+struct OperatorNode {
+  OperatorId id{0};
+  std::string name;
+  bool idempotent{false};
+  bool parallel_ok{true};
+  double estimated_cost{1.0};
+  std::vector<OperatorId> dependencies;
+  std::vector<std::string> logical_inputs;
+  std::vector<std::string> logical_outputs;
+};
+\end{lstlisting}
+
+\noindent\textbf{解释：}\texttt{name} 必须与 \texttt{GraphExecutor} 注册表键一致；\texttt{estimated\_cost} 在 \texttt{use\_budget\_probe} 时缩放 MemTable 等探测量；\texttt{logical\_*} 为数据流绑定占位（当前默认图以链式副作用为主）。
+
+\subsection{方法语义详述：\texttt{GraphExecutor::execute}}
+
+设输入计划 $P$ 已通过校验。执行器典型步骤为：
+\begin{enumerate}
+  \item 计算拓扑序；若失败则返回 \texttt{MissingNodeIndex} 等诊断。
+  \item 对序中每一节点 $v$：若启用预算探测，则按 \texttt{estimated\_cost} 调用 \texttt{ExecutionScheduler::acquire\_for\_node} 申请资源；失败则填充 \texttt{GraphExecuteDiagnostics} 并\textbf{短路}返回 \texttt{Backpressure}。
+  \item 在注册表中解析 \texttt{name} $\rightarrow$ \texttt{IOperator}；缺失则 \texttt{MissingOperator}。
+  \item 调用 \texttt{IOperator::execute}；失败则 \texttt{ExecuteFailed} 并记录节点 id。
+  \item 释放本节点持有的预算配额；继续下一节点直至完成或取消。
+\end{enumerate}
+协作式取消通过 \texttt{request\_cancel} 与执行循环内的检查点实现。
+
+\subsection{方法语义详述：\texttt{ResourceBudget::try\_acquire}}
+
+\texttt{ResourceBudget} 维护各 \texttt{ResourceType} 的\textbf{有符号计数器}与配置上限；\texttt{try\_acquire(type, delta, why)} 在互斥锁下尝试使 \texttt{used + delta} 不超过\textbf{有效上限}，其中有效上限可叠加上层注入的\textbf{压力增量}（如 WAL 队列深度负增量）。\texttt{set\_wal\_queue\_depth\_pressure\_delta} 与 \texttt{set\_compaction\_slots\_pressure\_delta} 由 \texttt{Engine::sync\_scheduler\_budget\_from\_storage\_pressure} 根据 \texttt{StoragePressureSnapshot} 计算，形成存储饱和 $\rightarrow$ 收紧控制平面可并发度 $\rightarrow$ 减缓上游写/合并的\textbf{闭环}。
+
+\subsection{核心代码：\texttt{ExecutionPlan::make\_linear}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=11]
+ExecutionPlan ExecutionPlan::make_linear(std::uint64_t epoch, const std::vector<std::string>& names) {
+  ExecutionPlan p;
+  p.plan_epoch = epoch;
+  OperatorId id = 1;
+  OperatorId prev = 0;
+  for (const auto& n : names) {
+    OperatorNode node;
+    node.id = id++;
+    node.name = n;
+    if (prev != 0) node.dependencies.push_back(prev);
+    p.nodes.push_back(std::move(node));
+    prev = p.nodes.back().id;
+  }
+  for (std::size_t i = 0; i < p.nodes.size(); ++i) {
+    p.index_by_id[p.nodes[i].id] = i;
+  }
+  return p;
+}
+\end{lstlisting}
+
+\textbf{解释：}为每个算子名分配递增 \texttt{id}，并令后驱依赖前驱 \texttt{id}，生成\textbf{唯一拓扑序}的链式 DAG；\texttt{index\_by\_id} 供执行器 O(1) 定位节点。门面默认图 \texttt{noop} 或 \texttt{noop$\rightarrow$drain\_l0\_compaction} 均由此工厂构造。
+
+\subsection{核心代码：\texttt{ResourceBudget::try\_acquire}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=29]
+bool ResourceBudget::try_acquire(ResourceType r, std::int64_t amount, std::string* reason_out) {
+  std::lock_guard<std::mutex> lock(mu_);
+  switch (r) {
+    case ResourceType::WalQueueDepth: {
+      const std::int64_t ceiling =
+          (std::max)(static_cast<std::int64_t>(0), cfg_.wal_queue_depth + wal_queue_depth_pressure_delta_);
+      if (wal_used_ + amount > ceiling) {
+        if (reason_out) *reason_out = "wal queue";
+        return false;
+      }
+      wal_used_ += amount;
+      return true;
+    }
+    case ResourceType::CompactionSlots: {
+      const std::int64_t ceiling =
+          (std::max)(static_cast<std::int64_t>(0), cfg_.compaction_slots + compaction_slots_pressure_delta_);
+      if (compact_ + amount > ceiling) { /* reason_out = "compaction"; */ return false; }
+      compact_ += amount;
+      return true;
+    }
+    // MemTableBytes, PagePinCount, OpenFiles ...
+  }
+}
+\end{lstlisting}
+
+\textbf{解释：}\textbf{有效上限} = 配置预算 + \texttt{pressure\_delta}（可为负，Phase14/21C）；失败时写入 \texttt{reason\_out} 供 \texttt{GraphExecutor} 映射为 \texttt{BackpressureReason}。\texttt{Engine::wal\_scheduler\_acquire\_blocking\_} 在 WAL 写路径上对 \texttt{WalQueueDepth} 循环调用直至成功。
+
+\subsection{核心代码：\texttt{GraphExecutor::execute} 主循环}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=80]
+  while (!q.empty()) {
+    const auto id = q.front();
+    q.pop();
+    const auto& node = p->nodes[it->second];
+    const std::int64_t mem_probe = probe_memtable_bytes_for_node(node);
+    if (use_budget_probe) {
+      const Probe kProbe[] = {
+          {scheduler::ResourceType::WalQueueDepth, 1},
+          {scheduler::ResourceType::CompactionSlots, 1},
+          {scheduler::ResourceType::MemTableBytes, mem_probe},
+      };
+      for (const auto& pr : kProbe) {
+        if (!sched.acquire_for_node(id, pr.r, pr.amt, &br)) {
+          mark(GraphExecuteOutcome::Backpressure, id, br);
+          return false;
+        }
+      }
+    }
+    auto opit = ops_.find(node.name);
+    OperatorContext ctx{p, &node, &sched, cancel.get()};
+    if (!opit->second->execute(ctx)) {
+      mark(GraphExecuteOutcome::ExecuteFailed, id);
+      return false;
+    }
+    if (use_budget_probe) { /* release_for_node for each probe */ }
+    for (auto v : adj[id]) { indeg[v]--; if (indeg[v] == 0) q.push(v); }
+  }
+\end{lstlisting}
+
+\textbf{解释：}Kahn 拓扑序遍历；\texttt{use\_budget\_probe=true} 时每个节点执行前探测 WAL 槽、合并槽、MemTable 字节（按 \texttt{estimated\_cost} 缩放）；任一 \texttt{acquire} 失败则\textbf{短路}并回滚已借配额。算子 \texttt{execute} 失败映射 \texttt{ExecuteFailed}。
+
+\subsection{核心代码：\texttt{Orchestrator::run\_default}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=32]
+bool Orchestrator::run_default(std::string* error_out) {
+  std::lock_guard<std::mutex> lock(mu_);
+  const auto epoch = plan_epoch_.load(std::memory_order_relaxed);
+  auto plan = builder_(epoch);
+  plan.plan_epoch = epoch;
+  if (pre) pre();  // before_graph_execute hook
+  return exec_->execute(std::move(plan), *sched_, true, error_out);
+}
+\end{lstlisting}
+
+\textbf{解释：}\texttt{builder\_} 由门面注入，捕获 defer 标志；\texttt{before\_graph\_execute} 在 \texttt{execute} 前调用 \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}；\texttt{execute} 第三参数恒为 \texttt{true}，即默认图\textbf{启用预算探测}。\texttt{replan\_and\_run} 先 \texttt{fetch\_add} epoch 再重建计划（Phase19 批后 drain 等场景）。

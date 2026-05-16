@@ -1,0 +1,125 @@
+\section{MDB 客户端、\texttt{EmbedClient}、C API 与 GUI}
+\label{sec:mod-embed-mdb}
+
+\noindent\textbf{阅读顺序：}\texttt{structdb\_app} 的 argv 与 MDB 单行词法/REPL 调用链见第 \ref{sec:parsing-entry} 节；\texttt{Engine::startup}、\texttt{kv\_put} 等与引擎内部状态机相关的\textbf{源码行段导读}见第 \ref{sec:impl-walkthrough} 节。本节保留\textbf{按文件的职责索引}与嵌入层 API 要点。
+
+\subsection{MDB 源码文件（按职责）}
+
+\begin{longtable}{@{}p{0.42\linewidth}p{0.52\linewidth}@{}}
+\toprule
+\textbf{路径} & \textbf{职责} \\
+\midrule
+\endhead
+\fpath{src/client/mdb/src/mdb_command_parser.cpp} & 词法入口（\texttt{mdb\_parse\_command\_line}）；与 argv/配置字段分列说明见第 \ref{sec:parsing-entry} 节。 \\
+\fpath{src/client/mdb/src/mdb_dispatch.cpp} & 命令路由与 Phase1/Phase2 判定（与 REPL/脚本共享）。 \\
+\fpath{src/client/mdb/src/mdb_runner.cpp} & 会话状态机、与 \texttt{EmbedClient}/\texttt{Engine} 交互 orchestration。 \\
+\fpath{src/client/mdb/src/mdb_persistence.cpp} & \texttt{persist\_table}、存储读写、\texttt{mdb\_storage\_read\_seq} 等。 \\
+\fpath{src/client/mdb/src/mdb_query_paging.cpp} & \texttt{PAGE}、排序与分页参数。 \\
+\fpath{src/client/mdb/src/mdb_ops_txn_log.cpp} & 事务、\texttt{SAVEPOINT}、\texttt{ROLLBACK TO}、\texttt{TXNISOLATION}。 \\
+\fpath{src/client/mdb/src/mdb_ops_predicate.cpp} & \texttt{WHERE}/\texttt{WHEREP} 等谓词路径。 \\
+\fpath{src/client/mdb/src/mdb_ops_pages_journal_import.cpp} & 扫描、导入、日志类命令。 \\
+\fpath{src/client/mdb/src/mdb_ops_string_wire.cpp} & 字符串协议与杂项动词。 \\
+\fpath{src/client/mdb/src/mdb_ops_logical_index.cpp} & 二级索引预留/逻辑索引。 \\
+\fpath{src/client/mdb/src/mdb_ops_reorder.cpp} & \texttt{CONFIRM\_REORDER}（Phase 38）。 \\
+\fpath{src/client/mdb/src/mdb_engine_ports.cpp} & 引擎能力注入端口（测试替身/解耦）。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{\texttt{CommandBatch} 与 \texttt{EmbedClient}}
+
+\fpath{src/client/embed/include/structdb/client/embed_client.hpp}
+
+\begin{itemize}
+  \item 子目录常量（见头文件 \texttt{kEmbedSessionArtifactsDir}）：会话产物置于 \texttt{session\_dir} 下该子目录。
+  \item \texttt{CommandBatch}：\texttt{client\_session\_id}、单调 \texttt{term}、\texttt{idempotency\_token}、\texttt{puts}/\texttt{dels} 列表。
+  \item \texttt{submit(batch, fsync\_journal, error\_out)}：写引擎 + 追加 journal；\texttt{fsync\_journal==true} 时在批次末尾 \texttt{wal\_sync()}（耐久 Level 1 类比，见头文件注释与 \fpath{Docs/phases/TXN_INNODB_MAP.md}）。
+  \item 幂等：非空 \texttt{idempotency\_token} 重放会被忽略（\texttt{idem\_completed\_} 集合）。
+  \item \texttt{read\_snapshot\_seq()}：钉住 \texttt{mdb\$} 读视图；在 \texttt{open}/\texttt{recover}/成功 \texttt{submit} 后更新。
+\end{itemize}
+
+\subsection{C API 与宿主进程}
+
+\begin{itemize}
+  \item C 绑定实现位于 \fpath{src/c_api/}（\texttt{structdb\_engine\_open\_ex}、\texttt{structdb\_mdb\_execute\_line\_ex}、脚本文件 API 等）。
+  \item 进程入口 \fpath{src/app/}：\texttt{structdb\_app}，默认 \texttt{--data-dir} \texttt{\_data}。
+\end{itemize}
+
+\subsection{GUI}
+
+\fpath{gui/rust_gui/src-tauri/src/lib.rs} 注册 Tauri 命令；前端 \fpath{gui/rust_gui/src/App.vue}。与引擎互斥、独占锁环境变量见 \fpath{gui/rust_gui/README.md}。
+
+\subsection{学术解析：L2 协议层与 L3/L5 的契约}
+
+MDB 与 \texttt{EmbedClient} 构成第 \ref{sec:arch-layers} 节所述 L2：其\textbf{不变式}是「表逻辑与引擎字节串之间的可逆映射」——\texttt{persist\_table} 将会话态编码为 \texttt{mdb\$*} 键上版本化写入；\texttt{submit} 则将 \texttt{CommandBatch} 映射为引擎 \texttt{put/remove} 与可选 \texttt{wal\_sync}。C API 与 GUI 不改变上述契约，仅改变\textbf{调用边界}（进程内 FFI vs 进程外动态加载）。因此，验证 MDB 正确性需同时检查：（i）\texttt{mdb\_dispatch} 分支完备性；（ii）\texttt{mdb\_storage\_read\_seq\_for\_script} 与 \texttt{kv\_get(..., read\_max\_seq)} 对齐；（iii）\texttt{EmbedClient} 幂等集合与会话 journal 的 fsync 策略（第 \ref{sec:parsing-entry} 节）。
+
+\subsection{核心代码：\texttt{CommandBatch} 与 \texttt{EmbedClient::submit} 声明}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=23]
+struct CommandBatch {
+  std::string client_session_id;
+  std::uint64_t term{0};
+  std::string idempotency_token;
+  std::vector<std::pair<std::string, std::string>> puts;
+  std::vector<std::string> dels;
+};
+
+bool EmbedClient::submit(const CommandBatch& batch, bool fsync_journal, std::string* error_out) {
+  std::lock_guard<std::mutex> slk(submit_mu_);
+  if (!batch.idempotency_token.empty() && idem_completed_.count(batch.idempotency_token))
+    return true;
+  const std::uint64_t seq = next_seq_++;
+  if (!batch.dels.empty() || !batch.puts.empty()) {
+    const std::uint64_t est =
+        StorageEngine::estimate_commit_embed_batch_wal_frame_bytes(batch.dels, batch.puts);
+    facade::Engine::WalMutationBudget wal_budget(&engine_, est);
+    if (!st->commit_embed_batch(batch.dels, batch.puts, fsync_journal, error_out)) return false;
+    engine_.sync_scheduler_budget_from_storage_pressure();
+  } else if (fsync_journal && !st->wal_sync(error_out)) return false;
+  if (!append_journal_line(seq, batch, fsync_journal)) return false;
+  last_ack_ = seq;
+  refresh_read_snapshot();
+  return true;
+}
+\end{lstlisting}
+
+\textbf{解释：}（1）\texttt{submit\_mu\_} 序列化同会话批次；（2）非空 \texttt{idempotency\_token} 命中 \texttt{idem\_completed\_} 则\textbf{幂等成功}；（3）存储提交与门面 \texttt{WalMutationBudget} 同构；（4）\texttt{commit\_embed\_batch} 单 WAL 帧承载整批 del/put；（5）成功后追加 \texttt{session.journal} 并 \texttt{refresh\_read\_snapshot} 更新 \texttt{read\_snapshot\_seq}。
+
+\subsection{核心代码：\texttt{mdb\_dispatch\_execute\_line}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=15]
+MdbRunResult mdb_dispatch_execute_line(MdbDispatchEnv& e) {
+  MdbParsedLine& pl = e.pl;
+  facade::Engine& engine = e.engine;
+  EmbedClient& client = e.client;
+  const std::uint64_t storage_read_seq = e.storage_read_seq;
+  bool& txn_active = e.txn_active;
+  // ... 解包 env 其余字段 ...
+#include "mdb_runner_dispatch.inc"
+  return res;
+}
+\end{lstlisting}
+
+\textbf{解释：}单行分派\textbf{不}在 \texttt{mdb\_dispatch.cpp} 内写巨型 \texttt{switch}，而 \texttt{\#include "mdb\_runner\_dispatch.inc"} 按 \texttt{pl.verb} 展开路由（与 REPL/脚本共享）。\texttt{MdbDispatchEnv} 携带 \texttt{storage\_read\_seq}、事务态、\texttt{persist\_now}/\texttt{txn\_v2\_append} 回调，使各 \texttt{mdb\_ops\_*} TU 可调用 \texttt{Engine}/\texttt{EmbedClient} 而不重复传参（环境结构见第 \ref{sec:parsing-entry} 节摘录）。
+
+\subsection{核心代码：C API 引擎打开}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=506]
+structdb_engine* structdb_engine_open_ex(const char* data_dir, uint32_t open_flags, char* err, size_t err_len) {
+  auto* box = new (std::nothrow) structdb_engine();
+  const std::filesystem::path data_fs = !utf8_nonempty(data_dir)
+      ? std::filesystem::absolute(cwd / STRUCTDB_CAPI_DEFAULT_STORE_DIR / "_data")
+      : std::filesystem::absolute(utf8_path_to_fs(data_dir));
+  box->data_dir_utf8 = path_to_utf8(data_fs);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = box->data_dir_utf8;
+  snap.version = 1;
+  if ((open_flags & STRUCTDB_ENGINE_OPEN_FLAG_EXCLUSIVE_DIR_LOCK) != 0)
+    snap.exclusive_data_dir_lock = true;
+  box->engine.config().update(1, snap);
+  if (!box->engine.startup(&e)) { delete box; return nullptr; }
+  box->started = true;
+  return box;
+}
+\end{lstlisting}
+
+\textbf{解释：}C 层仅装配 \texttt{data\_dir}、独占锁与 \texttt{startup}；其余数十个运行时字段保持 \texttt{EngineConfigSnapshot} 默认（第 \ref{sec:runtime-params} 节）。空 \texttt{data\_dir} 走 \texttt{\_structdb\_capi/\_data} 默认布局，与 \texttt{structdb\_app} 的 \texttt{\_data} 不同（第 \ref{sec:capi-binding} 节）。

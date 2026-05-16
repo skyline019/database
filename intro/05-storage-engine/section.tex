@@ -1,0 +1,152 @@
+\section{\texttt{StorageEngine}：数据平面 API}
+\label{sec:mod-storage}
+
+\subsection{头文件与实现拆分}
+
+\begin{itemize}
+  \item 声明：\fpath{src/engine/storage/include/structdb/storage/storage_engine.hpp}（类 \texttt{StorageEngine}）。
+  \item 实现分散在多 TU（便于维护）：\fpath{src/engine/storage/src/storage_engine.cpp}、\fpath{src/engine/storage/src/storage_engine_open_wal.cpp}、\fpath{src/engine/storage/src/storage_engine_read.cpp}、\fpath{src/engine/storage/src/storage_engine_put_undo.cpp}、\fpath{src/engine/storage/src/storage_engine_detail.cpp}、\fpath{src/engine/storage/src/storage_engine_compaction_lsm.cpp}、\fpath{src/engine/storage/src/storage_engine_segments_worker_checkpoint.cpp} 等（以目录 listing 为准）。
+\end{itemize}
+
+\subsection{打开与关闭}
+
+\begin{itemize}
+  \item \texttt{explicit StorageEngine(std::filesystem::path data\_dir)}。
+  \item \texttt{open(error\_out, open\_flags)}：\texttt{open\_flags} 可含 \texttt{kOpenFlagRebuildUndoStackFromLog}（从 \fpath{src/engine/storage/include/structdb/storage/recovery_open_policy.hpp} 导出）。
+  \item \texttt{set\_exclusive\_directory\_lock(bool)}：须在 \texttt{open} 前设置；Phase 35 建议锁文件 \texttt{.structdb\_exclusive.lock}。
+  \item \texttt{close()}：释放 WAL、worker、文件句柄等。
+\end{itemize}
+
+\subsection{版本化写入与读取}
+
+\begin{itemize}
+  \item \texttt{put(key, value, fsync\_wal)} / \texttt{put(..., batch\_commit\_seq)}：后者使同一 embed 批次内多条 \texttt{mdb\$} 逻辑写入共享同一 \texttt{commit\_seq}。
+  \item \texttt{reserve\_commit\_seq()}：为批次预留单调序号。
+  \item \texttt{remove(key, fsync\_wal)}：逻辑删除（版本化 tomb）。
+  \item \texttt{get(key, out)} / \texttt{get(..., read\_max\_seq)}：后者实现\textbf{读视图裁剪}；\texttt{read\_max\_seq == max()} 表示最新可见（\texttt{versioned\_read\_seq\_latest}）。
+  \item \texttt{visit\_prefix(prefix, visitor)} / 带 \texttt{read\_max\_seq}：MemTable 再 SST（新 SST 优先）；访问\textbf{逻辑值}（unwrap），跳过 tomb。
+  \item \texttt{latest\_commit\_seq()}：单调高水位；\textbf{非每次 put 刷盘更新}，权威仍在 WAL + 内存观测（见头文件注释）。
+\end{itemize}
+
+\subsection{MemTable 与刷盘}
+
+\begin{itemize}
+  \item \texttt{memtable()} / \texttt{set\_memtable\_backend}：\texttt{Map} 与 \texttt{SkipList} 枚举见 \fpath{src/engine/storage/include/structdb/storage/memtable_backend.hpp}；须在 \texttt{open} 前选择后端。
+  \item \texttt{flush\_memtable(error\_out)}：封活跃 memtable $\rightarrow$ 临时 SST $\rightarrow$ rename 为 \texttt{L0-\{gen\}.sst} $\rightarrow$ 更新 MANIFEST/checkpoint；并发 \texttt{flush} 返回 false；物化失败则冻结键合并回活跃表（见头文件注释）。
+\end{itemize}
+
+\subsection{Compaction 族 API}
+
+\begin{itemize}
+  \item \texttt{compact\_merge\_two\_oldest\_l0}：Phase 9/12；合并 manifest 中\textbf{最旧两个} L0。
+  \item \texttt{compact\_merge\_two\_oldest\_l1\_to\_l2}、\texttt{\_l2\_to\_l3}、\texttt{\_l3\_to\_l4}：需先在引擎配置中打开对应 \texttt{l\{k\}\_compact\_output\_...} 门闩。
+  \item \texttt{drain\_pending\_l0\_compactions(max\_rounds)}：defer 模式下 flush 尾段之后同步多轮 L0。
+  \item \texttt{start\_compaction\_worker}/\texttt{stop}/\texttt{enqueue\_drain\_l0\_compaction\_and\_wait}：Phase 20B 异步 worker + 优先级队列。
+\end{itemize}
+
+\subsection{WAL 与 embed 批次}
+
+\begin{itemize}
+  \item \texttt{wal\_sync}、\texttt{wal\_log\_bytes\_on\_disk}：供 Embed 崩溃恢复策略选择 WAL vs 会话日志。
+  \item \texttt{commit\_embed\_batch(dels, puts, fsync\_wal, error)}：单条 WAL 记录承载整批删除/写入（全有或全无重放语义，见头文件注释）。
+  \item \texttt{estimate\_put\_wal\_frame\_bytes} / \texttt{estimate\_commit\_embed\_batch\_wal\_frame\_bytes}：供调度器与 \texttt{Engine::WalMutationBudget} 估计槽位。
+\end{itemize}
+
+\subsection{Undo 栈与 checkpoint}
+
+\begin{itemize}
+  \item \texttt{rollback\_one\_undo\_frame}、\texttt{undo\_stack\_depth}、\texttt{rollback\_undo\_frames\_until\_depth}：进程内 LIFO 版本撤销与 23C 链式 \texttt{ROLLBACK}。
+  \item \texttt{checkpoint(error\_out)}：与 \fpath{src/engine/storage/include/structdb/storage/checkpoint.hpp}、\fpath{src/engine/storage/include/structdb/storage/checkpoint_undo_coordinator.hpp} 协同；v2 槽与 undo 前缀见专文。
+\end{itemize}
+
+\subsection{存储层 \texttt{.cpp} 编译单元清单}
+
+\noindent\textbf{目录：}\fpath{src/engine/storage/src}
+\begin{itemize}
+  \item \texttt{buffer\_pool.cpp}、\texttt{byte\_token\_bucket.cpp}、\texttt{checkpoint.cpp}、\texttt{checkpoint\_undo\_coordinator.cpp}
+  \item \texttt{compaction\_coordinator.cpp}、\texttt{compaction\_io\_executor.cpp}
+  \item \texttt{lsm\_state.cpp}、\texttt{manifest.cpp}、\texttt{memtable.cpp}、\texttt{memtable\_manager.cpp}、\texttt{memtable\_skiplist.cpp}
+  \item \texttt{redo\_log.cpp}、\texttt{undo\_log.cpp}、\texttt{versioned\_kv.cpp}
+  \item \texttt{recovery\_coordinator.cpp}、\texttt{recovery\_phase.cpp}、\texttt{wal\_replay\_applier.cpp}、\texttt{wal\_coordinator.cpp}、\texttt{wal.cpp}
+  \item \texttt{storage\_engine.cpp}、\texttt{storage\_engine\_open\_wal.cpp}、\texttt{storage\_engine\_read.cpp}、\texttt{storage\_engine\_put\_undo.cpp}、\texttt{storage\_engine\_detail.cpp}、\texttt{storage\_engine\_compaction\_lsm.cpp}、\texttt{storage\_engine\_segments\_worker\_checkpoint.cpp}
+  \item \texttt{storage\_telemetry.cpp}
+\end{itemize}
+
+\subsection{学术解析：\texttt{StorageEngine} 作为数据平面系统边界}
+
+\texttt{StorageEngine} 是 L5 的\textbf{系统边界类}：对外以 \texttt{put}/\texttt{get}/\texttt{remove}/\texttt{visit\_prefix} 暴露版本化逻辑 KV；对内协调 WAL 追加、MemTable 插入、SST/manifest 变更、checkpoint、undo/redo 与 compaction worker。实现刻意拆分为多 TU（\texttt{storage\_engine\_*.cpp}），以降低单编译单元复杂度并允许按子系统审阅。
+
+\subsection{核心 API 摘录（版本化读写）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=56]
+  bool put(const std::string& key, const std::string& value, bool fsync_wal) {
+    return put(key, value, fsync_wal, 0);
+  }
+  bool put(const std::string& key, const std::string& value, bool fsync_wal, std::uint64_t batch_commit_seq);
+  std::uint64_t reserve_commit_seq();
+  bool remove(const std::string& key, bool fsync_wal);
+
+  bool get(const std::string& key, std::string* value_out) const {
+    return get(key, value_out, versioned_read_seq_latest());
+  }
+  bool get(const std::string& key, std::string* value_out, std::uint64_t read_max_seq) const;
+\end{lstlisting}
+
+\noindent\textbf{方法语义。}
+\begin{itemize}
+  \item \texttt{reserve\_commit\_seq + put(..., batch\_commit\_seq)}：为嵌入批次预留\textbf{单一提交序号}，使多条 \texttt{mdb\$*} 逻辑写在版本链上共享同一 \texttt{commit\_seq}，便于读视图与重放一致（见头文件注释）。
+  \item \texttt{get(..., read\_max\_seq)}：实现\textbf{读视图裁剪}；\texttt{read\_max\_seq == UINT64\_MAX} 表示最新可见（\texttt{versioned\_read\_seq\_latest}）。与 MDB 侧 \texttt{mdb\_storage\_read\_seq\_for\_script} 对齐后可保证会话级读一致性。
+  \item \texttt{remove}：写入版本化 tomb，语义由 \texttt{versioned\_kv} 定义（\fpath{versioned\_kv.hpp}）。
+\end{itemize}
+
+\subsection{方法语义详述：\texttt{flush\_memtable}}
+
+依据 \fpath{storage\_engine.hpp} 注释，可将 \texttt{flush\_memtable} 抽象为下列\textbf{原子意图}（实现中通过锁与临时文件保证失败可恢复）：
+\begin{enumerate}
+  \item 将活跃 MemTable \textbf{封存}为冻结快照，并阻止并发二次 flush（并发返回 \texttt{false}）。
+  \item 在锁外将冻结键序物化为临时 SST，再 \texttt{rename} 为 \texttt{L0-\{gen\}.sst}，降低持锁时间。
+  \item 在持锁段更新 MANIFEST、\texttt{LsmState}、checkpoint 元数据并推进 WAL 相关偏移。
+  \item 若物化/改名/manifest 任一步失败，将冻结键\textbf{合并回}活跃 MemTable，避免静默丢数据。
+\end{enumerate}
+
+\subsection{观测与节流 setter}
+
+头文件列举大量 \texttt{set\_*}（WAL 分段、io backend、fsync 间隔、合并字节桶、并行 SST 读、dedicated IO executor、压力快照……），均可在 \texttt{open} 后或前后按注释安全调用；\textbf{与 \texttt{EngineConfigSnapshot} 一一对应}的细节见第 \ref{sec:runtime-params} 节参数表。
+
+\subsection{核心代码：\texttt{put} 热路径}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=149]
+bool StorageEngine::put_impl_unlocked_(const std::string& key, const std::string& value, bool fsync_wal,
+                                       std::uint64_t batch_commit_seq, bool record_versioned_undo) {
+  if (record_versioned_undo) {
+    if (!append_versioned_undo_if_needed_unlocked_(key)) return false;
+  }
+  std::string to_store = logical_to_stored_for_put_unlocked_(key, value, batch_commit_seq);
+  const std::string line = key + "=" + to_store + "\n";
+  if (!wal_.append_record(line.data(), line.size(), fsync_wal)) return false;
+  wal_coordinator_.observe_append_unlocked(fsync_wal);
+  if (!wal_coordinator_.maybe_roll_after_append_unlocked()) return false;
+  mem_mgr_.active().put(key, std::move(to_store));
+  return true;
+}
+
+bool StorageEngine::put(const std::string& key, const std::string& value, bool fsync_wal,
+                        std::uint64_t batch_commit_seq) {
+  if (!opened_) return false;
+  std::lock_guard<std::shared_mutex> lk(mu_);
+  return put_impl_unlocked_(key, value, fsync_wal, batch_commit_seq, true);
+}
+\end{lstlisting}
+
+\textbf{解释：}（1）可选 append undo 帧供 embed 回滚；（2）\texttt{logical\_to\_stored\_for\_put} 对 \texttt{mdb\$*} 键调用 \texttt{wrap\_payload}（第 \ref{sec:mod-versioning} 节）；（3）WAL 记录为 \texttt{key=stored\\n} 文本行，经 \texttt{append\_record} 加长度前缀；（4）WAL 协调器处理 fsync 观测与段滚动；（5）最后写入活跃 MemTable。\texttt{mu\_} 写锁保证与 flush/compaction 互斥。
+
+\subsection{核心代码：\texttt{commit\_embed\_batch} 语义（头文件摘要）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=1]
+  /// Single WAL record carries entire batch; all-or-nothing replay semantics.
+  bool commit_embed_batch(const std::vector<std::string>& dels,
+                          const std::vector<std::pair<std::string, std::string>>& puts,
+                          bool fsync_wal, std::string* error_out);
+\end{lstlisting}
+
+\textbf{解释：}\texttt{EmbedClient::submit} 调用此 API，使一批 del/put 在 WAL 层表现为\textbf{单帧}，重放时全有或全无；与逐键 \texttt{put} 的 undo 语义配合构成会话耐久边界（\fpath{embed\_client.hpp} 注释与 \fpath{Docs/POLICY.md}）。

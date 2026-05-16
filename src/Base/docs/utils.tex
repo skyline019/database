@@ -1,0 +1,43 @@
+\documentclass{article}
+\usepackage{doc}
+
+\begin{document}
+
+% 标题
+\title{utils模块}
+\author{niexw\\niexiaowen@uestc.edu.cn}
+\maketitle
+
+\begin{abstract}
+    utils模块
+\end{abstract}
+
+\tableofcontents
+\vskip\baselineskip
+
+\section{leb128}
+
+leb128编码是一种变长编码，用于编码无符号整数和带符号整数，它将little endian整数编码为字节序列，代码取自llvm。它的编码规则如下：
+
+\begin{itemize}
+    \item 如果数值小于0x80，则直接编码为该数值。
+    \item 如果数值大于等于0x80，则将数值的低7位编码为0x80|低7位，然后将高7位递归编码。
+\end{itemize}
+
+\section{arena}
+
+arena是一种内存分配器，它分配的内存块是连续的，但是不同的内存块之间可能会有空闲空间，代码取自leveldb。
+
+引入arena是为了简化内存管理，避免频繁的内存分配和释放。在设想中，arena是每次事务开始前分配一块内存，事务结束后释放该内存。为了兼容stl库，arena提供了allocator接口，用于分配内存。
+
+
+
+
+% 参考文献
+\printbibliography
+
+% 附录
+\appendix
+% \chapter{术语表}
+
+\end{document}

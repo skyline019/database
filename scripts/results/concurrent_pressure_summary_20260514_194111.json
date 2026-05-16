@@ -1,0 +1,13 @@
+﻿{
+    "timestamp":  "2026-05-14T19:41:15.0472676Z",
+    "benchmark_profile":  "concurrent_mdb_bulk_v2",
+    "runtime_walsync_mode":  "process_default",
+    "runtime_pressure_tps_est":  10243.278,
+    "runtime_pressure_batch_ms_p95":  781,
+    "runtime_pressure_batches":  16,
+    "runtime_pressure_batch_size":  500,
+    "jobs":  4,
+    "mode":  "parallel_jobs",
+    "total_rows":  8000,
+    "build_dir":  "e:\\db\\StructDB\\build"
+}

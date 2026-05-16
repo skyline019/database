@@ -1,0 +1,1 @@
+-IE:/db/DB/gtest_capi/include -isystem "E:/db/DB/newdb/build_mingw/_deps/googletest-src/googletest/include" -isystem "E:/db/DB/newdb/build_mingw/_deps/googletest-src/googletest"

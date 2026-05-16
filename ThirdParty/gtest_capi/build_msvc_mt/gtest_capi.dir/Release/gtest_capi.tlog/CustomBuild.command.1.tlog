@@ -1,0 +1,10 @@
+^E:\DB\DB\GTEST_CAPI\CMAKELISTS.TXT
+setlocal
+E:\CMake\bin\cmake.exe -SE:/db/DB/gtest_capi -BE:/db/DB/gtest_capi/build_msvc_mt --check-stamp-file E:/db/DB/gtest_capi/build_msvc_mt/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,176 @@
+\section{门面：\texttt{Engine} 与 \texttt{ConfigurableEngine}}
+\label{sec:mod-facade}
+
+\subsection{头文件与类}
+
+\begin{itemize}
+  \item \fpath{src/engine/facade/include/structdb/facade/engine.hpp}：\texttt{structdb::facade::Engine}。
+  \item \fpath{src/engine/facade/include/structdb/facade/config.hpp}：\texttt{EngineConfigSnapshot}、\texttt{ConfigurableEngine}（线程安全快照）。
+  \item 实现：\fpath{src/engine/facade/src/engine.cpp}。
+\end{itemize}
+
+\subsection{\texttt{ConfigurableEngine}}
+
+\begin{itemize}
+  \item \texttt{snapshot()}：加锁复制当前 \texttt{EngineConfigSnapshot}（含单调递增的 \texttt{version}）。
+  \item \texttt{update(new\_version, s)}：整体替换配置并写回 \texttt{version}；\texttt{Engine::startup} 之后多数存储相关字段需通过 \texttt{StorageEngine::set\_*} 已应用路径生效（见 \texttt{startup} 实现顺序）。
+\end{itemize}
+
+\subsection{\texttt{Engine} 生命周期}
+
+\textbf{\texttt{startup(error\_out)}}（\fpath{engine.cpp}）顺序摘要：
+
+\begin{enumerate}
+  \item 读取 \texttt{snap = config().snapshot()}；\texttt{data\_dir} 为空则失败。
+  \item Windows 用 \texttt{std::filesystem::u8path} 解析 UTF-8 路径；其他平台直接 \texttt{std::filesystem::path}。
+  \item 构造 \texttt{StorageEngine(data\_dir)}；\texttt{set\_exclusive\_directory\_lock}、\texttt{set\_wal\_io\_backend}、分段滚动上限、\texttt{set\_memtable\_backend}；\texttt{open(error\_out, storage\_open\_flags)}。
+  \item 将快照中 WAL/合并节流/并行读/自动 trim/undo 截断/L0--L4 开关/defer/内联上限等\textbf{全部}调用对应 \texttt{StorageEngine::set\_*}。
+  \item 若 \texttt{enable\_compaction\_worker}：\texttt{start\_compaction\_worker(queue\_depth)}（0 则 64）。
+  \item 构造 \texttt{ResourceBudget}（默认构造 \texttt{BudgetConfig}）、\texttt{ExecutionScheduler}、\texttt{GraphExecutor}；注册算子 \texttt{noop}、\texttt{flush\_memtable}、\texttt{checkpoint}、\texttt{drain\_l0\_compaction}（\texttt{max\_rounds} 来自 \texttt{l0\_compact\_max\_rounds\_per\_flush}，0 当 4）。
+  \item \texttt{PlanBuilder}：若 \texttt{l0\_compact\_defer\_after\_flush} 为真则线性计划 \texttt{noop $\rightarrow$ drain\_l0\_compaction}，否则仅 \texttt{noop}。
+  \item 构造 \texttt{Orchestrator}；\texttt{set\_before\_graph\_execute} 绑定 \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}。
+  \item \texttt{services\_} 注册 \texttt{storage\_}、\texttt{orch\_} 单例；\texttt{orch\_->run\_default} 失败则 \texttt{startup} 失败。
+  \item 重置 24A 计数器；再调一次 \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}。
+  \item 若 \texttt{kv\_put\_async\_queue\_depth > 0}：启动后台线程 \texttt{kv\_put\_worker\_loop\_}（有界队列 + \texttt{promise/future} 同步返回）。
+  \item \texttt{trace\_install\_from\_env\_once()}。
+\end{enumerate}
+
+\textbf{\texttt{shutdown()}}：清 hint $\rightarrow$ 停 \texttt{kv\_put} 工作线程并 join $\rightarrow$ \texttt{storage\_->close()} $\rightarrow$ 释放 \texttt{orch\_}/\texttt{storage\_}/\texttt{services\_}。
+
+\subsection{窄 KV API}
+
+\begin{description}
+  \item[\texttt{kv\_get(key, value\_out)}] 等价于 \texttt{read\_max\_seq = UINT64\_MAX}（最新可见）。
+  \item[\texttt{kv\_get(key, value\_out, read\_max\_seq)}] 透传 \texttt{StorageEngine::get}；\textbf{事务钉快照}依赖此参数（见 \fpath{Docs/phases/TESTING_TXN_CHAIN.md} 读路径表）。
+  \item[\texttt{kv\_put / kv\_remove}] 默认路径：按 key/value 估计 WAL 帧字节 $\rightarrow$ \texttt{WalMutationBudget}（可选按 \texttt{wal\_scheduler\_bytes\_per\_depth\_slot} 阻塞占用 \texttt{WalQueueDepth} 预算）$\rightarrow$ \texttt{storage\_->put/remove}；成功后 \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}。
+  \item[\texttt{kv\_put} 异步队列] 当 \texttt{kv\_put\_async\_queue\_depth > 0}：队列满则 \textbf{return false}；否则入队由工作线程执行同步 \texttt{put}（仍走 \texttt{WalMutationBudget} 逻辑）。
+  \item[\texttt{kv\_put} 与 MDB 链式事务 24A] 当 \texttt{mdb\_chain\_txn\_active\_hint} 且三开关组合满足时：对 \texttt{mdb\$} 前缀 key 可\textbf{观测}或\textbf{硬拒绝}（\texttt{observe\_embed\_bypass\_*} / \texttt{strict\_reject\_direct\_kv\_put\_*}）。
+\end{description}
+
+\subsection{嵌入 undo 与 23C}
+
+\begin{itemize}
+  \item \texttt{embed\_undo\_stack\_depth()} $\rightarrow$ \texttt{StorageEngine::undo\_stack\_depth}。
+  \item \texttt{rollback\_embed\_undo\_until(target)} $\rightarrow$ \texttt{rollback\_undo\_frames\_until\_depth}（用于 MDB \texttt{ROLLBACK} 链式弹栈，见 \fpath{Docs/phases/PHASE23.md}）。
+\end{itemize}
+
+\subsection{图流水线辅助}
+
+\begin{itemize}
+  \item \texttt{drain\_l0\_compaction\_queue(max\_rounds, ...)}：封装 worker 等待或同步 \texttt{drain\_pending\_l0\_compactions}。
+  \item \texttt{rerun\_default\_pipeline}：\texttt{orch\_->replan\_and\_run}（Phase 19 批后 drain 场景）。
+  \item \texttt{storage\_pressure\_snapshot} / \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}：把存储压力映射到调度器预算（Phase 14/21C）。
+\end{itemize}
+
+\subsection{学术解析：门面职责边界与配置一致性}
+
+\paragraph{职责边界。}
+\texttt{Engine} 位于第 \ref{sec:arch-layers} 节所述 L3：对外提供\textbf{窄 KV}（\texttt{kv\_get}/\texttt{kv\_put}/\texttt{kv\_remove}）及嵌入 undo 代理，\textbf{不}解析 MDB 文本、\textbf{不}维护逻辑表 schema；此类语义由 L2（\texttt{mdb\_*}、\texttt{EmbedClient}）完成。C API 将上述能力以稳定 ABI 导出。
+
+\paragraph{配置一致性模型。}
+\texttt{ConfigurableEngine} 在互斥保护下提供 \texttt{snapshot()}/\texttt{update()}，使读配置线程获得\textbf{原子快照}。\texttt{Engine::startup} 在\textbf{单线程入口}读取该快照一次，并将其\textbf{映射}为 \texttt{StorageEngine::open} 前/后的一组 \texttt{set\_*} 调用（\fpath{engine.cpp}）。因此存在两个相关概念：（i）\textbf{配置快照}（内存中可由 \texttt{update} 改变）；（ii）\textbf{已生效存储策略}（由 \texttt{open} 后 setter 路径决定）。除非通过存储层公开 setter 再次应用，否则二者可能\textbf{暂时偏离}，这是为换取 \texttt{open} 顺序可控性与失败原子性的工程折中。
+
+\subsection{方法语义详述：\texttt{startup} 的分阶段不变式}
+
+将 \texttt{startup} 抽象为五个\textbf{阶段}（实现顺序见 \fpath{engine.cpp} L126 起）：
+\begin{description}
+  \item[P1 路径与存储构造] 校验 \texttt{data\_dir} 非空；构造 \texttt{StorageEngine}；在 \texttt{open} 前设置独占锁、WAL I/O 后端、分段滚动、MemTable 后端等\textbf{难变}属性。
+  \item[P2 存储打开] \texttt{open(error\_out, storage\_open\_flags)} 失败则立即返回，\textbf{不}创建编排器，避免半初始化对象。
+  \item[P3 策略注入] 将快照中 WAL/合并节流、并行读、L0--L4 开关等映射为存储 setter；可选启动 compaction worker。
+  \item[P4 编排装配] 构造预算器、调度器、执行器；注册 \texttt{noop}、\texttt{flush\_memtable}、\texttt{checkpoint}、\texttt{drain\_l0\_compaction}；用 \texttt{PlanBuilder} 捕获 defer 标志；装配 \texttt{Orchestrator} 并注册 \texttt{before\_graph\_execute} 钩子以在\textbf{每次图执行前}刷新压力预算。
+  \item[P5 首次图与异步路径] \texttt{run\_default} 成功后才认为默认维护图可用；重置 24A 计数并同步压力；按需启动 \texttt{kv\_put} 工作线程；安装 tracing。
+\end{description}
+
+\subsection{方法语义详述：\texttt{kv\_put}/\texttt{kv\_remove} 与 WAL 预算}
+
+\paragraph{同步写路径。}
+单次变异依次：（1）\texttt{estimate\_put\_wal\_frame\_bytes}；（2）构造 \texttt{WalMutationBudget}，在配置启用时于 \texttt{WalQueueDepth} 上\textbf{阻塞}直至 \texttt{try\_acquire} 成功；（3）\texttt{StorageEngine::put/remove}；（4）成功则 \texttt{sync\_scheduler\_budget\_from\_storage\_pressure}。析构预算对象时\textbf{配对释放}槽位（RAII）。
+
+\paragraph{异步写路径。}
+当 \texttt{kv\_put\_async\_queue\_depth>0} 时，任务入有界队列并由工作线程执行与同步路径等价的 \texttt{put+budget}；队列满则\textbf{立即 false}，属显式背压。
+
+\paragraph{24A 守卫。}
+\texttt{mdb\_chain\_txn\_active\_hint} 与配置三元组及 \texttt{mdb\$*} 前缀共同决定观测或硬拒绝路径（见 \fpath{Docs/phases/PHASE24.md}）。
+
+\subsection{核心代码：\texttt{ConfigurableEngine}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=125]
+class ConfigurableEngine {
+ public:
+  EngineConfigSnapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return snap_;
+  }
+  void update(std::uint64_t new_version, EngineConfigSnapshot s) {
+    std::lock_guard<std::mutex> lock(mu_);
+    snap_ = std::move(s);
+    snap_.version = new_version;
+  }
+ private:
+  mutable std::mutex mu_;
+  EngineConfigSnapshot snap_{};
+};
+\end{lstlisting}
+
+\textbf{解释：}配置以\textbf{整快照}读写；\texttt{update} 强制写入 \texttt{version} 便于宿主检测变更。\texttt{startup} 读取一次快照并映射到 \texttt{StorageEngine::set\_*}，运行期 \texttt{update} 与已生效存储策略可能短暂偏离（第 \ref{sec:runtime-params} 节）。
+
+\subsection{核心代码：\texttt{Engine::startup} 存储打开与策略注入}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=126]
+bool Engine::startup(std::string* error_out) {
+  auto snap = config_.snapshot();
+  if (snap.data_dir.empty()) { /* error_out = "empty data_dir"; return false; */ }
+  storage_ = std::make_shared<storage::StorageEngine>(data_dir_path);
+  storage_->set_exclusive_directory_lock(snap.exclusive_data_dir_lock);
+  storage_->set_wal_io_backend(snap.io_backend);
+  storage_->set_memtable_backend(snap.memtable_backend);
+  if (!storage_->open(error_out, snap.storage_open_flags)) return false;
+  // ... 20+ storage_->set_* (WAL/compaction/L0-L4) ...
+  if (snap.enable_compaction_worker) storage_->start_compaction_worker(qd);
+  // ... 编排装配见第 0 章摘录 ...
+  if (!orch_->run_default(&err)) return false;
+  sync_scheduler_budget_from_storage_pressure();
+  return true;
+}
+\end{lstlisting}
+
+\textbf{解释：}\texttt{open} 失败则\textbf{不}创建可用 \texttt{Orchestrator}，保证半初始化不可见；\texttt{open} 之后的 \texttt{set\_*} 块为快照到存储的机械映射（字段全集见第 \ref{sec:runtime-params} 节表）。
+
+\subsection{核心代码：维护算子 \texttt{FlushOperator}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=84]
+class FlushOperator final : public runtime::IOperator {
+ public:
+  explicit FlushOperator(storage::StorageEngine* eng) : eng_(eng) {}
+  std::string_view name() const override { return "flush_memtable"; }
+  bool execute(runtime::OperatorContext&) override { return eng_->flush_memtable(nullptr); }
+ private:
+  storage::StorageEngine* eng_;
+};
+\end{lstlisting}
+
+\textbf{解释：}算子名 \texttt{flush\_memtable} 与 \texttt{GraphExecutor} 注册表键一致；\texttt{execute} 无额外上下文，直接调用数据平面 \texttt{flush\_memtable}（MemTable$\rightarrow$SST+checkpoint，第 \ref{sec:mod-storage} 节）。
+
+\subsection{核心代码：\texttt{WalMutationBudget} 与 \texttt{kv\_put} 同步路径}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=25]
+Engine::WalMutationBudget::WalMutationBudget(Engine* e, std::uint64_t approx_wal_frame_bytes) : eng(e) {
+  const auto snap = eng->config().snapshot();
+  slots = eng->wal_scheduler_slots_for_frame_bytes_(approx_wal_frame_bytes, snap);
+  if (slots) eng->wal_scheduler_acquire_blocking_(slots);
+}
+Engine::WalMutationBudget::~WalMutationBudget() {
+  if (eng && slots) eng->wal_scheduler_release_slots_(slots);
+}
+
+bool Engine::kv_put(const std::string& key, const std::string& value, bool fsync_wal) {
+  // ... 24A 守卫与可选异步队列 ...
+  const std::uint64_t est = storage::StorageEngine::estimate_put_wal_frame_bytes(key, value);
+  WalMutationBudget budget(this, est);
+  const bool ok = storage_->put(key, value, fsync_wal);
+  if (ok) sync_scheduler_budget_from_storage_pressure();
+  return ok;
+}
+\end{lstlisting}
+
+\textbf{解释：}构造时按估计 WAL 帧字节换算 \texttt{WalQueueDepth} 槽并在 \texttt{try\_acquire} 失败时忙等 1ms；析构\textbf{配对释放}。成功 \texttt{put} 后刷新存储压力到调度器，形成写路径闭环（第 \ref{sec:impl-walkthrough} 节有更完整摘录）。

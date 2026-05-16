@@ -1,0 +1,123 @@
+%%
+% @file ocf.sty
+% @brief
+% 自用宏包
+%
+% @author niexw
+% @email niexiaowen@uestc.edu.cn
+%
+\NeedsTeXFormat{LaTeX2e}    % LaTeX 2.09 can't be used (nor non-LaTeX)
+[1995/06/01]                % LaTeX date must be June 1995 or later
+\ProvidesPackage{doc}[2019/10/01 v0.1]
+
+% 字体
+\RequirePackage{xeCJK, fontenc, xunicode, fontspec}
+% 英文字体设置
+\setmainfont{Times New Roman}[	% 微软Times
+  BoldFont = Times New Roman Bold,
+  ItalicFont = Times New Roman Italic,
+  BoldItalicFont = Times New Roman Bold Italic]
+\setsansfont{Noto Sans}[  % Noto Sans
+  BoldFont = Noto Sans Bold,
+  ItalicFont = Noto Sans Italic,
+  BoldItalicFont = Noto Sans Bold Italic]
+\setmonofont{Source Code Pro}[
+  BoldFont = Source Code Pro Bold,
+  ItalicFont = Source Code Pro Italic,
+  BoldItalicFont = Source Code Pro Bold Italic]
+% 中文字体设置
+\setCJKmainfont{Source Han Serif SC}[	% 思源宋体
+  BoldFont = Source Han Serif SC SemiBold,	% 思源宋体
+  ItalicFont = FZNewKai,      	% 方正新楷
+  BoldItalicFont = FZCuKai] 	% 方正粗楷
+\setCJKsansfont{Source Han Sans SC}[	% 思源黑体
+  BoldFont = Source Han Sans SC Bold,	% 思源黑体
+  ItalicFont = FZFangSong, 			% 方正仿宋
+  BoldItalicFont = HYCuFang]	 	% 汉仪粗仿
+\setCJKmonofont{Source Han Serif SC}[
+  BoldFont = Source Han Serif SC,
+  ItalicFont = FZNewKai, 		% 方正新楷
+  BoldItalicFont = FZCuKai] 	% 方正粗楷
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip = 0pt plus 1pt minus 0.1pt
+
+% 参考文献
+\RequirePackage[backend=biber,style=numeric,autocite=plain,sorting=none]{biblatex} % 参考文献格式
+\addbibresource[datatype=bibtex]{reference.bib}
+
+% 插图
+\RequirePackage{graphicx}
+\RequirePackage{stfloats}
+\RequirePackage{lipsum}
+\def\figurename{Fig~} % Fig
+\long\def\setcaption#1#2{\def\@captype{\csname #1\endcsname}
+  \refstepcounter{#1}
+  \noindent\small
+  \csname #1name\endcsname\csname the#1\endcsname.\kern .5em #2}
+
+% 数学符号
+\RequirePackage{amsmath, amsthm, amssymb, amsfonts, mathrsfs}
+% bookmarks
+\RequirePackage[bookmarks]{hyperref}
+% 首段缩进
+\RequirePackage{indentfirst}
+% 颜色
+\RequirePackage{xcolor}
+% 浮动，用于支持figure环境的[H]选项
+\RequirePackage{float}
+% url
+\RequirePackage{url}
+\urlstyle{same}
+% verbatim
+\RequirePackage{fancyvrb}
+% 代码
+\RequirePackage{listings}
+\def\lstlistingname{Listing~} % Listing
+\lstset{
+  basicstyle          =   \footnotesize\sffamily,          % 基本代码风格
+  keywordstyle        =   \color{blue}\footnotesize\bfseries,   % 关键字风格
+  commentstyle        =   \footnotesize\rmfamily\itshape,  % 注释的风格，斜体
+  stringstyle         =   \footnotesize\ttfamily,  % 字符串风格
+  flexiblecolumns,                % 别问为什么，加上这个
+  numbers             =   left,   % 行号的位置在左边
+  numberstyle         =   \footnotesize\ttfamily,    % 行号的样式，小五号，tt等宽字体
+  showspaces          =   false,  % 是否显示空格，显示了有点乱，所以不现实了
+  showstringspaces    =   false,
+  captionpos          =   t,      % 这段代码的名字所呈现的位置，t指的是top上面
+  % frame               =   tb,     % 显示上下边框
+  breaklines          =   true,   % 自动换行，建议不要写太长的行
+  basewidth           =   0.5em,  % 行间距
+}
+\lstdefinestyle{verbose}{
+  basicstyle          =   \footnotesize\ttfamily,   % 基本代码风格
+  keywordstyle        =   \footnotesize\ttfamily,   % 关键字风格
+  commentstyle        =   \footnotesize\ttfamily,   % 注释的风格，斜体
+  numbers             =   none,   % 不显示行号
+  frame               =   ,       % 不显示边框
+}
+\lstdefinestyle{make}{
+  language        =   make,   % 语言Makefile
+  morekeywords    =   {export,include,ifeq,ifndef,ifneq,else,endif,define,endef,call,foreach,MAKECMDGOALS,THIS_MAKEFILE,MAKEFILE_LIST,realpath,dir,lastword,CURDIR,error,eval,shell},
+}
+\lstdefinestyle{c++}{
+  language        =   c++,    % 语言c++
+  frame           =   tb,     % 显示上下边框
+  morekeywords    =   {constexpr,requires,noexcept,decltype,co_await,co_yield,co_return},
+}
+\lstdefinestyle{bash}{
+  language        =   bash,   % 语言bash
+  numbers         =   none,   % 不要行号
+  backgroundcolor =   \color{gray!20}, % 设置背景颜色
+}
+% latex不支持Rust？
+\lstdefinestyle{rust}{
+  frame           =   tb,     % 显示上下边框
+  morekeywords    =   {fn,if,let,mut,pub,struct,enum,impl,trait,use,mod,crate,match,return}, % 手动添加Rust关键字
+}
+% protobuf
+\lstdefinestyle{protobuf}{
+  frame           =   tb,     % 显示上下边框
+  morekeywords    =   {message,enum,option,package,service,import,field,type,map},
+}
+
+\def\sectionname{Section~} % Section

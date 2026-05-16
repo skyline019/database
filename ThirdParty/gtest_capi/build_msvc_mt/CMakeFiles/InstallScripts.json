@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/db/DB/gtest_capi/build_msvc_mt/cmake_install.cmake",
+		"E:/db/DB/gtest_capi/build_msvc_mt/_deps/googletest-build/cmake_install.cmake",
+		"E:/db/DB/gtest_capi/build_msvc_mt/_deps/googletest-build/googlemock/cmake_install.cmake",
+		"E:/db/DB/gtest_capi/build_msvc_mt/_deps/googletest-build/googletest/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -1,0 +1,3 @@
+E:\CMake\bin\cmake.exe -E rm -f CMakeFiles\gmock_main.dir/objects.a
+E:\msys64\mingw64\bin\ar.exe qc CMakeFiles\gmock_main.dir/objects.a @CMakeFiles\gmock_main.dir\objects1.rsp
+E:\msys64\mingw64\bin\g++.exe -shared -o ..\..\..\bin\libgmock_main.dll -Wl,--out-implib,..\..\..\lib\libgmock_main.dll.a -Wl,--major-image-version,1,--minor-image-version,14 -Wl,--whole-archive CMakeFiles\gmock_main.dir/objects.a -Wl,--no-whole-archive @CMakeFiles\gmock_main.dir\linkLibs.rsp

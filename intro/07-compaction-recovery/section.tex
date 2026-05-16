@@ -1,0 +1,88 @@
+\section{Compaction、恢复与 checkpoint 协同}
+\label{sec:mod-compaction-recovery}
+
+\subsection{LSM 清单与状态}
+
+\begin{itemize}
+  \item \fpath{src/engine/storage/include/structdb/storage/manifest.hpp} / \fpath{manifest.cpp}：SST 世代、层级块、\texttt{FORMAT2}（Phase 12）等。
+  \item \fpath{src/engine/storage/include/structdb/storage/lsm_state.hpp}：与 checkpoint 协同的内存态视图。
+\end{itemize}
+
+\subsection{Compaction 协调}
+
+\begin{itemize}
+  \item \fpath{src/engine/storage/include/structdb/storage/compaction_coordinator.hpp}：跨阶段合并策略入口，与 \fpath{src/engine/storage/include/structdb/storage/compaction_io_executor.hpp}（专用 I/O 线程池）配合。
+  \item \fpath{src/engine/storage/include/structdb/storage/compaction_result.hpp}：合并结果枚举/载荷，供调度与可观测性。
+\end{itemize}
+
+\subsection{恢复链}
+
+\begin{itemize}
+  \item \fpath{src/engine/storage/include/structdb/storage/recovery_coordinator.hpp}、\fpath{src/engine/storage/include/structdb/storage/recovery_phase.hpp}：打开引擎时分阶段挂载 WAL、重放、重建 MemTable/undo 栈等（细节以代码与 \fpath{Docs/phases/WAL_REPLAY.md} 为准）。
+  \item \fpath{src/engine/storage/include/structdb/storage/wal_replay_applier.hpp}：把 WAL 记录应用为存储操作的策略对象。
+\end{itemize}
+
+\subsection{Checkpoint 与 undo 水位}
+
+\begin{itemize}
+  \item \fpath{src/engine/storage/include/structdb/storage/checkpoint.hpp}、\fpath{src/engine/storage/include/structdb/storage/checkpoint_undo_coordinator.hpp}：双槽 checkpoint、\texttt{undo\_log\_safe\_prefix\_bytes} 与 v2 元数据（\fpath{Docs/phases/PHASE10.md}、\fpath{Docs/phases/CHECKPOINT_UNDO_PREFIX.md}）。
+\end{itemize}
+
+\subsection{算法小结（不含证明）}
+
+\begin{enumerate}
+  \item \textbf{flush}：活跃 memtable 冻结 $\rightarrow$ 外排写临时 SST $\rightarrow$ 原子 rename $\rightarrow$ MANIFEST 与 checkpoint 顺序提交（失败回滚合并见 \texttt{MemTable::merge\_missing\_from}）。
+  \item \textbf{L0 合并}：选 manifest 中时间序最旧两文件，多路归并输出新 SST，更新指针并回收输入（具体键序与 tomb 规则见 \fpath{Docs/COMPACTION.md}）。
+  \item \textbf{跨层}：L1$\rightarrow$L2、L2$\rightarrow$L3、L3$\rightarrow$L4 均受配置位门控，避免误触未实现路径。
+\end{enumerate}
+
+\subsection{学术解析：恢复—合并—checkpoint 的协同不变式（摘要）}
+
+打开路径上，\texttt{RecoveryCoordinator} 将 WAL 重放、MemTable 再hydration、undo 栈重建等拆为\textbf{有序阶段}（见 \fpath{recovery\_phase.hpp}），每阶段失败可中止 \texttt{open} 并返回诊断字符串。Checkpoint 与 undo 水位由 \texttt{checkpoint\_undo\_coordinator} 维护双槽与\textbf{安全前缀字节数}，使得崩溃后重放可界定\textbf{哪些 WAL 字节已被 checkpoint 锚定}。Compaction 路径与 WAL 写入在文件描述符层面隔离（\texttt{wal.hpp} 注释），降低合并 I/O 与日志追加的相互干扰；异步 worker 路径则通过队列深度与门面压力回调形成\textbf{跨层闭环}（第 \ref{sec:mod-facade}、\ref{sec:mod-orchestration} 节）。
+
+\subsection{核心代码：恢复阶段枚举}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=8]
+enum class StorageRecoveryPhase : std::uint8_t {
+  PrepareDataDir = 0,
+  AcquireExclusiveLock,
+  LoadSegmentCatalogs,
+  OpenWalRedoUndo,
+  LoadManifestIfPresent,
+  LoadCommitSeqHighWater,
+  ReadCheckpointAndReplayWal,
+  OptionalRebuildUndoStack,
+  PersistCommitSeqAfterReplay,
+  ClearStaleMemFlushSnapshot,
+  RefreshSegmentObservability,
+  MarkOpened,
+};
+\end{lstlisting}
+
+\textbf{解释：}\texttt{StorageEngine::open} 按序推进上述阶段；可观测性上每阶段可映射为诊断字符串（\texttt{storage\_recovery\_phase\_cstr}）。\textbf{关键语义点：}\texttt{ReadCheckpointAndReplayWal} 在 checkpoint 锚定偏移之后重放 WAL；\texttt{OptionalRebuildUndoStack} 在 \texttt{kOpenFlagRebuildUndoStackFromLog} 打开时从 \texttt{undo.log} 重建 embed undo 栈。
+
+\subsection{核心代码：门面 \texttt{DrainL0CompactionOperator}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=104]
+class DrainL0CompactionOperator final : public runtime::IOperator {
+  bool execute(runtime::OperatorContext&) override {
+    if (eng_->compaction_worker_started()) {
+      return eng_->enqueue_drain_l0_compaction_and_wait(max_rounds_, nullptr, 0);
+    }
+    return eng_->drain_pending_l0_compactions(max_rounds_, nullptr);
+  }
+};
+\end{lstlisting}
+
+\textbf{解释：}Phase13 ``defer L0'' 模式下 flush 不内联合并，由默认图尾节点 \texttt{drain\_l0\_compaction} 或 \texttt{Engine::drain\_l0\_compaction\_queue} 排空；若启用异步 worker 则入队并等待，否则同步 \texttt{drain\_pending\_l0\_compactions}。每轮通常调用 \texttt{compact\_merge\_two\_oldest\_l0}（manifest 最旧两 L0 文件多路归并）。
+
+\subsection{核心代码：\texttt{flush\_memtable} 失败回滚意图（头文件注释 + \texttt{MemTable}）}
+
+依据 \fpath{storage\_engine.hpp} 与 \fpath{memtable.hpp}，flush 失败路径依赖：
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=37]
+  /// Insert keys from donor only when absent in this (flush rollback when this wins).
+  void merge_missing_from(const IMemTable& donor) override;
+\end{lstlisting}
+
+\textbf{解释：}活跃表在 flush 开始时封存；若 SST 物化/rename/manifest 更新任一步失败，冻结键通过 \texttt{merge\_missing\_from} \textbf{合并回}活跃 MemTable，保证已接受 WAL 的键不因 flush 失败而丢失。成功路径则更新 MANIFEST、推进 checkpoint，并可触发 L0 自动合并（配置门控，见第 \ref{sec:runtime-params} 节 \texttt{l0\_compact\_*} 字段）。

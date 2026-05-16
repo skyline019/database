@@ -1,0 +1,216 @@
+\section{进程入口与文本协议：参数解析}
+\label{sec:parsing-entry}
+
+\textbf{与第 \ref{sec:runtime-params} 节区分：}本节只讨论\textbf{进程 argv}与\textbf{MDB 文本行}如何变成可执行动作；\texttt{EngineConfigSnapshot} 字段表不在本节。
+
+\noindent\textbf{体例（核心摘录）：}只收录\textbf{解析链上的关键数据结构}与\textbf{少量入口/枢纽方法}的源码；\textbf{不}逐行复制全文件。长分支、日志字符串与重复模式以注释占位；需要完整上下文时在仓库中打开对应路径。
+
+% ------------------------------------------------------------------
+\subsection{核心数据结构（头文件）}
+
+\subsubsection{\texttt{MdbVerb} 与 \texttt{MdbParsedLine}（\texttt{mdb\_command\_parser.hpp}）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=9]
+/// Verbs ... (subset implemented in StructDB).
+enum class MdbVerb : int {
+  Unknown = 0,
+  // ... 中间省略数十个动词枚举常量（USE、BEGIN、INSERT、SCAN ...） ...
+  Exit,
+  NotPortable,
+};
+
+struct MdbParsedLine {
+  MdbVerb verb{MdbVerb::Unknown};
+  /// Inner of first `(...)` when applicable; may be empty for bare verbs.
+  std::string_view paren_inner;
+  bool has_paren{false};
+  std::size_t open_paren{0};
+  /// Trailing tokens after the verb for multi-word commands.
+  std::string tail;
+};
+
+bool mdb_parse_command_line(std::string_view line_trimmed, MdbParsedLine* out, std::string* err);
+\end{lstlisting}
+
+\textbf{解析：}\texttt{mdb\_parse\_command\_line} 的产出物就是 \texttt{MdbParsedLine}：\texttt{verb} 决定后续分派；\texttt{tail}/\texttt{paren\_inner} 承载动词参数。枚举 \texttt{MdbVerb} 与 newdb 风格动词对齐，但实现子集以仓库头文件为准。
+
+\subsubsection{\texttt{MdbDispatchEnv}（\texttt{mdb\_dispatch\_env.hpp}）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=13]
+struct MdbDispatchEnv {
+  MdbParsedLine& pl;
+  MdbRunResult& res;
+  LogicalTable& current;
+  structdb::facade::Engine& engine;
+  structdb::client::EmbedClient& client;
+  MdbEnginePorts ports;
+  std::vector<std::string>& line_log;
+  std::vector<std::string>* log_sink;
+  std::function<void()> flush_line_log;
+  std::function<bool()> persist_now;
+  std::function<bool(std::string_view, std::string_view)> txn_v2_append;
+  std::string& err;
+  std::uint64_t storage_read_seq;
+  const std::string& idem;
+  bool fsync_batch;
+  bool& txn_active;
+  LogicalTable& txn_base;
+  bool& txn_read_committed;
+  std::uint64_t& txn_snap_seq;
+  std::map<std::string, LogicalTable>& savepoints;
+  std::optional<std::size_t>& txn_undo_stack_depth_at_begin;
+  MdbQueryPagingState& paging;
+};
+
+MdbRunResult mdb_dispatch_execute_line(MdbDispatchEnv& env);
+\end{lstlisting}
+
+\textbf{解析：}这是\textbf{单行执行}的上下文捆：解析结果 \texttt{pl}、会话表 \texttt{current}、引擎/客户端引用、本次读序列 \texttt{storage\_read\_seq}、幂等键 \texttt{idem}，以及持久化/事务日志两个 \texttt{std::function} 回调。分派函数\textbf{只}接收此环境对象，避免在 \texttt{mdb\_dispatch.cpp} 里散落过长参数列表。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：\texttt{structdb\_app} 的 argv 与最小引擎装配}
+
+\subsubsection{摘录（\texttt{src/app/main.cpp}，枢纽片段）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=27]
+  std::string data_dir = "_data";
+  // ... run_mdb_path / session_dir / repl / page_* 默认值 ...
+  for (int i = 1; i < argc; ++i) {
+    std::string a = argv[i];
+    if (a == "--data-dir" && i + 1 < argc) {
+      data_dir = argv[++i];
+    } else if (a == "--run-mdb" && i + 1 < argc) {
+      run_mdb_path = argv[++i];
+    } else if (a == "--session-dir" && i + 1 < argc) {
+      session_dir = argv[++i];
+    } else if (a == "--repl") {
+      repl = true;
+    }
+    // ... --page / --order / --page-json / --table 等同理 ...
+  }
+  if (session_dir.empty()) {
+    session_dir = (std::filesystem::path(data_dir) / "embed_session").string();
+  }
+  structdb::facade::Engine engine;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = data_dir;
+  snap.version = 1;
+  engine.config().update(1, snap);
+  // std::string err; 与 engine.startup(&err)、REPL / PAGE_JSON / run_mdb_script 分支见仓库 main.cpp
+\end{lstlisting}
+
+\textbf{要点：}argv 解析是\textbf{手写 if/else 链}；装配进引擎的只有 \texttt{data\_dir} 与 \texttt{version}。REPL 分支在仓库中于 \texttt{startup} 成功后：\texttt{EmbedClient::open(session\_dir)}，循环 \texttt{getline}，每行调用 \texttt{mdb\_repl\_execute\_line(...)}（去空白与错误打印见 \texttt{main.cpp} L95--112）。
+
+% ------------------------------------------------------------------
+\subsection{\texorpdfstring{\texttt{mdb\_parse\_command\_line}（词法 $\rightarrow$ \texttt{MdbParsedLine}）}{mdb parse: lexeme to MdbParsedLine}}
+
+\subsubsection{摘录（\texttt{mdb\_command\_parser.cpp}，模式示范）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=61]
+bool mdb_parse_command_line(std::string_view line_trimmed, MdbParsedLine* out, std::string* err) {
+  if (!out) { /* ... */ }
+  *out = MdbParsedLine{};
+  std::string low;
+  low.reserve(line_trimmed.size());
+  for (unsigned char c : line_trimmed) low.push_back(static_cast<char>(std::tolower(c)));
+  // 其后：对 low 做 rfind / == 分支，设置 out->verb / tail / extract_open_paren(...)
+  // ... SAVEPOINT、USE、BEGIN、INSERT 等数十分支见同文件，模式与下例相同 ...
+  if (low == "exit" || low == "quit") {
+    out->verb = MdbVerb::Exit;
+    return true;
+  }
+  // ...
+}
+\end{lstlisting}
+
+\textbf{要点：}统一转小写后匹配；\textbf{不}在此函数访问存储。复杂括号由同文件匿名命名空间中的 \texttt{extract\_open\_paren} 辅助（L47--56）。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：读序列 \texttt{mdb\_storage\_read\_seq\_for\_script}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=37]
+std::uint64_t mdb_storage_read_seq_for_script(facade::Engine& engine, EmbedClient& client, bool txn_active,
+                                              bool txn_read_committed, std::uint64_t txn_snap_seq) {
+  if (txn_active) {
+    const std::uint64_t latest = engine.latest_commit_seq();
+    if (txn_read_committed) return latest;
+    return txn_snap_seq > latest ? latest : txn_snap_seq;
+  }
+  return client.read_snapshot_seq();
+}
+\end{lstlisting}
+
+\textbf{解析：}把 MDB 事务隔离语义压成\textbf{单一整数}，供后续 \texttt{kv\_get} 路径使用：链内读已提交 vs 快照读 vs 非事务的嵌入读序列。
+
+% ------------------------------------------------------------------
+\subsection{核心方法：解析之后进入分派（脚本与 REPL 同构）}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=119]
+    MdbParsedLine pl;
+    std::string perr;
+    if (!mdb_parse_command_line(std::string_view(line), &pl, &perr)) {
+      // 置 res / 打日志后 return（见仓库 L121--127）
+    }
+    const std::uint64_t storage_read_seq =
+        mdb_storage_read_seq_for_script(engine, client, txn_active, txn_read_committed, txn_snap_seq);
+    // persist_now、txn_v2_append：lambda 定义略（见仓库 L132--145）
+    MdbDispatchEnv env{pl,
+                       res,
+                       current,
+                       engine,
+                       client,
+                       MdbEnginePorts::from(engine, client),
+                       line_log,
+                       log_sink,
+                       flush_line_log,
+                       persist_now,
+                       txn_v2_append,
+                       err,
+                       storage_read_seq,
+                       idem,
+                       fsync_batch,
+                       txn_active,
+                       txn_base,
+                       txn_read_committed,
+                       txn_snap_seq,
+                       savepoints,
+                       txn_undo_stack_depth_at_begin,
+                       script_paging};
+    res = mdb_dispatch_execute_line(env);
+\end{lstlisting}
+
+\textbf{要点：}脚本循环（\texttt{run\_mdb\_script}）与 REPL（\texttt{mdb\_repl\_execute\_line}）在\textbf{解析 → 读序列 → 打包 \texttt{MdbDispatchEnv} → \texttt{mdb\_dispatch\_execute\_line}} 四步上同构；差异仅在 \texttt{idem} 生成与事务内持久化实验开关，详见仓库 \texttt{mdb\_runner.cpp}。
+
+% ------------------------------------------------------------------
+\subsection{C ABI：进程外宿主与 FFI 契约}
+\label{sec:capi-binding}
+
+\fpath{src/c_api/include/structdb_capi.h} 与 \fpath{src/c_api/src/structdb_capi.cpp} 将 C++ 的 \texttt{Engine}、\texttt{EmbedClient}、\texttt{mdb\_repl\_execute\_line} / \texttt{run\_mdb\_script} 包装为\textbf{不透明指针}与\textbf{稳定错误码}，供 Rust/Tauri、Python、或其它语言通过动态库加载。\textbf{线程模型：}头文件明确\textbf{所有入口非线程安全}——同一 \texttt{structdb\_engine*} / 嵌入句柄不得跨线程并发调用，与引擎单写者及 MDB runner 假设一致。
+
+\paragraph{版本与符号可见性。}\texttt{structdb\_capi\_version} / \texttt{structdb\_capi\_version\_string} 给出 ABI 语义版本（与 \texttt{project(StructDB VERSION \ldots)} 独立）。Windows 下共享库编译单元定义 \texttt{STRUCTDB\_CAPI\_BUILDING} 导出 \texttt{\_\_declspec(dllexport)}；消费者链接导入库并定义 \texttt{STRUCTDB\_CAPI\_SHARED} 以得到 \texttt{dllimport}。Unix 共享库使用默认可见性属性。
+
+\paragraph{默认路径与 \texttt{structdb\_app} 的差异。}宏 \texttt{STRUCTDB\_CAPI\_DEFAULT\_STORE\_DIR} 与 \texttt{structdb\_engine\_open*} 约定：当 \texttt{data\_dir} 为 \texttt{NULL} 或空串时，数据目录为当前工作目录下 \texttt{\_structdb\_capi/\_data} 的绝对路径规范化结果，避免 WAL/SST 等直接落在 cwd 根；这与 \texttt{structdb\_app} 默认使用 \texttt{\_data} 的布局不同。\texttt{structdb\_capi\_get\_default\_paths} 将 workspace、解析后的 \texttt{data\_dir}、\texttt{embed\_session} 路径以 UTF-8 写出，便于宿主持久化配置。
+
+\paragraph{引擎生命周期与存储 API。}\texttt{structdb\_engine\_open\_ex} 构造 C++ \texttt{Engine}、写入 \texttt{EngineConfigSnapshot::data\_dir}（及 \texttt{open\_flags} 中的独占锁位）、调用 \texttt{startup}；失败返回 \texttt{NULL} 并填充 \texttt{err}。\texttt{structdb\_engine\_shutdown} 在关闭引擎前若仍有打开的 embed 则先 \texttt{structdb\_embed\_close}，再 \texttt{Engine::shutdown}。\texttt{structdb\_engine\_wal\_sync}、\texttt{structdb\_engine\_flush\_memtable}、\texttt{structdb\_engine\_checkpoint} 分别对应存储层 WAL 刷盘、MemTable 落 SST+checkpoint、仅 checkpoint——失败统一映射为 \texttt{STRUCTDB\_CAPI\_ERR\_STORAGE\_IO}。
+
+\subsubsection{摘录：\texttt{structdb\_engine\_open\_ex}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=506]
+structdb_engine* structdb_engine_open_ex(const char* data_dir, uint32_t open_flags, char* err, size_t err_len) {
+  auto* box = new (std::nothrow) structdb_engine();
+  const std::filesystem::path data_fs = !utf8_nonempty(data_dir)
+      ? std::filesystem::absolute(cwd / STRUCTDB_CAPI_DEFAULT_STORE_DIR / "_data")
+      : std::filesystem::absolute(utf8_path_to_fs(data_dir));
+  snap.data_dir = box->data_dir_utf8;
+  box->engine.config().update(1, snap);
+  if (!box->engine.startup(&e)) { delete box; return nullptr; }
+  box->started = true;
+  return box;
+}
+\end{lstlisting}
+
+\textbf{解释：}C 层为 C++ \texttt{Engine} 的薄包装；异常捕获后写入 \texttt{err} 缓冲，避免越过 ABI 边界抛出。
+
+\paragraph{嵌入会话与 MDB。}\texttt{structdb\_embed\_open} 在已启动引擎上打开\textbf{单实例}嵌入客户端（重复 open 失败）。\texttt{structdb\_embed\_save\_checkpoint} 对应 \texttt{EmbedClient::save\_checkpoint}，将会话 journal 的 \texttt{last\_ack\_seq} 与引擎检查点指针落盘。\texttt{structdb\_mdb\_execute\_line\_ex} 走 REPL 同构路径，\texttt{structdb\_mdb\_run\_options} 支持 V1/V2/V3 结构体大小协商：批次/事务 fsync、日志文件与回调、\texttt{repl\_exit\_requested\_out}、\texttt{structdb\_long\_task\_control}（协作取消与进度，可与 \texttt{structdb\_engine\_bind\_long\_task} 及脚本批 \texttt{structdb\_engine\_begin\_mdb\_script\_batch} 联用）。\texttt{structdb\_run\_mdb\_file\_*} 每次运行开始\textbf{删除} \texttt{session\_dir/\_structdb\_embed/session.txn}，故不适合``跨运行续未提交 REPL 事务''；续事务须固定 \texttt{session\_dir} 并仅用 \texttt{structdb\_mdb\_execute\_line} 系列 API。
+
+\paragraph{与 CMake 关系。}\texttt{structdb\_capi} 与 \texttt{structdb\_capi\_shared} 均 \texttt{PUBLIC} 链接 \texttt{structdb\_client\_mdb}、\texttt{structdb\_client\_embed}、\texttt{structdb\_facade}、\texttt{structdb\_infra}（第 \ref{sec:cmake-build} 节）。GUI 见第 \ref{sec:repo-tree} 节。

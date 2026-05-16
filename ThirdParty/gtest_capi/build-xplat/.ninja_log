@@ -1,0 +1,20 @@
+# ninja log v7
+49	1246	8001163195243545	_deps/googletest-build/googletest/CMakeFiles/gtest_main.dir/src/gtest_main.cc.obj	cfc6dd81c32f5d5a
+64	1339	8001163195383488	CMakeFiles/gtest_capi_samples.dir/examples/cpp/sample_tests.cpp.obj	7fb55520e83096dc
+69	1475	8001163195433451	_deps/googletest-build/googlemock/CMakeFiles/gmock_main.dir/src/gmock_main.cc.obj	739a4ce1d86d1263
+58	1793	8001163195333500	CMakeFiles/gtest_capi_samples.dir/src/gtest_capi.cpp.obj	e8a97521dac21c41
+54	1955	8001163195293516	CMakeFiles/gtest_capi.dir/src/gtest_capi.cpp.obj	7c607f7b5196f8d4
+44	3734	8001163195193471	_deps/googletest-build/googlemock/CMakeFiles/gmock.dir/src/gmock-all.cc.obj	335629284d30b77e
+41	13524	8001163195153471	_deps/googletest-build/googletest/CMakeFiles/gtest.dir/src/gtest-all.cc.obj	cf147f54367aa834
+13530	13712	8001163331689103	bin/libgtest.dll	557f2932122a88db
+13530	13712	8001163331689103	lib/libgtest.dll.a	557f2932122a88db
+13721	13822	8001163332874653	bin/libgtest_main.dll	e001b4168323ceaf
+13721	13822	8001163332874653	lib/libgtest_main.dll.a	e001b4168323ceaf
+13712	13842	8001163332949807	bin/libgmock.dll	c7aa7f1147e28735
+13712	13842	8001163332949807	lib/libgmock.dll.a	c7aa7f1147e28735
+13822	13948	8001163334135407	libgtest_capi.dll	69b6aa861c097e65
+13822	13948	8001163334135407	libgtest_capi.dll.a	69b6aa861c097e65
+13832	13979	8001163334414982	libgtest_capi_samples.dll	eefe3f33fc480fee
+13832	13979	8001163334414982	libgtest_capi_samples.dll.a	eefe3f33fc480fee
+13842	14017	8001163334833956	bin/libgmock_main.dll	b260b15ea786b0b7
+13842	14017	8001163334833956	lib/libgmock_main.dll.a	b260b15ea786b0b7

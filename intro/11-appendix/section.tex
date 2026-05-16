@@ -1,0 +1,40 @@
+\section*{附录：Markdown 权威索引与 PDF 工具链}
+\addcontentsline{toc}{section}{附录：Markdown 权威索引与 PDF 工具链}
+
+\subsection{Markdown 文档（工程真相源）}
+
+\begin{description}
+  \item[\fpath{Docs/POLICY.md}] 方针、文件系统保底、事务链、单写者、耐久矩阵。
+  \item[\fpath{Docs/ARCHITECTURE.md}] Mermaid 总图、Tauri 命令表、键空间摘录。
+  \item[\fpath{Docs/ENGINE\_RUNTIME\_CONFIG.md}] 引擎运行时字段与调参说明（与第 \ref{sec:runtime-params} 节长表互补）。
+  \item[\fpath{Docs/OPTIMIZATION\_PLAN.md}] 性能优化路线图与实验记录入口。
+  \item[\fpath{Docs/STRUCTDB\_EVALUATION\_SUMMARY.md}] 评估摘要与实验结论索引。
+  \item[\fpath{Docs/NEXT\_REFACTOR\_RECOMMENDATIONS.md}] 后续重构建议（与源码现状对照阅读）。
+  \item[\fpath{Docs/phases/TESTING\_TXN\_CHAIN.md}] 测试维度与 \texttt{gtest\_filter} 大全（第 \ref{sec:test-matrix} 节）。
+  \item[\fpath{Docs/phases/WAL\_REPLAY.md}] WAL 重放判别。
+  \item[\fpath{Docs/README.md}] 全部 PHASE 专文索引表。
+  \item[\fpath{gui/rust\_gui/README.md}] GUI 构建、环境变量与 Tauri 命令（与第 \ref{sec:repo-tree}、\ref{sec:capi-binding} 节）。
+\end{description}
+
+\subsection{仅编译本 PDF（WSL）}
+
+\begin{lstlisting}[language=bash]
+cd /mnt/e/db/StructDB/intro   # 按实际挂载路径
+sudo apt install -y latexmk texlive-xetex texlive-lang-chinese texlive-latex-extra fonts-noto-cjk
+chmod +x build_wsl.sh && ./build_wsl.sh
+# 输出：intro/out/structdb-intro.pdf
+\end{lstlisting}
+
+\noindent\textbf{说明：}上述步骤\textbf{不}编译 StructDB C++ 引擎；引擎与测试目标以仓库根及各子目录 \fpath{CMakeLists.txt} 为准（手册第 \ref{sec:cmake-build} 节），\fpath{README.md} 仅为辅助说明。
+
+\subsection{核心代码：PDF 构建脚本}
+
+\begin{lstlisting}[language=bash, numbers=left, firstnumber=1]
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")"
+latexmk -xelatex -jobname=structdb-intro main.tex
+echo "OK: out/structdb-intro.pdf"
+\end{lstlisting}
+
+\textbf{解释：}\texttt{-xelatex} 配合 \texttt{ctexart} 与 \texttt{listings} 渲染中文与代码块；\texttt{main.tex} 通过 \texttt{input} 聚合各章 \fpath{section.tex}。多次编译可解析交叉引用（\texttt{latexmk} 默认多遍）。

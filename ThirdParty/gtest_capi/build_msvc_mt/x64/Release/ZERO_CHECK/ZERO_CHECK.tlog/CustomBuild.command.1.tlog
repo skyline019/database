@@ -1,0 +1,10 @@
+^E:\DB\DB\GTEST_CAPI\BUILD_MSVC_MT\CMAKEFILES\3DEDA4576FE3ABEB5EFAFDCD5508643B\GENERATE.STAMP.RULE
+setlocal
+E:\CMake\bin\cmake.exe -SE:/db/DB/gtest_capi -BE:/db/DB/gtest_capi/build_msvc_mt --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file E:/db/DB/gtest_capi/build_msvc_mt/gtest_capi_standalone.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,1 @@
+-I"E:/db/DB/newdb/build_mingw/_deps/googletest-src/googlemock/include" -I"E:/db/DB/newdb/build_mingw/_deps/googletest-src/googlemock" -isystem "E:/db/DB/newdb/build_mingw/_deps/googletest-src/googletest/include" -isystem "E:/db/DB/newdb/build_mingw/_deps/googletest-src/googletest"

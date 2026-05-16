@@ -1,0 +1,117 @@
+\section{引擎内存配置：\texttt{EngineConfigSnapshot}}
+\label{sec:runtime-params}
+
+\textbf{本节不是命令行或 MDB 文本解析：}进程 argv 与 MDB 行格式见第 \ref{sec:parsing-entry} 节；二者与下表\textbf{分列}，避免将 ``\texttt{--data-dir}'' 等外壳参数与数十个引擎内部字段混在同一语境阅读。
+
+本节逐项列出 \fpath{src/engine/facade/include/structdb/facade/config.hpp} 中 \texttt{EngineConfigSnapshot} 的\textbf{字段、类型、默认值与语义}；引擎在 \texttt{Engine::startup} 中将它们映射到 \texttt{StorageEngine::set\_*}（控制流锚点见第 \ref{sec:impl-walkthrough} 节与第 \ref{sec:mod-facade} 节）。
+
+\subsection{\texttt{ConfigurableEngine}：配置快照的并发与更新语义}
+
+\texttt{Engine} 持有 \texttt{ConfigurableEngine config\_}。实现为私有 \texttt{mutable std::mutex mu\_} 保护单个 \texttt{EngineConfigSnapshot snap\_}：\texttt{snapshot()} 在锁内复制整个快照并按值返回；\texttt{update(new\_version, s)} 在锁内 \texttt{snap\_ = std::move(s)} 并强制 \texttt{snap\_.version = new\_version}；\texttt{version()} 在锁内读版本号。
+
+\textbf{语义：}各热路径通过 \texttt{config().snapshot()} 取得\textbf{一致快照}，避免在读多个相关字段时被并发 \texttt{update} 交错；代价是每次调用一次全结构拷贝（字段数十个，工程上可接受）。若干成员（如 \texttt{memtable\_backend}）仅在 \texttt{StorageEngine::open} 之前消费；运行期修改不保证被存储层动态接纳，须对照 \texttt{startup} 中 \texttt{set\_*} 顺序与头文件注释。
+
+\subsection{字段分组与存储层映射（阅读长表向导）}
+
+下表可按下列\textbf{关切}分组阅读，并与第 \ref{sec:mod-storage}、\ref{sec:mod-compaction-recovery} 节及 \fpath{Docs/POLICY.md} 对照。
+
+\begin{description}
+  \item[持久化根与打开行为] \texttt{data\_dir}、\texttt{storage\_open\_flags}、\texttt{exclusive\_data\_dir\_lock}、\texttt{memtable\_limit\_bytes}、\texttt{memtable\_backend}、\texttt{fsync\_every\_write}。
+  \item[WAL 与 undo 生命周期] \texttt{wal\_*}、\texttt{undo\_*}、\texttt{io\_backend}（段滚动、归档、trim、undo 分段、WAL 写 I/O 后端）。
+  \item[L0--L4 合并策略] \texttt{l0\_compact\_*}、\texttt{l1\_compact\_*}、\texttt{l2\_compact\_*}、\texttt{l3\_compact\_*}、\texttt{l4\_compact\_*}（阈值、每 flush 轮数、推迟 drain、跨层物化开关）。
+  \item[节流与令牌桶] \texttt{compaction\_merge\_*}、\texttt{wal\_append\_*}、\texttt{compaction\_io\_*}、\texttt{compaction\_parallel\_sst\_reads} 等。
+  \item[压力到调度器] \texttt{storage\_pressure\_*}、\texttt{wal\_scheduler\_*}（与 \texttt{WalMutationBudget}、\texttt{sync\_scheduler\_budget\_from\_storage\_pressure} 配对）。
+  \item[MDB 与 24A] \texttt{mdb\_persist\_in\_begin}、\texttt{mdb\_chain\_rollback\_on\_mdb\_rollback}、\texttt{observe\_embed\_bypass\_*}、\texttt{strict\_reject\_direct\_kv\_put\_*}、\texttt{mdb\_incremental\_persist}。
+  \item[门面写队列] \texttt{kv\_put\_async\_queue\_depth}（第 \ref{sec:impl-walkthrough} 节）。
+\end{description}
+
+{\footnotesize
+\begin{longtable}{@{}p{0.34\linewidth}p{0.12\linewidth}p{0.18\linewidth}p{0.30\linewidth}@{}}
+\toprule
+\textbf{字段} & \textbf{类型} & \textbf{默认} & \textbf{语义摘要} \\
+\midrule
+\endhead
+\texttt{version} & \texttt{uint64} & \texttt{0} & 配置版本号；\texttt{ConfigurableEngine::update} 写入。 \\
+\texttt{data\_dir} & \texttt{string} & \texttt{\_data} & 引擎持久化根；WAL/SST/checkpoint 等（\fpath{Docs/POLICY.md} \S4.0）。 \\
+\texttt{memtable\_limit\_bytes} & \texttt{uint64} & \texttt{8MiB} & 活跃 memtable 体量阈值（与 flush 策略相关）。 \\
+\texttt{memtable\_backend} & \texttt{enum} & \texttt{SkipList} & \texttt{Map} 或 \texttt{SkipList}；须在 \texttt{StorageEngine::open} 前生效。 \\
+\texttt{fsync\_every\_write} & \texttt{bool} & \texttt{false} & 更强耐久写路径开关（类比见 \fpath{Docs/phases/TXN_INNODB_MAP.md}）。 \\
+\texttt{storage\_open\_flags} & \texttt{unsigned} & \texttt{0} & 传给 \texttt{StorageEngine::open}（如 rebuild undo）。 \\
+\texttt{wal\_auto\_trim\_prefix\_after\_flush} & \texttt{bool} & \texttt{false} & flush 后尝试 WAL 前缀裁剪（Phase 4B）。 \\
+\texttt{wal\_archive\_gc\_after\_flush} & \texttt{bool} & \texttt{false} & 与 trim 联用，回收封存段（Phase 21A）。 \\
+\texttt{undo\_auto\_truncate\_after\_flush} & \texttt{bool} & \texttt{false} & flush 成功后截断 \texttt{undo.log}（八期/4C）。 \\
+\texttt{l0\_compact\_trigger\_threshold} & \texttt{uint32} & \texttt{0} & L0 文件数阈值；\texttt{0}=关闭 Phase11 自动合并。 \\
+\texttt{l0\_compact\_max\_rounds\_per\_flush} & \texttt{uint32} & \texttt{4} & 每次 flush 后最多合并轮数；\texttt{0} 当 4。 \\
+\texttt{l1\_compact\_output\_from\_l0\_merge} & \texttt{bool} & \texttt{false} & L0 双路合并输出 L1（Phase12）。 \\
+\texttt{l2\_compact\_output\_from\_l1\_merge} & \texttt{bool} & \texttt{false} & L1$\rightarrow$L2（Phase15）。 \\
+\texttt{l3\_compact\_output\_from\_l2\_merge} & \texttt{bool} & \texttt{false} & L2$\rightarrow$L3（Phase22A）。 \\
+\texttt{l4\_compact\_output\_from\_l3\_merge} & \texttt{bool} & \texttt{false} & L3$\rightarrow$L4（Phase23B）。 \\
+\texttt{l0\_compact\_max\_inline\_rounds\_per\_flush} & \texttt{uint32} & \texttt{0} & 内联 L0 自动合并每 flush 上限（Phase23A）。 \\
+\texttt{l0\_compact\_defer\_after\_flush} & \texttt{bool} & \texttt{false} & flush 后推迟到 \texttt{drain}（Phase13）。 \\
+\texttt{storage\_pressure\_l0\_soft\_start} & \texttt{uint32} & \texttt{0} & L0 深度软阈值，收紧 WAL 队列预算（Phase14）。 \\
+\texttt{storage\_pressure\_compaction\_queue\_soft\_pct} & \texttt{uint32} & \texttt{0} & 队列深度百分比阈值，收紧 CompactionSlots（21C）。 \\
+\texttt{storage\_pressure\_deferred\_l0\_slot\_tighten} & \texttt{bool} & \texttt{false} & pending defer L0 时扣减 compaction 槽。 \\
+\texttt{io\_backend} & \texttt{IoBackendConfig} & 默认构造 & WAL \texttt{WalWriter} I/O 后端（Phase18/20）。 \\
+\texttt{wal\_segment\_roll\_max\_bytes} & \texttt{uint64} & \texttt{0} & WAL 多段滚动阈值（Phase20A）。 \\
+\texttt{wal\_fsync\_min\_interval\_ms} & \texttt{uint32} & \texttt{0} & 成功 fsync 最小间隔。 \\
+\texttt{compaction\_merge\_min\_interval\_ms} & \texttt{uint32} & \texttt{0} & L0 合并最小间隔。 \\
+\texttt{compaction\_merge\_max\_bytes\_per\_second} & \texttt{uint64} & \texttt{0} & 合并物化字节令牌桶速率。 \\
+\texttt{compaction\_merge\_burst\_bytes} & \texttt{uint64} & \texttt{0} & 合并桶突发上限。 \\
+\texttt{compaction\_sequential\_sst\_read} & \texttt{bool} & \texttt{true} & 合并读 SST 顺序扫描提示。 \\
+\texttt{compaction\_worker\_low\_priority\_thread} & \texttt{bool} & \texttt{true} & worker/IO 执行器低优先级线程。 \\
+\texttt{compaction\_dedicated\_io\_executor} & \texttt{bool} & \texttt{false} & 合并物化专用线程池。 \\
+\texttt{compaction\_io\_chunk\_bytes} & \texttt{uint32} & \texttt{0} & 分块读写大小；\texttt{0}=实现默认。 \\
+\texttt{compaction\_io\_pool\_threads} & \texttt{uint32} & \texttt{0} & 专用池线程数；\texttt{0}=2。 \\
+\texttt{compaction\_parallel\_sst\_reads} & \texttt{bool} & \texttt{true} & 双输入 SST 并行读。 \\
+\texttt{wal\_append\_max\_bytes\_per\_second} & \texttt{uint64} & \texttt{0} & WAL 帧字节令牌桶。 \\
+\texttt{wal\_append\_burst\_bytes} & \texttt{uint64} & \texttt{0} & WAL 桶突发。 \\
+\texttt{storage\_pressure\_wal\_bytes\_soft\_start} & \texttt{uint64} & \texttt{0} & 磁盘 WAL 字节软起点。 \\
+\texttt{storage\_pressure\_wal\_bytes\_soft\_step\_bytes} & \texttt{uint64} & \texttt{0} & 超软起点每步 WAL 队列收紧量；\texttt{0}=64MiB。 \\
+\texttt{wal\_scheduler\_bytes\_per\_depth\_slot} & \texttt{uint64} & \texttt{0} & 变异前按估计 WAL 帧占用 \texttt{WalQueueDepth} 槽。 \\
+\texttt{wal\_scheduler\_max\_slots\_per\_op} & \texttt{uint32} & \texttt{0} & 单次变异最大槽数。 \\
+\texttt{undo\_segment\_roll\_max\_bytes} & \texttt{uint64} & \texttt{0} & \texttt{undo.log} 物理分段（22C）。 \\
+\texttt{enable\_compaction\_worker} & \texttt{bool} & \texttt{false} & 异步 compaction worker（20B）。 \\
+\texttt{compaction\_worker\_queue\_depth} & \texttt{uint32} & \texttt{64} & worker 队列深度。 \\
+\texttt{mdb\_persist\_in\_begin} & \texttt{bool} & \texttt{true} & \texttt{BEGIN} 内是否走 \texttt{persist\_table}（Phase17/23）。 \\
+\texttt{mdb\_chain\_rollback\_on\_mdb\_rollback} & \texttt{bool} & \texttt{false} & \texttt{ROLLBACK} 是否链式弹 embed undo（23C）。 \\
+\texttt{observe\_embed\_bypass\_during\_mdb\_chain\_txn} & \texttt{bool} & \texttt{false} & 24A：统计绕过 MDB 的 \texttt{mdb\$} \texttt{kv\_put}。 \\
+\texttt{strict\_reject\_direct\_kv\_put\_during\_mdb\_chain\_txn} & \texttt{bool} & \texttt{false} & 24A：硬拒绝直接 \texttt{mdb\$} \texttt{kv\_put}。 \\
+\texttt{exclusive\_data\_dir\_lock} & \texttt{bool} & \texttt{false} & \texttt{data\_dir/.structdb\_exclusive.lock} 建议锁（35）。 \\
+\texttt{kv\_put\_async\_queue\_depth} & \texttt{uint32} & \texttt{0} & Facade \texttt{kv\_put} 异步队列深度；\texttt{0}=同步（36）。 \\
+\texttt{mdb\_incremental\_persist} & \texttt{bool} & \texttt{true} & 仅脏行 + 行索引增量持久化（v2 表）。 \\
+\bottomrule
+\end{longtable}
+}
+
+\noindent\textbf{用法提示：}生产调参应同时阅读 \fpath{Docs/ENGINE_RUNTIME_CONFIG.md}、\fpath{Docs/POLICY.md} \S3--\S4 与相关 \fpath{Docs/phases/PHASE*.md}，避免仅按默认值推断耐久语义。
+
+\subsection{核心代码：\texttt{EngineConfigSnapshot} 结构头部}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=12]
+struct EngineConfigSnapshot {
+  std::uint64_t version{0};
+  std::string data_dir{"_data"};
+  std::uint64_t memtable_limit_bytes{8 * 1024 * 1024};
+  structdb::storage::MemTableBackend memtable_backend{MemTableBackend::SkipList};
+  bool fsync_every_write{false};
+  unsigned storage_open_flags{0};
+  bool wal_auto_trim_prefix_after_flush{false};
+  // ... wal_*, l0_compact_*, storage_pressure_*, mdb_*, kv_put_async_queue_depth ...
+  bool mdb_incremental_persist{true};
+};
+\end{lstlisting}
+
+\textbf{解释：}结构体为\textbf{扁平 POD + string}，便于 \texttt{ConfigurableEngine::snapshot()} 整份拷贝。注释（头文件中）标明各字段对应 PHASE 与 \texttt{StorageEngine::set\_*} 消费点；下表为全集展开，上摘录仅示\textbf{字段密度}与默认值风格。
+
+\subsection{核心代码：\texttt{structdb\_app} 仅写入 \texttt{data\_dir}}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=94]
+  structdb::facade::Engine engine;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = data_dir;
+  snap.version = 1;
+  engine.config().update(1, snap);
+  if (!engine.startup(&err)) { /* ... */ }
+\end{lstlisting}
+
+\textbf{解释：}命令行宿主\textbf{不}暴露数十引擎内部开关；其余字段保持 \texttt{config.hpp} 默认。GUI/C API 同理仅装配路径与少量标志（第 \ref{sec:parsing-entry}、\ref{sec:capi-binding} 节）。生产调参需显式构造 \texttt{EngineConfigSnapshot} 并 \texttt{update} 后再 \texttt{startup}，或通过测试/基准中的 fixture 注入。

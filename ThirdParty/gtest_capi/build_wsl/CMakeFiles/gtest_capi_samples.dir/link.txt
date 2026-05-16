@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared -Wl,-soname,libgtest_capi_samples.so -o libgtest_capi_samples.so CMakeFiles/gtest_capi_samples.dir/src/gtest_capi.cpp.o CMakeFiles/gtest_capi_samples.dir/examples/cpp/sample_tests.cpp.o  -Wl,-rpath,/mnt/e/db/DB/gtest_capi/build_wsl/lib lib/libgtest_main.so.1.14.0 lib/libgtest.so.1.14.0 

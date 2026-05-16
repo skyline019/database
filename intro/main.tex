@@ -1,0 +1,76 @@
+\documentclass[UTF8, a4paper]{ctexart}
+
+\usepackage{geometry}
+\geometry{margin=2cm}
+
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  urlcolor=blue
+}
+
+\usepackage{xurl}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{seqsplit}
+\usepackage{longtable}
+\usepackage{booktabs}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  columns=fullflexible,
+  breaklines=true,
+  breakatwhitespace=false,
+  frame=single,
+  rulecolor=\color{black!20},
+  keywordstyle=\color{blue!70!black},
+  commentstyle=\color{black!60},
+  stringstyle=\color{red!60!black},
+  showstringspaces=false,
+  tabsize=2
+}
+
+\newcommand{\id}[1]{\texttt{\seqsplit{#1}}}
+\newcommand{\fpath}[1]{\path{#1}}
+
+\title{StructDB 源码架构学术技术报告\\（整体架构 · 分模块方法语义 · CMake 工程 · 测试矩阵）}
+\author{StructDB / intro}
+\date{\today}
+
+\begin{document}
+\sloppy
+\setlength{\emergencystretch}{2em}
+\maketitle
+
+\begin{abstract}
+本文以\textbf{学术技术报告}体例给出 StructDB 的\textbf{整体分层架构}（第 \ref{sec:arch-layers} 节）、\textbf{仓库树与宿主边界}（第 \ref{sec:repo-tree} 节）、\textbf{数据库源码核心模块导航表}（表 \ref{tab:core-corpus}），并在后续章节对门面、编排、存储、版本化 I/O、合并与恢复、MDB/嵌入、\textbf{C ABI（FFI）}（第 \ref{sec:capi-binding} 节）等子系统作\textbf{分模块}的\textbf{数据结构 + 关键方法实现语义}解析；\textbf{全量字段与形式化证明}仍以 \fpath{Docs/} Markdown 为准。工程构建以 \fpath{CMakeLists.txt} 为准（第 \ref{sec:cmake-build} 节）；\textbf{argv/MDB 解析}与\textbf{\texttt{EngineConfigSnapshot}}分列（第 \ref{sec:parsing-entry}、\ref{sec:runtime-params} 节）。附核心源码摘录（第 \ref{sec:impl-walkthrough} 节）与测试矩阵。GUI 见 \fpath{gui/rust\_gui/README.md}；WSL 仅用于编译本 PDF。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{01-document-scope/section}
+\input{00-academic-framework/section}
+\input{02-repository-tree/section}
+\input{12-cmake-build/section}
+\input{03-facade-engine/section}
+\input{04-orchestration-stack/section}
+\input{05-storage-engine/section}
+\input{06-versioning-io/section}
+\input{07-compaction-recovery/section}
+\input{08-mdb-embed-api/section}
+\input{13-parsing-entry/section}
+\input{14-implementation-walkthrough/section}
+\input{09-runtime-parameters/section}
+\input{10-test-matrix/section}
+
+\appendix
+\input{11-appendix/section}
+
+\end{document}

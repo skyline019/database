@@ -1,0 +1,33 @@
+{
+  "name": "structdb-rust-vue-gui",
+  "version": "1.8.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "sync-version-from-capi": "node ./scripts/sync_gui_version_from_capi.mjs",
+    "predev": "node ./scripts/sync_gui_version_from_capi.mjs",
+    "prebuild": "node ./scripts/sync_gui_version_from_capi.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:plugin": "powershell -ExecutionPolicy Bypass -File ./scripts/build_tauri_plugin_bundle.ps1"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "@element-plus/icons-vue": "^2.3.2",
+    "@tauri-apps/api": "^2.0.0",
+    "element-plus": "^2.13.7",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "vitest": "^4.0.2"
+  }
+}

@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\db\DB\gtest_capi\build_msvc_mt\CMakeFiles\74bc1514f9b076bddedba72af1799b8b\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{805757DB-3D3B-3282-AF5C-59B8BEBB8E1D}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,152 @@
+\section{学术体例、文档结构与权威来源}
+\label{sec:doc-academic}
+
+\subsection{写作目的与读者模型}
+
+本文档以\textbf{学术技术报告}体例撰写：在\textbf{不替代}仓库内 Markdown 长文证明（\fpath{Docs/POLICY.md}、\fpath{Docs/phases/}）的前提下，为 StructDB 的 C++ 实现提供\textbf{可复核}的\textbf{分层架构说明}、\textbf{模块边界}、\textbf{核心抽象（数据结构）}与\textbf{关键方法的行为语义及实现要点}。读者被假定为具备操作系统、存储引擎与并发基础的研究者或高级工程读者，需将本文与源码\textbf{对照阅读}。
+
+\subsection{术语与约定}
+
+\begin{description}
+  \item[数据平面（Data Plane）] 指 \texttt{StorageEngine} 及其 WAL、MemTable、SST、Manifest、checkpoint、undo/redo 等持久化与检索路径。
+  \item[控制平面（Control Plane）] 指 \texttt{Orchestration} 栈（Planner / Scheduler / GraphExecutor / Orchestrator）对维护任务（flush、checkpoint、L0 drain）的调度与预算。
+  \item[门面（Facade）] 指 \texttt{structdb::facade::Engine}：对外暴露窄 KV 接口，并在写路径上叠加 WAL 队列预算与存储压力反馈。
+  \item[嵌入层（Embed）] 指 \texttt{EmbedClient} 及 MDB 客户端：在引擎之上提供表逻辑、会话日志与脚本/REPL 语义。
+  \item[读视图（Read View）] 由 \texttt{read\_max\_seq}（引擎 \texttt{kv\_get}）或 MDB 侧 \texttt{mdb\_storage\_read\_seq\_for\_script} 共同实现的\textbf{单调提交序列上界}裁剪。
+\end{description}
+
+\subsection{与仓库其它制品的关系}
+
+\begin{itemize}
+  \item \textbf{工程真相源：}目标、选项与链接关系以 \fpath{CMakeLists.txt} 为准（第 \ref{sec:cmake-build} 节）。
+  \item \textbf{语义与不变式真相源：}耐久、事务链、单写者等以 \fpath{Docs/POLICY.md} 及对应 PHASE 专文为准；本文给出\textbf{实现落点}（文件/类型/方法），并在明显处复述关键不变式\textbf{摘要}。
+  \item \textbf{源码摘录原则：}仅摘录\textbf{核心数据结构}与\textbf{枢纽方法}；机械重复的 \texttt{set\_*} 映射、冗长日志与枚举全集以文字归纳并指向头文件。
+\end{itemize}
+
+\section{整体架构：分层、依赖与主要控制流}
+\label{sec:arch-layers}
+
+\subsection{逻辑分层与依赖方向}
+
+StructDB 采用\textbf{严格向下依赖}的静态链接结构：上层可包含下层头文件，下层不依赖 MDB/Embed。图 \ref{fig:layer-stack} 给出\textbf{逻辑分层}（与物理目录大致对应，但不一一等同）。
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  node distance=5mm,
+  box/.style={draw, rounded corners=2pt, align=left, minimum width=0.92\linewidth, inner sep=5pt, font=\small},
+  lbl/.style={font=\footnotesize\itshape, anchor=east}
+]
+\node[box] (L1) {\textbf{L1 宿主与绑定：} 可执行程序 structdb\_app、C ABI、GUI 宿主（FFI）};
+\node[box, below=of L1] (L2) {\textbf{L2 表逻辑与协议：} MDB 解析与分派、交互 runner；EmbedClient 会话与批次提交};
+\node[box, below=of L2] (L3) {\textbf{L3 门面：} Engine 与可配置快照；WAL 预算、异步写入、压力反馈};
+\node[box, below=of L3] (L4) {\textbf{L4 编排：} Orchestrator；GraphExecutor；ExecutionScheduler（资源预算）；ExecutionPlan（算子 DAG）};
+\node[box, below=of L4] (L5) {\textbf{L5 数据平面：} StorageEngine；WAL 与协调器；MemTable 管理；SST 与 Manifest 与 LsmState；恢复与合并子系统};
+\node[box, below=of L5] (L6) {\textbf{L6 基础设施：} engine/infra 与 Base 库（I/O、句柄、追踪）};
+\draw[-{Stealth[length=2.2mm]}, thick] (L2.south west) ++(0.3,0) -- node[lbl, left=2mm] {调用} (L3.north west);
+\draw[-{Stealth[length=2.2mm]}, thick] (L3.south west) ++(0.3,0) -- node[lbl, left=2mm] {装配/回调} (L4.north west);
+\draw[-{Stealth[length=2.2mm]}, thick] (L4.south west) ++(0.3,0) -- node[lbl, left=2mm] {算子执行} (L5.north west);
+\end{tikzpicture}
+\caption{StructDB 逻辑分层与向下依赖（箭头表示典型运行时调用方向；静态链接边见 CMake）。}
+\label{fig:layer-stack}
+\end{figure}
+
+\subsection{两条正交控制流}
+
+\paragraph{（A）交互式/脚本式请求流（L2$\rightarrow$L3$\rightarrow$L5）。}
+MDB 文本行经 \texttt{mdb\_parse\_command\_line} 变为 \texttt{MdbParsedLine}，再经 \texttt{mdb\_dispatch\_execute\_line} 访问逻辑表状态并调用 \texttt{Engine::kv\_*} 或 \texttt{EmbedClient::submit}。该路径的\textbf{核心数据结构}为 \texttt{MdbParsedLine}、\texttt{MdbDispatchEnv}（第 \ref{sec:parsing-entry} 节）。
+
+\paragraph{（B）引擎启动与维护图（L3$\rightarrow$L4$\rightarrow$L5）。}
+\texttt{Engine::startup} 在存储 \texttt{open} 成功后构造预算器、调度器、执行器与 \texttt{Orchestrator}，注册 \texttt{noop}/\texttt{flush\_memtable}/\texttt{checkpoint}/\texttt{drain\_l0\_compaction} 等算子，并执行 \texttt{run\_default} 完成首次默认图。该路径的\textbf{核心数据结构}为 \texttt{OperatorNode}、\texttt{ExecutionPlan}、\texttt{ResourceBudget}（第 \ref{sec:mod-orchestration} 节）。
+
+\subsection{写路径与读路径（摘要）}
+
+\textbf{写路径（同步热路径）：} \texttt{Engine::kv\_put} $\rightarrow$（可选 24A 守卫）$\rightarrow$（可选异步队列）$\rightarrow$ \texttt{estimate\_put\_wal\_frame\_bytes} + \texttt{WalMutationBudget}（占用 \texttt{WalQueueDepth}）$\rightarrow$ \texttt{StorageEngine::put} $\rightarrow$（成功）\texttt{sync\_scheduler\_budget\_from\_storage\_pressure}。其中 \texttt{WalMutationBudget} 为 RAII，保证槽位配对释放（第 \ref{sec:impl-walkthrough} 节摘录）。
+
+\textbf{读路径：} \texttt{Engine::kv\_get(..., read\_max\_seq)} 透传 \texttt{StorageEngine::get}；\texttt{read\_max\_seq} 与 \texttt{versioned\_kv} unwrap 规则共同决定可见版本（第 \ref{sec:mod-storage} 节与 \fpath{versioned\_kv.hpp}）。
+
+\section{数据库源码核心清单（按 CMake 模块）}
+\label{sec:core-corpus}
+
+表 \ref{tab:core-corpus} 列出\textbf{构成本数据库实现核心}的静态库/可执行边界（以根 \fpath{CMakeLists.txt} 的 \texttt{add\_subdirectory} 为序）。\textbf{完整枚举}仍以各目录 \fpath{CMakeLists.txt} 为准；本表用于\textbf{学术导航}与交叉引用后文分模块解析。
+
+{\footnotesize
+\begin{longtable}{@{}p{0.14\linewidth}p{0.22\linewidth}p{0.34\linewidth}p{0.24\linewidth}@{}}
+\caption{数据库源码核心模块导航（CMake 子工程与权威类型）}\label{tab:core-corpus}\\
+\toprule
+\textbf{层次} & \textbf{CMake 模块（目录）} & \textbf{权威类型/入口（头文件）} & \textbf{学术角色（一句话）} \\
+\midrule
+\endhead
+基础设施 & \fpath{src/Base/} & \texttt{wf\_waterfall} 相关 & 瀑布流/调度基础设施，供引擎侧复用。 \\
+基础设施 & \fpath{src/engine/infra/} & I/O 后端、句柄、\texttt{Tracer} & 可移植 I/O 与可观测性底座。 \\
+控制平面 & \fpath{src/engine/planner/} & \texttt{ExecutionPlan}、\texttt{OperatorNode} & 将维护任务抽象为有向无环图节点。 \\
+控制平面 & \fpath{src/engine/scheduler/} & \texttt{ResourceBudget}、\texttt{ExecutionScheduler} & 多资源预算与背压枚举的实现载体。 \\
+控制平面 & \fpath{src/engine/runtime/} & \texttt{GraphExecutor}、\texttt{IOperator} & 拓扑序执行与算子注册表。 \\
+控制平面 & \fpath{src/engine/orchestrator/} & \texttt{Orchestrator}、\texttt{PlanBuilder} & 将计划构造与执行封装为可重入控制循环。 \\
+门面 & \fpath{src/engine/facade/} & \texttt{Engine}、\texttt{EngineConfigSnapshot} & 对外窄 KV 与配置快照；写路径 WAL 预算与压力反馈。 \\
+数据平面 & \fpath{src/engine/storage/} & \texttt{StorageEngine}、\texttt{Wal}、\texttt{Manifest} & LSM + WAL + checkpoint + undo 的一体化实现边界。 \\
+嵌入 & \fpath{src/client/embed/} & \texttt{EmbedClient}、\texttt{CommandBatch} & 会话级批次、幂等与 journal 路径。 \\
+协议 & \fpath{src/client/mdb/} & \texttt{MdbParsedLine}、\texttt{MdbDispatchEnv} & 文本协议到存储副作用的路由层。 \\
+ABI & \fpath{src/c\_api/} & C 导出符号 & 进程外宿主（GUI/脚本）绑定面。 \\
+宿主 & \fpath{src/app/} & \texttt{main} & 最小进程入口与 argv 装配。 \\
+\bottomrule
+\end{longtable}
+}
+\normalsize
+
+\noindent\textbf{说明：}测试目标 \fpath{tests/}、基准 \fpath{benchmarks/}、第三方 \fpath{ThirdParty/} 不列入\textbf{数据库核心实现本体}，但在验证与复现实验中不可或缺（第 \ref{sec:runtime-params} 节及第 \ref{sec:test-matrix} 节及附录）。
+
+\subsection{核心代码：工程入口 \texttt{add\_subdirectory} 链（根 CMakeLists）}
+
+下列摘录为仓库根 CMake 中\textbf{引擎子工程加入顺序}的权威片段；与表 \ref{tab:core-corpus} 行序一致，体现\textbf{先基础设施、后控制平面、再门面与存储、最后客户端与 ABI} 的依赖策略。
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=55]
+add_subdirectory(src/Base)
+add_subdirectory(src/engine/infra)
+add_subdirectory(src/engine/planner)
+add_subdirectory(src/engine/scheduler)
+add_subdirectory(src/engine/runtime)
+add_subdirectory(src/engine/orchestrator)
+add_subdirectory(src/engine/facade)
+add_subdirectory(src/engine/storage)
+add_subdirectory(src/client/embed)
+add_subdirectory(src/client/mdb)
+add_subdirectory(src/c_api)
+add_subdirectory(src/app)
+\end{lstlisting}
+
+\textbf{逐行解释：}
+\begin{itemize}
+  \item L55 \texttt{src/Base}：生成 \texttt{wf\_waterfall}；页/段级底层结构，由 \texttt{structdb\_storage} 链接。
+  \item L56--L60：控制平面四层静态库（planner $\rightarrow$ scheduler $\rightarrow$ runtime $\rightarrow$ orchestrator），\texttt{facade} 在其上装配 \texttt{Engine}。
+  \item L61--L62：\texttt{facade} 与 \texttt{storage} 为 L3/L5 边界；\textbf{storage 不依赖 mdb/embed}。
+  \item L63--L66：L2 客户端与 C ABI、最小可执行宿主；测试目标在 \texttt{STRUCTDB\_BUILD\_TESTS} 下另加 \fpath{tests/}（见第 \ref{sec:cmake-build} 节）。
+\end{itemize}
+
+\subsection{核心代码：运行时枢纽 \texttt{Engine::startup} 装配片段}
+
+门面在存储 \texttt{open} 成功后注册维护算子并执行默认图；下列为 \fpath{engine.cpp} 中\textbf{编排装配}核心（中间大量 \texttt{set\_*} 已省略）。
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=174]
+  auto budget = std::make_shared<scheduler::ResourceBudget>();
+  auto sched = std::make_shared<scheduler::ExecutionScheduler>(budget);
+  auto exec = std::make_shared<runtime::GraphExecutor>();
+  exec->register_operator("noop", std::make_shared<NoopOperator>("noop"));
+  exec->register_operator("flush_memtable", std::make_shared<FlushOperator>(storage_.get()));
+  exec->register_operator("checkpoint", std::make_shared<CheckpointOperator>(storage_.get()));
+  exec->register_operator("drain_l0_compaction",
+                           std::make_shared<DrainL0CompactionOperator>(storage_.get(), drain_max));
+  const bool defer_l0_compact = snap.l0_compact_defer_after_flush;
+  orchestrator::PlanBuilder builder = [defer_l0_compact](std::uint64_t epoch) {
+    if (defer_l0_compact) {
+      return planner::ExecutionPlan::make_linear(
+          epoch, std::vector<std::string>{"noop", "drain_l0_compaction"});
+    }
+    return planner::ExecutionPlan::make_linear(epoch, std::vector<std::string>{"noop"});
+  };
+  orch_ = std::make_shared<orchestrator::Orchestrator>(sched, exec, std::move(builder));
+  orch_->set_before_graph_execute([this]() { sync_scheduler_budget_from_storage_pressure(); });
+  // services_.register_singleton(...); orch_->run_default(&err);
+\end{lstlisting}
+
+\textbf{解释：}\texttt{FlushOperator}/\texttt{CheckpointOperator}/\texttt{DrainL0CompactionOperator} 将\textbf{控制平面节点名}映射为 \texttt{StorageEngine} 副作用；\texttt{PlanBuilder} 捕获 \texttt{l0\_compact\_defer\_after\_flush}，决定默认图是单 \texttt{noop} 还是 \texttt{noop$\rightarrow$drain\_l0\_compaction}；\texttt{before\_graph\_execute} 在每次图执行前刷新 WAL/合并槽预算（第 \ref{sec:mod-facade}、\ref{sec:mod-orchestration} 节详述）。

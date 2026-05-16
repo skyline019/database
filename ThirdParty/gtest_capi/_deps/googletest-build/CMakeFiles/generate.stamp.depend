@@ -1,0 +1,19 @@
+# CMake generation dependency list for this directory.
+E:/CMake/share/cmake-4.3/Modules/CMakeCInformation.cmake
+E:/CMake/share/cmake-4.3/Modules/CMakeCommonLanguageInclude.cmake
+E:/CMake/share/cmake-4.3/Modules/CMakeDependentOption.cmake
+E:/CMake/share/cmake-4.3/Modules/CMakeLanguageInformation.cmake
+E:/CMake/share/cmake-4.3/Modules/Compiler/CMakeCommonCompilerMacros.cmake
+E:/CMake/share/cmake-4.3/Modules/Compiler/MSVC-C.cmake
+E:/CMake/share/cmake-4.3/Modules/Compiler/MSVC.cmake
+E:/CMake/share/cmake-4.3/Modules/GNUInstallDirs.cmake
+E:/CMake/share/cmake-4.3/Modules/Internal/CMakeCLinkerInformation.cmake
+E:/CMake/share/cmake-4.3/Modules/Internal/CMakeCommonLinkerInformation.cmake
+E:/CMake/share/cmake-4.3/Modules/Linker/MSVC-C.cmake
+E:/CMake/share/cmake-4.3/Modules/Linker/MSVC.cmake
+E:/CMake/share/cmake-4.3/Modules/Platform/Linker/Windows-MSVC-C.cmake
+E:/CMake/share/cmake-4.3/Modules/Platform/Linker/Windows-MSVC.cmake
+E:/CMake/share/cmake-4.3/Modules/Platform/Windows-MSVC-C.cmake
+E:/CMake/share/cmake-4.3/Modules/Platform/Windows-MSVC.cmake
+E:/db/DB/newdb/build/CMakeFiles/4.3.0-rc3/CMakeCCompiler.cmake
+E:/db/DB/newdb/build/_deps/googletest-src/CMakeLists.txt

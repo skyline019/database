@@ -1,0 +1,35 @@
+# Default engine persistence root (see Docs/POLICY.md §4.0)
+_data/
+
+# LaTeX intro PDF build (see intro/README.md)
+intro/out/
+
+# --- Build / IDE (source-only pushes; do not commit binaries) ---
+build/
+cmake-build-*/
+out/
+.vs/
+.idea/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Rust / Node (Tauri GUI)
+gui/rust_gui/target/
+gui/rust_gui/node_modules/
+gui/rust_gui/dist/
+
+# Common compiled artifacts (repo root or stray outputs)
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.obj
+*.o
+*.a
+*.lib
+*.exp
+*.so
+*.so.*
+*.dylib

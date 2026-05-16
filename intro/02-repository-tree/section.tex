@@ -1,0 +1,90 @@
+\section{仓库树、制品边界与 CMake 导航}
+\label{sec:repo-tree}
+
+各目录\textbf{语义}见下表；\textbf{目标名、源文件列表与链接边}以根目录及各子目录 \fpath{CMakeLists.txt} 为准（工程级摘要与目标枚举见第 \ref{sec:cmake-build} 节）。表 \ref{tab:core-corpus} 从\textbf{学术抽象}角度归纳核心模块；本节从\textbf{目录树}角度补足\textbf{非引擎}制品与\textbf{宿主}边界，使读者在克隆仓库后能在 30 分钟内建立\textbf{完整心智模型}。
+
+\subsection{学术解析：从目录到运行时栈}
+
+\paragraph{编译期。}根 \fpath{CMakeLists.txt} 按依赖顺序 \texttt{add\_subdirectory} 拉起一条\textbf{静态链接链}（\texttt{wf\_waterfall} $\rightarrow$ infra $\rightarrow$ planner $\rightarrow$ scheduler $\rightarrow$ runtime $\rightarrow$ orchestrator $\rightarrow$ facade $\rightarrow$ storage $\rightarrow$ embed $\rightarrow$ mdb $\rightarrow$ capi $\rightarrow$ app；其中 \texttt{wf\_waterfall} 由 \fpath{src/Base/} 定义，\texttt{structdb\_storage} \texttt{PUBLIC} 链接之）。任一上层目标通过 \texttt{target\_link\_libraries(... PUBLIC ...)} 把下层头文件与符号\textbf{传递}给依赖方，因此\textbf{测试可执行}只需链接最外层客户端库即可间接获得引擎（详见第 \ref{sec:cmake-build} 节）。
+
+\paragraph{运行期。}进程内典型栈为：\textbf{宿主}（\texttt{structdb\_app} 或 GUI 经 \texttt{structdb\_capi\_shared}）$\rightarrow$ \textbf{MDB/Embed}（文本协议或会话批次）$\rightarrow$ \textbf{Engine}（WAL 预算、异步写、压力反馈）$\rightarrow$ \textbf{Orchestrator}（默认维护图）$\rightarrow$ \textbf{StorageEngine}（WAL + MemTable + SST + Manifest + checkpoint/undo）。该栈与第 \ref{sec:arch-layers} 节图 \ref{fig:layer-stack} 一致；本节强调\textbf{哪些目录不参与该热路径}（基准、第三方、纯文档），避免将 ``整个仓库'' 误等同为 ``引擎内核''。
+
+\paragraph{数据目录与源码目录解耦。}\texttt{EngineConfigSnapshot::data\_dir}（默认 \texttt{\_data}）与 \texttt{structdb\_app} 的 \texttt{--data-dir}、C API 的默认解析（见第 \ref{sec:capi-binding} 节）共同决定\textbf{持久化根}；\textbf{不包含} \fpath{src/} 路径。会话态（\texttt{EmbedClient}）默认在 \texttt{\{data\_dir\}/embed\_session} 或 C API 解析的 \texttt{embed\_session} 下，子目录 \texttt{\_structdb\_embed/} 隔离 journal/checkpoint（头文件注释与 \fpath{Docs/POLICY.md} 一致）。
+
+\subsection{控制平面与数据平面在目录上的投影}
+
+\begin{description}
+  \item[控制平面目录] \fpath{src/engine/planner/}、\fpath{scheduler/}、\fpath{runtime/}、\fpath{orchestrator/} 仅描述与执行\textbf{维护任务图}；默认算子 \texttt{flush\_memtable}、\texttt{checkpoint}、\texttt{drain\_l0\_compaction} 在运行期调用 \texttt{StorageEngine} 的具名 API，但\textbf{不}实现 LSM 物理格式。
+  \item[数据平面目录] \fpath{src/engine/storage/} 含 WAL 帧编解码、MemTable、SST 读写、Manifest 版本链、checkpoint/undo、compaction 物化等；与 \fpath{src/engine/infra/} 的文件 I/O、追踪、长任务报告器组合为\textbf{可移植持久化子系统}。
+  \item[门面与粘合] \fpath{src/engine/facade/} 在两类平面之间放置 \textbf{WAL 队列预算}（\texttt{WalMutationBudget}）、\textbf{存储压力 $\rightarrow$ 调度器增量}（\texttt{sync\_scheduler\_budget\_from\_storage\_pressure}）及 \texttt{EngineConfigSnapshot}（第 \ref{sec:runtime-params} 节）。
+\end{description}
+
+\subsection{GUI 与 C API：进程外宿主}
+
+\fpath{gui/rust_gui/} 为 Tauri + Vue 前端；通过 \texttt{libloading} 在运行时加载 \textbf{\texttt{structdb\_capi\_shared}}（可选 CMake 目标），以 C 符号调用引擎打开、嵌入会话、MDB 行执行、长任务取消等（API 语义见第 \ref{sec:capi-binding} 节）。因此 GUI \textbf{不}直接 \texttt{\#include} C++ 头文件；其 ``数据库核心'' 边界是 \fpath{structdb_capi.h} 中声明的 ABI 与错误码契约。
+
+\subsection{文档、基准与第三方}
+
+\begin{itemize}
+  \item \fpath{Docs/}、\fpath{Docs/phases/}：不变式、事务链、各 PHASE 设计证明与测试矩阵的\textbf{权威长文}（第 \ref{sec:doc-academic} 节）；本 PDF 的引擎行为摘要若与之一致性冲突，以 Markdown + 源码为准。
+  \item \fpath{intro/}：仅生成本学术 PDF，\textbf{不}参与 \texttt{add\_subdirectory} 引擎构建。
+  \item \fpath{benchmarks/}：微基准与可选 perf gate（\texttt{STRUCTDB\_ENABLE\_PERF\_GATE}）；不参与正确性语义。
+  \item \fpath{ThirdParty/}：fmt、spdlog、CRoaring、crc32c、gtest\_capi 等；\fpath{cmake/StructDBThirdParty.cmake} 在 FetchContent 与 vendor 间切换。
+\end{itemize}
+
+各目录\textbf{语义}见下表；\textbf{目标名、源文件列表与链接边}以根目录及各子目录 \fpath{CMakeLists.txt} 为准。
+
+\subsection{顶层目录职责}
+
+\begin{longtable}{@{}p{0.28\linewidth}p{0.66\linewidth}@{}}
+\toprule
+\textbf{目录/文件} & \textbf{职责摘要} \\
+\midrule
+\endhead
+\fpath{src/Base/} & \texttt{wf\_waterfall} 静态库；调度/瀑布流基础设施。 \\
+\fpath{src/engine/infra/} & 文件句柄、I/O 后端（阻塞 / IOCP / io\_uring 等门控）、\texttt{Tracer}、\texttt{LongTaskReporter}、压缩线程调度辅助。 \\
+\fpath{src/engine/planner/} & \texttt{ExecutionPlan}、\texttt{OperatorNode} DAG 描述（\fpath{execution\_plan.hpp}）。 \\
+\fpath{src/engine/scheduler/} & \texttt{ExecutionScheduler}、\texttt{ResourceBudget}/\texttt{BudgetConfig}、背压原因枚举。 \\
+\fpath{src/engine/runtime/} & \texttt{GraphExecutor}、\texttt{IOperator}、算子注册与拓扑执行。 \\
+\fpath{src/engine/orchestrator/} & \texttt{Orchestrator}：装配 plan builder、\texttt{run\_default}/\texttt{replan\_and\_run}、背压回调、图执行前 hook。 \\
+\fpath{src/engine/facade/} & \texttt{Engine}、\texttt{ConfigurableEngine}/\texttt{EngineConfigSnapshot}、\texttt{ServiceContainer}；对外窄 KV 口。 \\
+\fpath{src/engine/storage/} & \texttt{StorageEngine}、WAL、MemTable、SST、\texttt{Manifest}、\texttt{LsmState}、checkpoint、undo/redo、compaction 各 TU。 \\
+\fpath{src/client/embed/} & \texttt{EmbedClient}：会话日志、\texttt{submit} 批次、与 \texttt{Engine} 协同。 \\
+\fpath{src/client/mdb/} & MDB 解析、\texttt{mdb\_dispatch}、\texttt{mdb\_runner}、\texttt{mdb\_ops\_*} 多编译单元。 \\
+\fpath{src/c_api/} & C ABI：引擎打开、MDB 行执行、脚本文件入口等。 \\
+\fpath{src/app/} & \texttt{structdb\_app} 进程入口、命令行参数。 \\
+\fpath{gui/rust_gui/} & Tauri + Vue；\texttt{libloading} 加载 \texttt{structdb\_capi\_shared}。 \\
+\fpath{tests/} & \texttt{structdb\_tests}、\texttt{mdb\_tests}（同一可执行内 filter）、\texttt{capi\_shared\_smoke}。 \\
+\fpath{benchmarks/} & Google Benchmark 与可选 perf gate。 \\
+\fpath{ThirdParty/} & fmt、spdlog、gtest\_capi、CRoaring、crc32c 等。 \\
+\fpath{cmake/StructDBThirdParty.cmake} & 第三方：默认 vendor，可选 FetchContent。 \\
+\bottomrule
+\end{longtable}
+
+\subsection{链接依赖（测试可执行）}
+
+\fpath{tests/CMakeLists.txt} 中 \texttt{structdb\_tests} 链接 \texttt{structdb\_client\_embed}、\texttt{structdb\_client\_mdb}、\texttt{structdb\_capi}、\texttt{gtest\_capi}；\textbf{不}直接链接 \texttt{structdb\_capi\_shared}（共享库烟测为独立目标 \texttt{structdb\_capi\_shared\_smoke}）。
+
+\subsection{核心代码：\texttt{structdb\_app} 链接闭包}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=1]
+add_executable(structdb_app
+  main.cpp
+)
+target_link_libraries(structdb_app PRIVATE structdb_facade structdb_infra
+  structdb_client_mdb structdb_client_embed)
+\end{lstlisting}
+
+\textbf{解释：}\texttt{structdb\_app} 为最小 C++ 进程宿主：仅 \fpath{main.cpp} 一个 TU，通过 \texttt{PRIVATE} 链接门面与两个 L2 客户端库。\textbf{不}直接链接 \texttt{structdb\_storage}——存储符号经 \texttt{structdb\_facade} 的 \texttt{PUBLIC} 传递依赖进入进程。REPL/脚本路径在 \texttt{main} 内构造 \texttt{Engine}、\texttt{EmbedClient} 并调用 \texttt{mdb\_repl\_execute\_line}（第 \ref{sec:parsing-entry} 节摘录 \texttt{main.cpp}）。
+
+\subsection{核心代码：C API 静态库链接}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=9]
+target_link_libraries(structdb_capi PUBLIC
+  structdb_client_mdb
+  structdb_client_embed
+  structdb_facade
+  structdb_infra)
+\end{lstlisting}
+
+\textbf{解释：}\texttt{PUBLIC} 使 FFI 消费者（静态或共享 \texttt{structdb\_capi*}）自动获得 MDB/Embed/Facade 头文件与符号；共享变体 \texttt{structdb\_capi\_shared} 额外定义 \texttt{STRUCTDB\_CAPI\_BUILDING} 导出 DLL 符号（第 \ref{sec:capi-binding} 节）。

@@ -1,0 +1,93 @@
+\section{测试矩阵：正确性、失败路径、复杂与嵌套}
+\label{sec:test-matrix}
+
+\subsection{测试可执行与 CMake 目标}
+
+\begin{itemize}
+  \item \textbf{\texttt{structdb\_tests}}（\fpath{tests/structdb_tests.cpp}、\fpath{tests/mdb_tests.cpp}、\fpath{tests/capi_test.cpp}）：单一可执行，通过 \texttt{--gtest\_filter} 切片。
+  \item \textbf{\texttt{mdb\_tests}}：\texttt{ctest -R mdb\_tests} 等价于 \texttt{structdb\_tests --gtest\_filter=Mdb.*}（\fpath{tests/CMakeLists.txt}）。
+  \item \textbf{\texttt{structdb\_capi\_shared\_smoke}}：共享库 FFI 烟测（可选 \texttt{STRUCTDB\_BUILD\_CAPI\_SHARED}）。
+  \item 产物隔离：\texttt{STRUCTDB\_TEST\_RUNS\_PARENT=\$\{CMAKE\_BINARY\_DIR\}/test\_runs}，每进程时间戳子目录（\fpath{tests/test\_artifact\_config.hpp.in}）。
+\end{itemize}
+
+\subsection{正确性（Happy path）维度}
+
+与 \fpath{Docs/phases/TESTING_TXN_CHAIN.md} \S3 对齐：
+
+\begin{itemize}
+  \item \textbf{REPL 严格 DDL 前缀}：\texttt{TxnChainStrictRepl::strict\_new\_table\_from\_create} —— \texttt{CREATE TABLE $\rightarrow$ USE $\rightarrow$ DEFATTR $\rightarrow$ LIST TABLES（含 \texttt{[TABLE]}）$\rightarrow$ COUNT(rows=0)} 后才进入事务/快照断言。
+  \item \textbf{脚本路径}：\texttt{BEGIN} 前显式 \texttt{LIST TABLES + COUNT}；\texttt{assert\_mdb\_script\_log\_has\_strict\_ddl\_prefix} 校验日志。
+  \item \textbf{快照语义}：\texttt{TXNISOLATION read committed}（含空格）、未知 tail 回落 snapshot、二次 \texttt{BEGIN} 不改变 \texttt{snap\_seq}、\texttt{SAVEPOINT}/\texttt{ROLLBACK TO SAVEPOINT} 正向路径。
+  \item \textbf{无事务控制}：无 \texttt{BEGIN} 的 \texttt{COMMIT}/\texttt{ROLLBACK} 仅打日志不崩溃。
+\end{itemize}
+
+\subsection{失败路径与解析错误}
+
+\begin{itemize}
+  \item 事务中 \texttt{TXNISOLATION}；无事务 \texttt{SAVEPOINT}/\texttt{ROLLBACK TO SAVEPOINT}；未知 savepoint。
+  \item 重复 \texttt{DEFATTR}；已存在表再 \texttt{CREATE TABLE}；裸 \texttt{SAVEPOINT}；脚本无 \texttt{BEGIN} 的 \texttt{SAVEPOINT}。
+  \item 仅 \texttt{ROLLBACK TO SAVEPOINT} 无尾名时 **parse unknown verb**（文档化失败形态）。
+\end{itemize}
+
+\subsection{复杂与嵌套场景}
+
+\begin{itemize}
+  \item \textbf{双 Embed 会话}：\texttt{Mdb.TwoEmbedSessions*}（读快照隔离与引擎共享）。
+  \item \textbf{脚本内事务 + 谓词更新}：\texttt{Mdb.WhereUpdateWhereTxn}。
+  \item \textbf{BEGIN 内持久化矩阵}：\texttt{Mdb.TxnBeginPersist*}（\texttt{mdb\_persist\_in\_begin} 开关）。
+  \item \textbf{MemTable $\times$ WAL 矩阵}：\texttt{StorageEngine.MemTableBackendFlushVsWalOnly*}。
+  \item \textbf{WAL 重放失败形态}：\texttt{StorageEngine.WalReplayRejectsMissingEquals*}、\texttt{WalReplayIgnoresUnframedTrailing*}（非法行、无长度前缀尾部）。
+  \item \textbf{三层嵌套 embed 批次冷启}：\texttt{EmbedClient.TripleNestedBatch*}。
+  \item \textbf{Phase36/37 对称并发}：延后 L0 drain + L1$\rightarrow$L2 双后台 + 主线程写（见 \fpath{Docs/phases/TESTING_TXN_CHAIN.md} \S14）。
+\end{itemize}
+
+\subsection{存储与耐久切片（示例 filter）}
+
+摘自 \fpath{Docs/phases/TESTING_TXN_CHAIN.md}（Windows 路径按本机 \texttt{build} 调整）：
+
+\begin{lstlisting}[language=bash]
+structdb_tests --gtest_filter="Mdb.TxnChain*:Mdb.Repl*:Mdb.WhereUpdateWhereTxn:Mdb.EngineKvReadSeqVisibility:Mdb.TwoEmbedSessions*"
+structdb_tests --gtest_filter="StorageEngine.VersionedUndo*:StorageEngine.EmbedWalBatch*:StorageEngine.WalTrim*:StorageEngine.UndoTruncate*"
+\end{lstlisting}
+
+\subsection{编排层失败路径样例}
+
+\fpath{tests/structdb_tests.cpp} 中 \texttt{Orchestrator.BackpressureCallbackFires}：零 MemTable 预算 + \texttt{GraphExecutor::execute(..., use\_budget\_probe=true)} $\rightarrow$ \texttt{GraphExecuteOutcome::Backpressure}、\texttt{diag.backpressure\_reason == MemTableFull}、回调计数 $>0$。验证\textbf{预算探测}与\textbf{诊断结构体}连通。
+
+\subsection{脚本化切片}
+
+仓库 \fpath{scripts/txn_chain_gtest_slice.ps1} 封装常用 filter；CI 可拼接到 \texttt{ctest}。
+
+\subsection{核心代码：编排背压测试}
+
+\begin{lstlisting}[language=C++, numbers=left, firstnumber=44]
+TEST(Orchestrator, BackpressureCallbackFires) {
+  structdb::scheduler::BudgetConfig cfg;
+  cfg.memtable_bytes_budget = 0;
+  auto budget = std::make_shared<structdb::scheduler::ResourceBudget>(cfg);
+  auto sched = std::make_shared<structdb::scheduler::ExecutionScheduler>(budget);
+  auto ex = std::make_shared<structdb::runtime::GraphExecutor>();
+  ex->register_operator("noop", std::make_shared<Noop>());
+  structdb::orchestrator::Orchestrator orch(sched, ex, [](std::uint64_t ep) {
+    return structdb::planner::ExecutionPlan::make_linear(ep, std::vector<std::string>{"noop"});
+  });
+  orch.set_on_backpressure([&](structdb::scheduler::BackpressureReason) { ++hits; });
+  structdb::runtime::GraphExecuteDiagnostics diag{};
+  ASSERT_FALSE(ex->execute(
+      structdb::planner::ExecutionPlan::make_linear(1, std::vector<std::string>{"noop"}),
+      *sched, true, &err, &diag));
+  ASSERT_EQ(diag.outcome, structdb::runtime::GraphExecuteOutcome::Backpressure);
+  ASSERT_EQ(diag.backpressure_reason, structdb::scheduler::BackpressureReason::MemTableFull);
+}
+\end{lstlisting}
+
+\textbf{解释：}将 MemTable 预算设为 0，对仅含 \texttt{noop} 的计划仍启用 \texttt{use\_budget\_probe=true}；执行器在\textbf{预算探测}阶段即失败，\texttt{diag.outcome} 为 \texttt{Backpressure}、原因为 \texttt{MemTableFull}。该用例验证控制平面\textbf{失败路径}与 \texttt{GraphExecuteDiagnostics} 连通（第 \ref{sec:mod-orchestration} 节），而非存储真实 flush 行为。
+
+\subsection{核心代码：测试产物隔离（概念）}
+
+\begin{lstlisting}[language=bash]
+# STRUCTDB_TEST_RUNS_PARENT=${CMAKE_BINARY_DIR}/test_runs
+# 每用例进程级时间戳子目录，避免 WAL/SST 互相污染
+\end{lstlisting}
+
+\textbf{解释：}集成测试通过 \fpath{tests/test\_artifact\_config.hpp.in} 生成隔离 \texttt{data\_dir}；与 \fpath{Docs/phases/TESTING\_TXN\_CHAIN.md} 中的 filter 切片配合，可复现事务链、WAL 重放、embed 批次等场景。

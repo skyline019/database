@@ -1,0 +1,10 @@
+{
+    "timestamp":  "2026-05-14T19:51:58.9290174Z",
+    "benchmark_profile":  "mega_data_mdb_bulk_v1",
+    "runtime_pressure_tps_est":  6771.398,
+    "runtime_pressure_batch_ms_p95":  147680,
+    "total_rows":  1000000,
+    "rows_per_bulk_line":  1000,
+    "wall_ms":  147680,
+    "build_dir":  "build"
+}

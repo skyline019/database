@@ -1,0 +1,82 @@
+# StructDB: CMake + ctest on Linux/Windows; Vite build for gui/rust_gui.
+# Intended for branches such as StructDB on https://github.com/skyline019/database
+# (source-only tree — keep build/, target/, node_modules/ out of git; see .gitignore).
+
+name: StructDB CI
+
+on:
+  push:
+    branches: [StructDB, main]
+  pull_request:
+    branches: [StructDB, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-cmake:
+    name: Linux (CMake + ctest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSTRUCTDB_BUILD_TESTS=ON \
+            -DSTRUCTDB_BUILD_BENCHMARKS=OFF \
+            -DSTRUCTDB_BUILD_CAPI_SHARED=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --parallel
+
+  windows-msvc:
+    name: Windows (VS2022 + ctest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DSTRUCTDB_BUILD_TESTS=ON
+          -DSTRUCTDB_BUILD_BENCHMARKS=OFF
+          -DSTRUCTDB_BUILD_CAPI_SHARED=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure --parallel
+
+  gui-vite:
+    name: GUI (Vite bundle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: gui/rust_gui/package-lock.json
+
+      - name: npm ci + build
+        working-directory: gui/rust_gui
+        run: |
+          npm ci
+          npm run build

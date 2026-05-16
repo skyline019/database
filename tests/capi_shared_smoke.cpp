@@ -14,7 +14,7 @@ TEST(CapiSharedSmoke, VersionAndDllImportMacro) {
   ASSERT_NE(v, nullptr);
   EXPECT_STRNE(v, "");
   EXPECT_EQ(structdb_capi_version(), (1u << 16) | (8u << 8) | 0u);
-  EXPECT_STREQ(v, "1.7.3");
+  EXPECT_STREQ(v, "1.8.0");
 }
 
 TEST(CapiSharedSmoke, EngineOpenNullDataDirUsesCwdDefault) {

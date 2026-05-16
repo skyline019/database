@@ -30,8 +30,8 @@ TEST(Capi, VersionString) {
   ASSERT_NE(v, nullptr);
   EXPECT_STRNE(v, "");
   EXPECT_EQ(STRUCTDB_CAPI_VERSION_MAJOR, 1);
-  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MINOR, 7);
-  EXPECT_EQ(STRUCTDB_CAPI_VERSION_PATCH, 3);
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MINOR, 8);
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_PATCH, 0);
   EXPECT_EQ(structdb_capi_version(), (1u << 16) | (8u << 8) | 0u);
   EXPECT_STREQ(structdb_capi_version_string(), "1.8.0");
 }

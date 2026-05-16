@@ -36,7 +36,8 @@ Engine::WalMutationBudget::~WalMutationBudget() {
 std::uint32_t Engine::wal_scheduler_slots_for_frame_bytes_(std::uint64_t approx_frame_bytes,
                                                            const EngineConfigSnapshot& snap) const {
   if (snap.wal_scheduler_bytes_per_depth_slot == 0) return 0;
-  const std::uint64_t cap_est = (std::min)(approx_frame_bytes, 256ull * 1024 * 1024);
+  constexpr std::uint64_t k_max_frame_cap = static_cast<std::uint64_t>(256) * 1024 * 1024;
+  const std::uint64_t cap_est = (std::min)(approx_frame_bytes, k_max_frame_cap);
   std::uint64_t slots64 =
       (cap_est + snap.wal_scheduler_bytes_per_depth_slot - 1) / snap.wal_scheduler_bytes_per_depth_slot;
   if (slots64 == 0) slots64 = 1;

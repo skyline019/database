@@ -6,6 +6,7 @@
 |------|------|
 | **[../intro/README.md](../intro/README.md)** | **LaTeX 源码级手册**（`Engine`/`StorageEngine`/MDB/参数表/测试矩阵）；**WSL 仅编译 PDF**；工程构建见根 `README`；细节仍以 `POLICY` 与各 `PHASE*.md` 为准 |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | **总览**：端到端数据流（Mermaid）、代码目录与依赖、关键类型与 API 摘录（附源码行引用）；与 `POLICY` / 各 PHASE 互补 |
+| **[PEAK_PERFORMANCE.md](PEAK_PERFORMANCE.md)** | **最高性能（独立）**：插入/查询峰值、25 用例 P95 全表、复现命令与基线路径 |
 | **[COMPETITIVE_MATRIX.md](COMPETITIVE_MATRIX.md)** | **竞品矩阵**：全维度对比（排除网络层）、SQLite / RocksDB+SQL 细表、PHASE25 `[NOT_SUPPORTED]` 缺口、四十期性能边界 |
 | **[COMPETITIVE_IMPROVEMENT_PLAN.md](COMPETITIVE_IMPROVEMENT_PLAN.md)** | **完善计划**：自竞品矩阵导出的 W0–W4 波次、倡议 ID、PHASE41–44 建议、验收与 NOT_SUPPORTED 替代路径 |
 | **[BACKUP_RESTORE_RUNBOOK.md](BACKUP_RESTORE_RUNBOOK.md)** | **冷备份/恢复**：`data_dir` + `session_dir` 停写复制、`backup_bundle`、独占锁与 COUNT 验收 |

@@ -33,7 +33,7 @@
 
 与上述微基准不同，仓库另有 **`structdb_app --run-mdb`** 脚本压测（超大批量、多进程并行），见 [`../scripts/bench/README.md`](../scripts/bench/README.md)。
 
-**MDB 查询 / 插入峰值与基线**（100 万行、QBAL / SCAN INDEX 等）：[`MDB_E2E_PEAK_PERFORMANCE.md`](MDB_E2E_PEAK_PERFORMANCE.md)。
+**MDB 查询 / 插入最高性能（独立文档）**：[`../Docs/PEAK_PERFORMANCE.md`](../Docs/PEAK_PERFORMANCE.md)。
 
 | 基线文件 | 用途 |
 |----------|------|

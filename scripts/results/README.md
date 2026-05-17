@@ -43,7 +43,7 @@ Release 构建、关闭其它磁盘重压；对比 **同一** `-Rows` / `-RowsPe
 ## 复杂查询压测（mdb_query_complex）
 
 - 规范/占位：[`benchmarks/baselines/mdb_query_complex_baseline.json`](../../benchmarks/baselines/mdb_query_complex_baseline.json)
-- 峰值说明：[`benchmarks/MDB_E2E_PEAK_PERFORMANCE.md`](../../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md)
+- 峰值说明：[`Docs/PEAK_PERFORMANCE.md`](../../Docs/PEAK_PERFORMANCE.md)
 - 插入峰值参考：[`benchmarks/baselines/mdb_bulk_insert_peak.json`](../../benchmarks/baselines/mdb_bulk_insert_peak.json)
 - 生成：`scripts\bench\mdb_query_complex_stress.ps1`
 - 对比：`python benchmarks\scripts\compare_mdb_query_summary.py --baseline ... --current ... --ignore-queries scan_index_ik_stats_full`

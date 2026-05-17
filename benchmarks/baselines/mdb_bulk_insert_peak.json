@@ -1,6 +1,6 @@
 {
   "timestamp": "2026-05-17T00:00:00.0000000Z",
-  "note": "Reference peak insert throughput; not used by automated perf gate. See benchmarks/MDB_E2E_PEAK_PERFORMANCE.md",
+  "note": "Reference peak insert throughput; not used by automated perf gate. See Docs/PEAK_PERFORMANCE.md",
   "paths": [
     {
       "name": "mdb_query_complex_integrated_load",

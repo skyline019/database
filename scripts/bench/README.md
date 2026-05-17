@@ -126,7 +126,7 @@ python benchmarks/scripts/compare_mdb_query_summary.py `
   --ignore-queries scan_index_ik_stats_full
 ```
 
-峰值性能与插入路径说明：[`benchmarks/MDB_E2E_PEAK_PERFORMANCE.md`](../../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md)。
+峰值性能与插入路径说明：[`Docs/PEAK_PERFORMANCE.md`](../../Docs/PEAK_PERFORMANCE.md)。
 
 `structdb_app` 参数：`--bench-profile standard|analytics|all`（与 `--query-bench` 联用）。
 

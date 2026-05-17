@@ -4,7 +4,7 @@
 
 **维护约定**：能力以 [`POLICY.md`](POLICY.md)、[`CHANGELOG.md`](CHANGELOG.md)、[`phases/PHASE25.md`](phases/PHASE25.md)、[`phases/PHASE40_PERSIST_PERF.md`](phases/PHASE40_PERSIST_PERF.md) 为准；发版或里程碑合并时同步修订本文「性能」与「缺口」节。
 
-**端到端峰值（查询 / 插入）**：[`../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md`](../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md)（100 万行、`mdb_query_complex_v1` 基线，2026-05-17）。
+**端到端峰值（查询 / 插入）**：[`PEAK_PERFORMANCE.md`](PEAK_PERFORMANCE.md)（100 万行、`mdb_query_complex_v1` 基线，2026-05-17）。
 
 **图例**：**●** 成熟/强项 · **◐** 部分/受限 · **○** 弱或缺失 · **—** 不适用（产品形态不同）
 
@@ -316,7 +316,7 @@ Redis：**内存数据结构 + 可选持久化**；StructDB：**磁盘优先、W
 | `SCAN INDEX(ik,STATS)` 全量 | **~1144 ms** | 百万行索引/堆扫描：**数百 ms～数 s**（列宽/缓存依赖） | 全表/索引扫描 **秒级** 常见 | 与「全索引遍历」同类，**非**亚毫秒场景 |
 | 非索引列 `WHERE dept` | **~0.64 ms** | 有索引时更低；无索引常 **更差** | 全表过滤 **更差** | StructDB **弱项** 仍为无索引过滤 |
 
-**查询优化里程碑（相对 2026-05-16 基线）**：`QBAL(val,0)` 由 **~75–85 ms** 降至 **~0.003 ms**（聚合缓存）；门禁 `scan_index_ik` 由全列/全表 **~1.1 s** 改为 `5000,STATS` **~3 ms**（语义变更，见 [`MDB_E2E_PEAK_PERFORMANCE.md`](../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md)）。
+**查询优化里程碑（相对 2026-05-16 基线）**：`QBAL(val,0)` 由 **~75–85 ms** 降至 **~0.003 ms**（聚合缓存）；门禁 `scan_index_ik` 由全列/全表 **~1.1 s** 改为 `5000,STATS` **~3 ms**（语义变更，见 [`PEAK_PERFORMANCE.md`](PEAK_PERFORMANCE.md)）。
 
 **复现与基线**：
 
@@ -379,4 +379,4 @@ Redis：**内存数据结构 + 可选持久化**；StructDB：**磁盘优先、W
 | 2026-05-16 | 初稿：全维度表、SQLite/RocksDB 细表、PHASE25 缺口、四十期性能边界 |
 | 2026-05-16 | 增加 [`COMPETITIVE_IMPROVEMENT_PLAN.md`](COMPETITIVE_IMPROVEMENT_PLAN.md) 索引 |
 | 2026-05-16 | §7.2：OLTP 基线路径与 P99 门禁；[`BACKUP_RESTORE_RUNBOOK.md`](BACKUP_RESTORE_RUNBOOK.md) |
-| 2026-05-17 | §2.1 上市/头部库索引；§7.3 端到端实测 vs 业界量级；QBAL/SCAN INDEX 性能与 `mdb_query_complex` 基线；链 [`MDB_E2E_PEAK_PERFORMANCE.md`](../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md) |
+| 2026-05-17 | §2.1 上市/头部库索引；§7.3 端到端实测 vs 业界量级；独立 [`PEAK_PERFORMANCE.md`](PEAK_PERFORMANCE.md) |

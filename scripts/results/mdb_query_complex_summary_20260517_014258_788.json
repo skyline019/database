@@ -1,0 +1,182 @@
+{
+    "timestamp":  "2026-05-17T01:48:23.4131343Z",
+    "benchmark_profile":  "mdb_query_complex_v1",
+    "table":  "qcx",
+    "load_rows":  1000000,
+    "row_count_hint":  1000000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  5,
+    "bench_profile":  "all",
+    "schema":  "id,dept,val,k + INDEX ik(k)",
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qcx_20260517_014258_788\\_data",
+    "load_wall_ms":  296302,
+    "load_tps_est":  3374.9,
+    "query_wall_ms":  25985,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "explain_where_hit",
+                             "n":  5,
+                             "ms_avg":  0.005,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.004
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  5,
+                             "ms_avg":  0.01,
+                             "ms_p50":  0.006,
+                             "ms_p95":  0.006
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  5,
+                             "ms_avg":  0.006,
+                             "ms_p50":  0.006,
+                             "ms_p95":  0.006
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  5,
+                             "ms_avg":  0.029,
+                             "ms_p50":  0.021,
+                             "ms_p95":  0.022
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  5,
+                             "ms_avg":  0.027,
+                             "ms_p50":  0.022,
+                             "ms_p95":  0.029
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  5,
+                             "ms_avg":  0.026,
+                             "ms_p50":  0.023,
+                             "ms_p95":  0.023
+                         },
+                         {
+                             "name":  "page_json_after_mid",
+                             "n":  5,
+                             "ms_avg":  0.029,
+                             "ms_p50":  0.026,
+                             "ms_p95":  0.027
+                         },
+                         {
+                             "name":  "page_json_cols_id",
+                             "n":  5,
+                             "ms_avg":  0.014,
+                             "ms_p50":  0.014,
+                             "ms_p95":  0.014
+                         },
+                         {
+                             "name":  "page_json_after_stream",
+                             "n":  5,
+                             "ms_avg":  0.039,
+                             "ms_p50":  0.038,
+                             "ms_p95":  0.04
+                         },
+                         {
+                             "name":  "page_json_ids_only",
+                             "n":  5,
+                             "ms_avg":  0.008,
+                             "ms_p50":  0.008,
+                             "ms_p95":  0.008
+                         },
+                         {
+                             "name":  "group_by_dept_count",
+                             "n":  5,
+                             "ms_avg":  0.085,
+                             "ms_p50":  0.082,
+                             "ms_p95":  0.083
+                         },
+                         {
+                             "name":  "group_by_dept_sum",
+                             "n":  5,
+                             "ms_avg":  0.135,
+                             "ms_p50":  0.12,
+                             "ms_p95":  0.133
+                         },
+                         {
+                             "name":  "sum_val",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "qbal_val",
+                             "n":  5,
+                             "ms_avg":  74.493,
+                             "ms_p50":  74.302,
+                             "ms_p95":  76.759
+                         },
+                         {
+                             "name":  "explain_dept_hit",
+                             "n":  5,
+                             "ms_avg":  1.028,
+                             "ms_p50":  0.747,
+                             "ms_p95":  1.043
+                         },
+                         {
+                             "name":  "where_dept_hit",
+                             "n":  5,
+                             "ms_avg":  0.784,
+                             "ms_p50":  0.777,
+                             "ms_p95":  0.834
+                         },
+                         {
+                             "name":  "explain_k_hit",
+                             "n":  5,
+                             "ms_avg":  0.013,
+                             "ms_p50":  0.008,
+                             "ms_p95":  0.009
+                         },
+                         {
+                             "name":  "where_k_hit",
+                             "n":  5,
+                             "ms_avg":  0.01,
+                             "ms_p50":  0.01,
+                             "ms_p95":  0.01
+                         },
+                         {
+                             "name":  "page_json_sort_val_desc",
+                             "n":  5,
+                             "ms_avg":  0.038,
+                             "ms_p50":  0.024,
+                             "ms_p95":  0.026
+                         },
+                         {
+                             "name":  "page_json_sort_dept_asc",
+                             "n":  5,
+                             "ms_avg":  0.088,
+                             "ms_p50":  0.023,
+                             "ms_p95":  0.048
+                         },
+                         {
+                             "name":  "page_json_mid_val_desc",
+                             "n":  5,
+                             "ms_avg":  0.046,
+                             "ms_p50":  0.024,
+                             "ms_p95":  0.042
+                         },
+                         {
+                             "name":  "scan_index_ik",
+                             "n":  5,
+                             "ms_avg":  12.124,
+                             "ms_p50":  12.344,
+                             "ms_p95":  12.511
+                         }
+                     ],
+    "queries_cold":  null,
+    "cold_restart":  false,
+    "engine_bulk_import":  true
+}

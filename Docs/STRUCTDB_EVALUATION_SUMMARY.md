@@ -60,8 +60,9 @@
 
 ## 2. 当前架构风险清单 TOP 10
 
-### 1）MemTable 结构仍可能成为写入上限瓶颈
-现有 SkipList / `std::map` / frozen 层已经缓解压力，但未来性能上限仍高度依赖 MemTable 结构演进。
+### 1）MemTable / Compaction：分场景上限（四十期 bulk 已缓解写放大）
+- **Bulk / `BULKINSERTFAST` 主路径**（[`COMPETITIVE_MATRIX.md`](COMPETITIVE_MATRIX.md) §7.1）：plain/raw、分块 persist、延迟 `row_index` 等已将百万行导入提升到 **~238K～328K TPS** 量级；不宜再笼统称「MemTable 为唯一写入上限」。
+- **非 bulk OLTP、Compaction 尾延迟**：单行 DML、频繁 persist、flush/compaction P99 仍是主线；MemTable 结构与 L0+ 调度见 [`OPTIMIZATION_PLAN.md`](OPTIMIZATION_PLAN.md)、[`ENGINE_RUNTIME_CONFIG.md`](ENGINE_RUNTIME_CONFIG.md) §4.2。
 
 ### 2）恢复语义与 checkpoint / journal / WAL 的边界复杂
 恢复链路已能工作，但边界条件多、路径多，最容易出现时序型问题。

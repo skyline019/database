@@ -1,0 +1,59 @@
+{
+    "timestamp":  "2026-05-16T12:22:56.6471273Z",
+    "table":  "mega",
+    "load_rows":  100000,
+    "row_count_hint":  100000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  5,
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qbench_20260516_122253_679\\_data",
+    "load_wall_ms":  718,
+    "load_tps_est":  139275.8,
+    "query_wall_ms":  2009,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  5,
+                             "ms_avg":  13.726,
+                             "ms_p50":  13.019,
+                             "ms_p95":  14.829
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  5,
+                             "ms_avg":  11.865,
+                             "ms_p50":  11.637,
+                             "ms_p95":  12.222
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  5,
+                             "ms_avg":  9.753,
+                             "ms_p50":  9.681,
+                             "ms_p95":  10.03
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  5,
+                             "ms_avg":  97.37,
+                             "ms_p50":  97.304,
+                             "ms_p95":  98.259
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  5,
+                             "ms_avg":  167.811,
+                             "ms_p50":  165.948,
+                             "ms_p95":  174.203
+                         }
+                     ],
+    "queries_cold":  null,
+    "cold_restart":  false
+}

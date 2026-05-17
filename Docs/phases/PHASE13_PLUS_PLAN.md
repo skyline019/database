@@ -4,6 +4,8 @@
 
 **说明**：本文为 **路线图计划**，非已发布行为规格；具体某一期关闭前须另写对应 `PHASEn.md` 与验收用例。
 
+**已落地 persist 性能专文**：[`PHASE39_PERSIST_PERF.md`](PHASE39_PERSIST_PERF.md)、[`PHASE40_PERSIST_PERF.md`](PHASE40_PERSIST_PERF.md)（分块/plain/raw、mega_data 门禁、`Mdb.Phase40*` 测试矩阵）；向 100× 的 backlog 见 [`OPTIMIZATION_PLAN.md`](../OPTIMIZATION_PLAN.md) §0.4。
+
 ---
 
 ## 1. 背景：当前已识别的主要缺口
@@ -268,6 +270,12 @@ flowchart LR
 | [`PHASE36.md`](PHASE36.md) | **三十六期**：L1+ 两阶段 compaction、Facade `kv_put` 队列、GUI 独占锁环境变量 |
 | [`PHASE37.md`](PHASE37.md) | **三十七期**：CHANGELOG/测试索引收口、`*Phase37*` 对称回归、三十八期候选划界 |
 | [`PHASE38.md`](PHASE38.md) | **三十八期**：`CONFIRM_REORDER`、`[REORDER_MAP_JSON]`、GUI `id_remap_chain`、`*Phase38*` 回归 |
+| [`PHASE41.md`](PHASE41.md) | **四十一期（竞品 Wave 2）**：耐久、DDL 子集、命名索引 |
+| [`PHASE42.md`](PHASE42.md) | **四十二期（竞品 Wave 3）**：`GROUP BY`、`SCAN INDEX` |
+| [`PHASE43.md`](PHASE43.md) | **四十三期（竞品 Wave 3）**：`RECOVER TO CHECKPOINT_SEQ` |
+| [`PHASE44_PERSIST_STREAM.md`](PHASE44_PERSIST_STREAM.md) | **四十四期（竞品 Wave 4）**：`IMPORT SEGMENT` |
+| [`PHASE45.md`](PHASE45.md) | **四十五期（竞品 Wave 4）**：`DROP INDEX`、`CREATE UNIQUE INDEX` |
+| [`PHASE46_NAMESPACE.md`](PHASE46_NAMESPACE.md) | **四十六期（远期）**：`mdb$ns$` 设计占位 |
 | [`scheduler.hpp`](../src/engine/scheduler/include/structdb/scheduler/scheduler.hpp)、[`budget.hpp`](../src/engine/scheduler/include/structdb/scheduler/budget.hpp) | 十四期 `ResourceType` / `BackpressureReason` / `acquire_for_node` |
 
 ---

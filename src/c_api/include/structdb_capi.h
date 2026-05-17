@@ -28,7 +28,7 @@ extern "C" {
 /// C API 语义版本（与仓库 `project(StructDB VERSION …)` 独立，仅表示本头文件契约）。
 /// 更新此处时须同步 GUI 版本：`gui/rust_gui` 下 `npm run sync-version-from-capi`（`predev`/`prebuild` 会自动执行）。
 #define STRUCTDB_CAPI_VERSION_MAJOR 1
-#define STRUCTDB_CAPI_VERSION_MINOR 8
+#define STRUCTDB_CAPI_VERSION_MINOR 9
 #define STRUCTDB_CAPI_VERSION_PATCH 0
 
 /// 当 **`structdb_engine_open`** / **`structdb_run_mdb_file*`** 的 **`data_dir`** 为 **`NULL` 或 `""`** 时，引擎数据目录为
@@ -45,7 +45,7 @@ extern "C" {
 /// 打包版本号：`(major << 16) | (minor << 8) | patch`，与三宏一致，便于 FFI 数值比较。
 STRUCTDB_CAPI_EXPORT uint32_t structdb_capi_version(void);
 
-/// 形如 `"1.8.0"` 的版本字符串（静态存储期，勿释放）；与 `STRUCTDB_CAPI_VERSION_*` 同步。
+/// 形如 `"1.9.0"` 的版本字符串（静态存储期，勿释放）；与 `STRUCTDB_CAPI_VERSION_*` 同步。
 STRUCTDB_CAPI_EXPORT const char* structdb_capi_version_string(void);
 
 /// `structdb_run_mdb_file` / `structdb_run_mdb_file_ex` / 会话 API 返回值（稳定数值，勿改已有含义）。
@@ -177,6 +177,18 @@ STRUCTDB_CAPI_EXPORT int structdb_capi_get_default_paths(const char* workspace_u
 /// `shutdown` 并释放。`NULL` 安全。若仍有打开的 embed，会先 **`structdb_embed_close`** 再 `Engine::shutdown`。
 STRUCTDB_CAPI_EXPORT void structdb_engine_shutdown(structdb_engine* engine);
 
+/// 破坏性 PITR：须 **已 `structdb_engine_shutdown`**（释放 storage）且 `engine` 句柄仍有效（见 `Docs/phases/PHASE43.md`）。
+STRUCTDB_CAPI_EXPORT int structdb_engine_recover_to_checkpoint_seq(structdb_engine* engine, uint64_t checkpoint_seq,
+                                                                  char* err, size_t err_len);
+
+/// 同上，仅指定 **`data_dir`**（无需 `structdb_engine` 句柄）。
+STRUCTDB_CAPI_EXPORT int structdb_recover_data_dir_to_checkpoint_seq(const char* data_dir_utf8, uint64_t checkpoint_seq,
+                                                                    char* err, size_t err_len);
+
+/// 冷备份 `data_dir` 与 `session_dir` 到 `out_dir`（子目录 `data_dir` / `session_dir`）。引擎须未占用目录。
+STRUCTDB_CAPI_EXPORT int structdb_backup_bundle(const char* data_dir_utf8, const char* session_dir_utf8,
+                                                const char* out_dir_utf8, char* err, size_t err_len);
+
 /// 在已启动的 `engine` 上打开嵌入式会话目录。失败返回 `NULL`。同一 `engine` 上 **同时只能有一个** 打开的 embed；重复 `open` 返回 `NULL` 且 `err` 提示。
 /// **`session_dir`**：非空 UTF-8。**`NULL` 或 `""`** 时使用 **`{engine_data_dir}/embed_session`**（`engine_data_dir` 为 `structdb_engine_open` 解析后的路径，见 **`structdb_engine_get_data_dir_utf8`**）。
 STRUCTDB_CAPI_EXPORT structdb_embed_client* structdb_embed_open(structdb_engine* engine, const char* session_dir,
@@ -204,6 +216,9 @@ STRUCTDB_CAPI_EXPORT structdb_mdb_session* structdb_mdb_session_create(void);
 STRUCTDB_CAPI_EXPORT void structdb_mdb_session_destroy(structdb_mdb_session* session);
 /// 仅重置进程内 REPL 计数/恢复标志等；**不**删除磁盘上 **`session_dir`** 内文件；跨重启续对话/未提交事务仍靠固定 **`session_dir`** + **`structdb_mdb_execute_line*`**。
 STRUCTDB_CAPI_EXPORT void structdb_mdb_session_reset(structdb_mdb_session* session);
+
+/// 会话级 `SET DURABILITY n`（`n` 为 0、1 或 2）。
+STRUCTDB_CAPI_EXPORT int structdb_mdb_session_set_durability(structdb_mdb_session* session, int level);
 
 /// 执行一行 MDB（`mdb_repl_execute_line`）。**持久化对话 / 未提交事务** 须用本组 API + 固定 **`session_dir`**，见上文 **「持久化对话与持久化事务」**。
 /// `opts` 为 `NULL` 时等价于默认 REPL 标志与 `allow_persist_while_txn_active_experimental=true`。

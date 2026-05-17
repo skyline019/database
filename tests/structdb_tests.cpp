@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -22,6 +23,7 @@
 #include "structdb/scheduler/budget.hpp"
 #include "structdb/scheduler/scheduler.hpp"
 #include "structdb/storage/checkpoint.hpp"
+#include "structdb/storage/checkpoint_chain.hpp"
 #include "structdb/storage/manifest.hpp"
 #include "structdb/storage/mdb_keyspace.hpp"
 #include "structdb/storage/storage_engine.hpp"
@@ -1142,6 +1144,41 @@ TEST(Engine, Phase19DeferPlanIncludesDrainAndReplanReducesL0) {
 TEST(CheckpointState, UndoPrefixBytesDefaultZero) {
   structdb::storage::CheckpointState st{};
   EXPECT_EQ(st.undo_log_safe_prefix_bytes, 0u);
+}
+
+TEST(StorageEngine, Phase43CheckpointChainAppendOnRotate) {
+  const auto dir = temp_dir("p43_chain");
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  structdb::storage::CheckpointWriter w;
+  structdb::storage::CheckpointState st{};
+  st.wal_offset = 10;
+  st.manifest_version = 1;
+  ASSERT_TRUE(w.write_rotating(dir, st, nullptr));
+  st.wal_offset = 20;
+  ASSERT_TRUE(w.write_rotating(dir, st, nullptr));
+  std::vector<structdb::storage::CheckpointChainEntry> entries;
+  ASSERT_TRUE(structdb::storage::checkpoint_chain_read_all(dir, &entries, nullptr));
+  ASSERT_GE(entries.size(), 2u);
+  EXPECT_EQ(entries.back().wal_offset, 20u);
+  ASSERT_TRUE(structdb::storage::checkpoint_chain_validate(dir, false, nullptr));
+}
+
+TEST(StorageEngine, Phase43ChainValidateMismatchStrict) {
+  const auto dir = temp_dir("p43_chain_strict");
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  structdb::storage::CheckpointWriter w;
+  structdb::storage::CheckpointState st{};
+  st.checkpoint_seq = 1;
+  st.wal_offset = 8;
+  ASSERT_TRUE(w.write_rotating(dir, st, nullptr));
+  std::ofstream chain(dir / "checkpoint.chain", std::ios::trunc);
+  chain << "99 999 0 1 0 0 1\n";
+  chain.close();
+  std::string err;
+  EXPECT_FALSE(structdb::storage::checkpoint_chain_validate(dir, true, &err));
+  EXPECT_FALSE(err.empty());
 }
 
 TEST(StorageEngine, Phase10FlushPersistsUndoSafePrefixInCheckpointV2) {
@@ -3331,6 +3368,161 @@ TEST(EmbedClient, NestedDelThenPutBatchSurvivesJournalReplayAfterWalTrim) {
   ASSERT_TRUE(eng2.storage()->get("nest_new", &v));
   EXPECT_EQ(v, "after_del");
   eng2.shutdown();
+}
+
+TEST(StorageEngine, WalReplayImportRawBatch) {
+  const auto dir = temp_dir("wal_replay_import_raw");
+  std::filesystem::remove_all(dir);
+  structdb::storage::StorageEngine st(dir / "d");
+  std::string err;
+  ASSERT_TRUE(st.open(&err)) << err;
+  st.set_import_batch_skip_undo(true);
+  st.set_import_store_raw_logical(true);
+  namespace mk = structdb::storage::mdb_keyspace;
+  const std::string key = mk::row_key("t", "1");
+  const std::string logical = "1\t1";
+  const std::vector<std::string> dels;
+  const std::vector<std::pair<std::string, std::string>> puts{{key, logical}};
+  ASSERT_TRUE(st.commit_embed_batch(dels, puts, true, &err)) << err;
+  st.close();
+
+  structdb::storage::StorageEngine st2(dir / "d");
+  ASSERT_TRUE(st2.open(&err)) << err;
+  std::string got;
+  ASSERT_TRUE(st2.get(key, &got, (std::numeric_limits<std::uint64_t>::max)()));
+  EXPECT_EQ(got, logical);
+  st2.close();
+}
+
+TEST(StorageEngine, WalReplayIgnoresTailByteAfterChunkedMdbEmbedBatch) {
+  const auto dir = temp_dir("wal_mdb_chunk_tail");
+  std::filesystem::remove_all(dir);
+  const auto wal_path = dir / "d" / "wal.log";
+  {
+    structdb::storage::StorageEngine st(dir / "d");
+    std::string err;
+    ASSERT_TRUE(st.open(&err)) << err;
+    st.set_embed_batch_max_frame_bytes(256);
+    std::vector<std::pair<std::string, std::string>> puts;
+    for (int i = 0; i < 40; ++i) {
+      puts.emplace_back("mdb$v2$row$tail$" + std::to_string(i), std::string(32, 'v'));
+    }
+    const std::vector<std::string> dels;
+    ASSERT_TRUE(st.commit_embed_batch(dels, puts, false, &err)) << err;
+    st.close();
+  }
+  std::string wal_bytes;
+  {
+    std::ifstream in(wal_path, std::ios::binary);
+    ASSERT_TRUE(in.is_open());
+    wal_bytes.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+  ASSERT_FALSE(wal_bytes.empty());
+  wal_bytes.push_back(static_cast<char>(0x7f));
+  {
+    std::ofstream out(wal_path, std::ios::binary | std::ios::trunc);
+    ASSERT_TRUE(out.is_open());
+    out.write(wal_bytes.data(), static_cast<std::streamsize>(wal_bytes.size()));
+  }
+  structdb::storage::StorageEngine st2(dir / "d");
+  std::string err;
+  ASSERT_TRUE(st2.open(&err)) << err;
+  std::string v;
+  ASSERT_TRUE(st2.get("mdb$v2$row$tail$0", &v));
+  EXPECT_EQ(v, std::string(32, 'v'));
+  st2.close();
+}
+
+TEST(StorageEngine, WalReplayRejectsCorruptAfterChunkedMdbEmbedBatch) {
+  const auto dir = temp_dir("wal_mdb_chunk_corrupt");
+  std::filesystem::remove_all(dir);
+  const auto wal_path = dir / "d" / "wal.log";
+  {
+    structdb::storage::StorageEngine st(dir / "d");
+    std::string err;
+    ASSERT_TRUE(st.open(&err)) << err;
+    st.set_embed_batch_max_frame_bytes(256);
+    std::vector<std::pair<std::string, std::string>> puts;
+    for (int i = 0; i < 24; ++i) {
+      puts.emplace_back("mdb$v2$row$bad$" + std::to_string(i), "x");
+    }
+    const std::vector<std::string> dels;
+    ASSERT_TRUE(st.commit_embed_batch(dels, puts, false, &err)) << err;
+    st.close();
+  }
+  {
+    std::fstream wf(wal_path, std::ios::binary | std::ios::in | std::ios::out | std::ios::ate);
+    ASSERT_TRUE(wf.is_open());
+    const std::uint32_t le = 3;
+    wf.write(reinterpret_cast<const char*>(&le), sizeof(le));
+    wf.write("xx\n", 3);
+    ASSERT_TRUE(static_cast<bool>(wf));
+  }
+  structdb::storage::StorageEngine st2(dir / "d");
+  std::string err;
+  ASSERT_FALSE(st2.open(&err));
+  EXPECT_NE(err.find("missing '='"), std::string::npos) << err;
+}
+
+TEST(StorageEngine, WalReplayImportRawBatchAfterAutoSplit) {
+  const auto dir = temp_dir("wal_replay_import_raw_split");
+  std::filesystem::remove_all(dir);
+  structdb::storage::StorageEngine st(dir / "d");
+  std::string err;
+  ASSERT_TRUE(st.open(&err)) << err;
+  st.set_import_batch_skip_undo(true);
+  st.set_import_store_raw_logical(true);
+  st.set_embed_batch_max_frame_bytes(256);
+  namespace mk = structdb::storage::mdb_keyspace;
+  std::vector<std::pair<std::string, std::string>> puts;
+  puts.reserve(60);
+  for (int i = 0; i < 60; ++i) {
+    const std::string id = std::to_string(i);
+    puts.emplace_back(mk::row_key("t", id), id + "\t" + id);
+  }
+  const std::vector<std::string> dels;
+  ASSERT_TRUE(st.commit_embed_batch(dels, puts, true, &err)) << err;
+  st.close();
+
+  structdb::storage::StorageEngine st2(dir / "d");
+  ASSERT_TRUE(st2.open(&err)) << err;
+  for (int i = 0; i < 60; ++i) {
+    const std::string id = std::to_string(i);
+    const std::string key = mk::row_key("t", id);
+    std::string got;
+    ASSERT_TRUE(st2.get(key, &got, (std::numeric_limits<std::uint64_t>::max)())) << i;
+    EXPECT_EQ(got, id + "\t" + id) << i;
+  }
+  st2.close();
+}
+
+TEST(StorageEngine, CommitEmbedBatchAutoSplitByFrameBytes) {
+  const auto dir = temp_dir("embed_batch_split");
+  std::filesystem::remove_all(dir);
+  structdb::storage::StorageEngine st(dir / "d");
+  std::string err;
+  ASSERT_TRUE(st.open(&err)) << err;
+  st.set_embed_batch_max_frame_bytes(512);
+  std::vector<std::pair<std::string, std::string>> puts;
+  puts.reserve(80);
+  for (int i = 0; i < 80; ++i) {
+    puts.emplace_back("mdb$v2$row$split$" + std::to_string(i), std::string(48, 'v'));
+  }
+  const std::vector<std::string> dels;
+  ASSERT_TRUE(st.commit_embed_batch(dels, puts, true, &err)) << err;
+  st.close();
+
+  std::ifstream wal(dir / "d" / "wal.log", std::ios::binary);
+  ASSERT_TRUE(wal.good());
+  int stdbbw1_frames = 0;
+  for (;;) {
+    std::uint32_t len = 0;
+    if (!wal.read(reinterpret_cast<char*>(&len), sizeof(len))) break;
+    std::string body(len, '\0');
+    if (!wal.read(body.data(), static_cast<std::streamsize>(len))) break;
+    if (body.size() >= 7 && body.compare(0, 7, "STDBBW1") == 0) ++stdbbw1_frames;
+  }
+  EXPECT_GT(stdbbw1_frames, 1) << stdbbw1_frames;
 }
 
 TEST(StorageEngine, CommitEmbedBatchEmptyIsNoop) {

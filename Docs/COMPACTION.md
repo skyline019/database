@@ -12,6 +12,7 @@
 - **三十五期（PHASE35）**：**L0** `compact_merge_two_oldest_l0` / `drain_pending_l0_compactions` 在 **持 `mu_` 快照计划** 后于锁外读 SST、合并、写 **`_tmp_l0_compact_*.sst`**，再 **短持锁** 校验 manifest 头、**rename** 为最终 `L0-`/`L1-` 名并写 MANIFEST / checkpoint（与上条顺序一致；冲突时丢弃临时文件，可重试）。详见 [`PHASE35.md`](phases/PHASE35.md)。
 - **三十六期（PHASE36）**：**L1→L2 / L2→L3 / L3→L4** 的 `compact_merge_two_oldest_*` 与 L0 对齐为 **快照 → 锁外物化 `_tmp_tier_compact_*` → 锁内校验与提交**（详见 [`PHASE36.md`](phases/PHASE36.md)）。
 - **仍未实现**：**size-tiered** 多路挑选、**并发** compaction（后台 worker 仍须遵守 `POLICY` §4.2 单写者与锁序）。
+- **Wave 3（文档）**：读放大与前缀扫描基准见 [`ENGINE_RUNTIME_CONFIG.md`](ENGINE_RUNTIME_CONFIG.md) §4；生产仍推荐 **`l0_compact_trigger_threshold`** + **`l2_compact_output_from_l1_merge`** 组合（[`PHASE11`](phases/PHASE11.md) / [`PHASE22`](phases/PHASE22.md)），非新代码路径。
 - **背压（十四 / 二十一 / 二十二期）**：**十四期**起 L0 深度等 → Facade 映射 WAL 队列预算；**21C** 起 worker 队列 / 延后 L0 → **`CompactionSlots`**（[`PHASE21.md`](phases/PHASE21.md)、`Engine::sync_scheduler_budget_from_storage_pressure`）；**二十二 22B** 起 `GraphExecutor` 在 `use_budget_probe` 下对 **WalQueueDepth、CompactionSlots、MemTableBytes** 依次 `acquire_for_node`，使 `Orchestrator::on_backpressure` 可观测 **`WalBacklogged` / `CompactionBusy` / `MemTableFull`**（见 [`PHASE22.md`](phases/PHASE22.md)）。
 
 ## 2. 不变式与限制

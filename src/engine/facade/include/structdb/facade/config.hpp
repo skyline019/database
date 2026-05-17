@@ -9,6 +9,12 @@
 
 namespace structdb::facade {
 
+/// MDB snapshot row/schema wire encoding (see `wire_encode_snapshot_blob` in client/mdb).
+enum class MdbWireEncoding : int {
+  Hex = 0,
+  Wire2 = 1,
+};
+
 struct EngineConfigSnapshot {
   std::uint64_t version{0};
   /// Default engine persistence root (WAL / SST / checkpoint under this path). See `Docs/POLICY.md` §4.0.
@@ -19,6 +25,8 @@ struct EngineConfigSnapshot {
   /// When true, engine storage may fsync more aggressively on write paths (beyond embed batch boundaries).
   /// **InnoDB analogy**: stronger durability than default; see `Docs/TXN_INNODB_MAP.md` §2 and `POLICY` §4.5. Default false.
   bool fsync_every_write{false};
+  /// When true, `Engine::startup` fails if `checkpoint.chain` disagrees with latest checkpoint or `wal.log` (PHASE43 Wave 4).
+  bool checkpoint_chain_strict{false};
   /// Passed to `StorageEngine::open` (e.g. `StorageEngine::kOpenFlagRebuildUndoStackFromLog`). Default 0.
   unsigned storage_open_flags{0};
   /// When true, `flush_memtable` runs WAL prefix trim after checkpoint write (phase 4B; default false).
@@ -120,6 +128,38 @@ struct EngineConfigSnapshot {
   std::uint32_t kv_put_async_queue_depth{0};
   /// When true (default), MDB `persist_table` may emit embed batches that touch only dirty rows + row index (v2 tables).
   bool mdb_incremental_persist{true};
+  /// MDB snapshot row/schema wire encoding (default `Hex`; `Wire2` is length-prefixed binary).
+  MdbWireEncoding mdb_wire_encoding{MdbWireEncoding::Hex};
+  /// When true, `persist_now` only marks dirty rows; flush on `COMMIT`, `FLUSH PERSIST`, `USE`, or script end. Default false.
+  bool mdb_persist_coalesce{false};
+  /// Coalesce: auto-flush when dirty row count reaches this (0 = disabled). Default 0.
+  std::uint32_t mdb_persist_coalesce_max_dirty_rows{0};
+  /// Opt-in bulk import: defer `BULKINSERTFAST` persist, skip secondary index until `REBUILD INDEX` / import off + persist.
+  bool mdb_bulk_import_mode{false};
+  /// Bulk import: skip `session.journal` lines until explicit flush/COMMIT (WAL remains authoritative). Default false.
+  bool embed_journal_skip_until_commit{false};
+  /// Embed journal encoding: false = legacy tab-separated text; true = `J2` binary line. Default false.
+  bool embed_journal_binary{false};
+  /// Storage: batch `commit_embed_batch` uses one undo lookup pass per key (default true).
+  bool storage_batch_undo_lookup{true};
+  /// When true (default), `run_mdb_script` amortizes `BULKINSERT`/`BULKINSERTFAST` to one persist at script end.
+  bool mdb_script_amortize_bulk_dml{true};
+  /// Bulk import / large snapshot persist: undo lookup uses MemTable only (no SST scan per key).
+  bool storage_batch_undo_mem_only{false};
+  /// Bulk import: skip versioned undo records for `commit_embed_batch` (insert-only import; WAL authoritative).
+  bool storage_import_batch_skip_undo{true};
+  /// Max row puts per `persist_table` embed submit (default 32K); metadata on final chunk only.
+  std::uint32_t mdb_persist_chunk_max_puts{32768};
+  /// Max estimated WAL frame bytes per persist chunk (`0` = row-count limit only). Default 8 MiB.
+  std::uint64_t mdb_persist_chunk_max_frame_bytes{8ULL * 1024 * 1024};
+  /// Bulk import: store logical payload bytes without `ver$` wrap in `commit_embed_batch`.
+  bool storage_import_store_raw_logical{false};
+  /// Bulk/full snapshot persist: row values as tab-separated text (no `mdbhex1:`); metadata still wire-encoded.
+  bool mdb_bulk_persist_plain_rows{true};
+  /// Split oversized `commit_embed_batch` into multiple WAL frames (`0` = disabled).
+  std::uint64_t storage_embed_batch_max_frame_bytes{0};
+  /// Use sorted bulk `IMemTable` insert path in large import batches (opt-in).
+  bool memtable_bulk_put_enabled{false};
 };
 
 class ConfigurableEngine {

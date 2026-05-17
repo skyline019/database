@@ -4,6 +4,7 @@ add_library(structdb_storage STATIC
   src/recovery_phase.cpp
   src/memtable.cpp
   src/memtable_skiplist.cpp
+  src/memtable_arena.cpp
   src/memtable_manager.cpp
   src/byte_token_bucket.cpp
   src/manifest.cpp
@@ -11,6 +12,7 @@ add_library(structdb_storage STATIC
   src/redo_log.cpp
   src/undo_log.cpp
   src/checkpoint.cpp
+  src/checkpoint_chain.cpp
   src/lsm_state.cpp
   src/storage_engine_detail.cpp
   src/storage_engine.cpp

@@ -6,6 +6,65 @@
 
 ## [Unreleased]
 
+### 竞品完善（Wave 4 / PHASE43 续 + PHASE44–45 + I-CAPI 1.9）
+
+- **PITR 加固（PHASE43 续）**：`checkpoint_chain_validate`（`EngineConfigSnapshot::checkpoint_chain_strict`）；`structdb_app --recover-to-checkpoint-seq`；`scripts/recover_to_checkpoint.ps1` 调用 app；`backup_manifest.json` 含 `last_checkpoint_seq`。
+- **索引（PHASE45）**：`DROP INDEX name ON table`；`CREATE UNIQUE INDEX`；[`PHASE45.md`](phases/PHASE45.md)。
+- **Bulk（PHASE44）**：`IMPORT SEGMENT (token)` → persist idem `idem:import:<table>:seg:<token>`；段切换时自动 persist；样例 [`scripts/bench/import_segment_two_segments.mdb`](../scripts/bench/import_segment_two_segments.mdb)。
+- **C API 1.9.0**：`structdb_recover_data_dir_to_checkpoint_seq`、`structdb_engine_recover_to_checkpoint_seq`、`structdb_backup_bundle`、`structdb_mdb_session_set_durability`。
+- **文档/远期**：[`PHASE46_NAMESPACE.md`](phases/PHASE46_NAMESPACE.md)、[`PHASE46_SQL_MAPPING.md`](phases/PHASE46_SQL_MAPPING.md)；可选 [`.github/workflows/structdb-linux-smoke.yml`](../.github/workflows/structdb-linux-smoke.yml)。
+- **回归**：`Mdb.Phase45*`（2）、`Mdb.Phase44*`（1）、`Mdb.Phase42OrderByPageJson`（1）、`StorageEngine.Phase43ChainValidateMismatchStrict`；`Capi.Phase45*`（2）；`Mdb.*` **151** 项全绿。
+
+### 竞品完善（Wave 3 / PHASE42–43）
+
+- **查询（I-QRY / PHASE42）**：`GROUP BY (col) COUNT`、`GROUP BY (col) SUM(col)`；`SCAN INDEX(name)`（命名索引键序；无 postings 时按列值回退）。
+- **PITR（I-PITR / PHASE43）**：`checkpoint.chain` 侧车；`SHOW CHECKPOINTS`；`RECOVER TO CHECKPOINT_SEQ n`（`Engine::recover_to_checkpoint_seq`，须先 shutdown）；`RECOVER TO TIME/LSN` 仍定向 PHASE43。
+- **存储**：[`checkpoint_chain.cpp`](../src/engine/storage/src/checkpoint_chain.cpp)；[`PHASE43.md`](phases/PHASE43.md)、[`PHASE42.md`](phases/PHASE42.md)。
+- **Wave 2 补强**：`Mdb.Phase41DurabilityColdRestart`、`Phase41IndexColdRestart`、`Phase41DropRenameCrashOldTableGone`。
+- **PHASE44 原型**：`IMPORT SEGMENT (token)` 日志提示；[`PHASE44_PERSIST_STREAM.md`](phases/PHASE44_PERSIST_STREAM.md) 续写 IMPORT_SEGMENT。
+- **运维**：[`scripts/recover_to_checkpoint.ps1`](../scripts/recover_to_checkpoint.ps1)；[`BACKUP_RESTORE_RUNBOOK.md`](BACKUP_RESTORE_RUNBOOK.md) §7 checkpoint_seq。
+- **文档**：`ONBOARDING` / `ENGINE_RUNTIME_CONFIG` §4.5 事务 profile；`COMPETITIVE_MATRIX` §6.4 GROUP BY ◐。
+- **回归**：`Mdb.Phase42*`（2）、`Mdb.Phase43*`（1）、`StorageEngine.Phase43*`（2）；`Mdb.*` **147** 项全绿。
+
+### 竞品完善（Wave 2 / PHASE41）
+
+- **耐久（I-DUR）**：`SET DURABILITY 0|1|2`（会话级，映射 [`TXN_INNODB_MAP.md`](phases/TXN_INNODB_MAP.md)）；`SHOW TUNING` 含 `session_durability_level`；`WALSYNC`/`GROUPCOMMIT` → 提示 `SET DURABILITY`；`HOTINDEX` → 提示 `CREATE INDEX`。
+- **DDL（41A/41B）**：`ALTER TABLE ADD COLUMN (name:type)`、`ALTER TABLE RENAME COLUMN (old,new)`；`BEGIN` 内拒绝；其余 `ALTER` 仍 `[NOT_SUPPORTED]` 并指向 PHASE41 子集。
+- **运维（I-OPS）**：`RENAME TABLE` 新表 persist + 旧表键删除合并为 **单次** `submit_persist_command_batch`。
+- **索引（I-IDX）**：`mdb$v2$nidxdef$` / `mdb$v2$nidx$`；`CREATE INDEX idx ON table(col)`；`EXPLAIN WHERE` → `named_index=<name>`；`REBUILD INDEX(name)`。
+- **Bulk 首段（PHASE44）**：`ordered_row_ids_for_persist` 流式全量行遍历；设计稿 [`PHASE44_PERSIST_STREAM.md`](phases/PHASE44_PERSIST_STREAM.md)。
+- **文档**：[`PHASE41.md`](phases/PHASE41.md)；矩阵 [`COMPETITIVE_MATRIX.md`](COMPETITIVE_MATRIX.md) §6；[`PHASE25.md`](phases/PHASE25.md) §25G 修订。
+- **回归**：`Mdb.Phase41*`（6 项）；`Mdb.*` **141** 项全绿。
+- **脚本**：`mega_data_mdb_stress.ps1` 可选 `-SampleWorkingSet`（峰值 WorkingSet 写入 summary JSON）。
+
+### 竞品完善（Wave 0–1）
+
+- **基线**：`structdb_app --oltp-persist-micro`；`scripts/bench/oltp_persist_micro.ps1` → `benchmarks/baselines/oltp_persist_baseline.json`；`run_persist_baseline.ps1` 串联 OLTP；`scripts/results/README.md`、`compare_mega_summary.py`。
+- **运维**：[`BACKUP_RESTORE_RUNBOOK.md`](BACKUP_RESTORE_RUNBOOK.md)；`scripts/backup_bundle.ps1`、`structdb_app --backup-bundle`。
+- **事务可预期**：[`ONBOARDING.md`](ONBOARDING.md) 三档配置；`SHOW TXN` / `SHOW SNAPSHOT` 增加 `storage_rollback_policy`。
+- **配置预设**：[`ENGINE_RUNTIME_CONFIG.md`](ENGINE_RUNTIME_CONFIG.md) §4（OLTP / LSM / bulk）；`scripts/weekly_bench.ps1` bulk 门禁。
+- **文档**：[`STRUCTDB_EVALUATION_SUMMARY.md`](STRUCTDB_EVALUATION_SUMMARY.md) MemTable 分场景表述；[`COMPETITIVE_MATRIX.md`](COMPETITIVE_MATRIX.md) §7.2 OLTP 基线链接。
+- **回归**：`Mdb.ShowTxnStorageRollbackPolicy*`、`Mdb.BackupRestoreRunbookSmoke`。
+
+### 工程可见（三十九期）
+
+- **MDB persist 性能（默认语义不变）**：`LogicalTable::row_ids_ordered` 增量维护；`persist_table` 拆为 `build_persist_command_batch` / `submit_persist_command_batch`，脏行 >8192 分块 submit；`mdbwire2:` 线格式（`mdb_wire_encoding`，默认仍为 `Hex`）；`IMPORT MODE` / `FLUSH PERSIST` / `REBUILD INDEX`；`BULKINSERTFAST` 经 `persist_now()`（导入模式延迟落盘）。
+- **Opt-in**：`mdb_persist_coalesce` + `MdbRunOptions::persist_coalesce`；`mdb_bulk_import_mode` + `IMPORT MODE` / `mdb_bulk_import_mode`；`embed_journal_skip_until_commit`；`storage_batch_undo_lookup`（默认 true）。
+- **存储 / MemTable**：`commit_embed_batch` 批量 undo 查找；`MemTableArena` + SkipList 节点 arena 分配。
+- **脚本 / 基线**：`scripts/run_persist_baseline.ps1`；`mega_data_mdb_stress.ps1 -ImportMode`；`benchmarks/baselines/structdb_bench_baseline.json` 含 `BM_StdbStorage*`。
+- **回归**：`Mdb.Phase39*`（row_index 冷启动 COUNT、Wire2 parity、coalesce + FLUSH PERSIST、脚本默认 bulk 摊销）；专文 [`PHASE39_PERSIST_PERF.md`](Docs/phases/PHASE39_PERSIST_PERF.md)。
+- **数量级续**：默认 `mdb_script_amortize_bulk_dml`（脚本 `BULKINSERT*` EOF 落盘）；脏行 >8192 单次全量 persist；`storage_batch_undo_mem_only` / `storage_import_batch_skip_undo`；`structdb_app` 增加 `--mdb-bulk-import` 等 CLI。
+
+### 工程可见（四十期）
+
+- **大表 bulk 行索引**：全表导入时延迟 `row_ids_ordered`（避免 O(n²) 有序插入）；单调/数字主键友好追加；persist 前一次性重建。
+- **大表 plain 行落盘**：`mdb_bulk_persist_plain_rows`（默认 true）跳过 `mdbhex1:`；导入批 WAL/MemTable 零拷贝；plain 批次跳过 text journal。
+- **MDB 分块 persist**：`mdb_persist_chunk_max_puts` / `mdb_persist_chunk_max_frame_bytes`；大表全量 snapshot 多帧 `submit_ex`，catalog/schema/`row_index` 仅末帧；`idempotency_token` `{base}:chunk:{i}`。
+- **导入 raw 逻辑值**：`storage_import_store_raw_logical`；`mdb_bulk_import_mode` 时 persist 自动 raw（无 `ver$` 包装）；`memtable_bulk_put_enabled`（opt-in 排序批量 put）。
+- **存储兜底分帧**：`storage_embed_batch_max_frame_bytes`（默认 `0`）在 `commit_embed_batch` 内拆分 WAL 帧。
+- **性能（本机 1M 行，`RowsPerLine=1000`）**：默认脚本摊销 + 分块 + plain 约 **~238K TPS**；`--mdb-bulk-import` 约 **~328K TPS**（相对 PHASE39 ~7.5K 约 **32–44×**）。门禁脚本 `scripts/bench/mega_data_mdb_stress.ps1`。
+- **回归**：**`Mdb.Phase40*`**（24 项：严格/失败/恢复/联动）、**`Mdb.*`**（127 项全绿）；`StorageEngine.WalReplayImportRaw*`、`WalReplay*ChunkedMdb*`、`CommitEmbedBatchAutoSplitByFrameBytes`；专文 [`PHASE40_PERSIST_PERF.md`](phases/PHASE40_PERSIST_PERF.md)。
+
 ### 工程 / 重构（持续）
 
 - **MDB**：`PAGE` / `PAGE_JSON` 实现迁至 **`mdb_query_paging.{hpp,cpp}`**；`mdb_ops_pages_journal_import.cpp` 保留 `IMPORTDIR`、`SHOWLOG` 与 CSV 括号解析等（台账见 [`NEXT_REFACTOR_RECOMMENDATIONS.md`](Docs/NEXT_REFACTOR_RECOMMENDATIONS.md) §13）。

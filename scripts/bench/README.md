@@ -52,6 +52,84 @@ powershell -ExecutionPolicy Bypass -File scripts/bench/mega_data_mdb_stress.ps1 
 
 结果：`scripts/results/mega_data_summary_*.json`。
 
+## `mdb_query_bench.ps1`
+
+在已加载（或脚本内先加载）的表上测量 **COUNT / EXPLAIN WHERE / WHERE / PAGE_JSON**（含 `AFTER` 游标与 `COLS` 列裁剪），单会话计时（`structdb_app --query-bench`）。
+
+- `PAGE_JSON(page_no,page_size,sort_col,asc|desc)` — 页号分页（`id` 排序走有序键切片）
+- `PAGE_JSON(AFTER,cursor,page_size,sort_col,asc|desc)` — **键集游标**，返回 `next_after` / `has_more`（深分页推荐）
+- `PAGE_JSON(...,COLS,id,a)` — **列裁剪** + `compact` JSON（省略 `columns` 元数据）
+- `PAGE_JSON(...,STREAM)` — **流式**：`[PAGE_JSON_META]` + `[PAGE_JSON_ROW]`×N + `[PAGE_JSON_END]`（会话 `row_ptr` 缓存）
+- `PAGE_JSON(...,IDS_ONLY)` — 仅 `ids` 数组（无 headers/rows）；可组合 `AFTER` / `STREAM`
+- 会话内 **稠密序数缓存**（`row_ids_ordered` 对齐时 O(1) 取行，无 `map::find`）
+
+**宽表对比**（`-VariedSchema`：每行唯一 `tag`/`payload` + `REBUILD INDEX`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_bench.ps1 -BuildDir build -LoadRows 50000 -VariedSchema -EngineBulkImport
+```
+
+加载压测：`mega_data_varied_mdb_stress.ps1` → `scripts/results/mega_data_varied_summary_*.json`。
+
+```powershell
+# 10 万行：加载 + 查询（默认 5 次 bench + 1 次 warmup）
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_bench.ps1 -BuildDir build -LoadRows 100000
+
+# 复用已有 data_dir（跳过加载）
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_bench.ps1 -BuildDir build -SkipLoad `
+  -DataDir "E:\path\to\_data" -LoadRows 1000000
+
+# 冷启动后再测一轮查询（新进程、重载表）
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_bench.ps1 -BuildDir build -LoadRows 100000 -ColdRestart
+```
+
+结果：`scripts/results/mdb_query_summary_*.json`（含各查询 `ms_avg` / `ms_p50` / `ms_p95`）。
+
+`-BenchProfile all` 或 `analytics` 时追加 **GROUP BY / 非 id 排序 PAGE_JSON / SCAN INDEX / SUM / QBAL** 等（需 analytics 表结构，见下节）。
+
+## `mdb_query_complex_stress.ps1`（高压 + 复杂查询）
+
+**一站式**：大表加载 + 命名索引 + **标准 + 分析** 查询压测（`--bench-profile all`）。
+
+| 阶段 | 内容 |
+|------|------|
+| 加载 | `DEFATTR(id:int,dept:int,val:int,k:string)`，`dept=id%100`，`k=t{id%50}`，`BULKINSERTFAST` |
+| 索引 | `CREATE INDEX ik ON <table>(k)` |
+| 查询 | `COUNT`、`WHERE`/`EXPLAIN`（id/k/dept）、`PAGE_JSON`（id/val/dept 排序、AFTER/STREAM）、`GROUP BY (dept) COUNT/SUM(val)`、`SCAN INDEX(ik,5000,STATS)`（门禁）、`SCAN INDEX(ik,STATS)`（soak）、`SUM(val)`、`QBAL(val,0)` |
+
+```powershell
+# 默认 20 万行（环境变量 STRUCTDB_QUERY_COMPLEX_ROWS 可覆盖）
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_complex_stress.ps1 -BuildDir build
+
+# 百万行 + 冷启动后再测查询（耗时长）
+$env:STRUCTDB_QUERY_COMPLEX_ROWS = "1000000"
+powershell -ExecutionPolicy Bypass -File scripts/bench/mdb_query_complex_stress.ps1 `
+  -BuildDir build -Rows 1000000 -ColdRestart -EngineBulkImport
+```
+
+结果：`scripts/results/mdb_query_complex_summary_*.json`。
+
+**基线归档**（首次或换机器后执行一次）：
+
+```powershell
+python benchmarks/scripts/promote_mdb_query_baseline.py `
+  --from (Get-ChildItem scripts/results/mdb_query_complex_summary_*.json | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+```
+
+**门禁对比**（相对已归档基线，默认 P95 ≤ **1.25×**；全表 `SCAN INDEX(ik,STATS)` 为 soak，默认忽略）：
+
+```powershell
+python benchmarks/scripts/compare_mdb_query_summary.py `
+  --baseline benchmarks/baselines/mdb_query_complex_baseline.json `
+  --current (Get-ChildItem scripts/results/mdb_query_complex_summary_*.json | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName `
+  --max-p95-ratio 1.25 `
+  --ignore-queries scan_index_ik_stats_full
+```
+
+峰值性能与插入路径说明：[`benchmarks/MDB_E2E_PEAK_PERFORMANCE.md`](../../benchmarks/MDB_E2E_PEAK_PERFORMANCE.md)。
+
+`structdb_app` 参数：`--bench-profile standard|analytics|all`（与 `--query-bench` 联用）。
+
 ## 与 `structdb_bench` 的关系
 
 - **引擎微基准**（put/get/visit_prefix 等）：见仓库 `benchmarks/README.md` 与目标 `structdb_bench`。

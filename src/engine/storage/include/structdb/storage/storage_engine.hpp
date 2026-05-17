@@ -209,6 +209,14 @@ class StorageEngine {
   /// Selects memtable implementation for the **next** `open()` (`Map` or `SkipList`). Call before `open`.
   void set_memtable_backend(MemTableBackend b) { memtable_backend_ = b; }
   MemTableBackend memtable_backend() const noexcept { return memtable_backend_; }
+  /// When true (default), `commit_embed_batch` prefetches undo prev state per key once per batch.
+  void set_batch_undo_lookup(bool on) { batch_undo_lookup_ = on; }
+  bool batch_undo_lookup() const noexcept { return batch_undo_lookup_; }
+  void set_batch_undo_mem_only(bool on) { batch_undo_mem_only_ = on; }
+  void set_import_batch_skip_undo(bool on) { import_batch_skip_undo_ = on; }
+  void set_import_store_raw_logical(bool on) { import_store_raw_logical_ = on; }
+  void set_memtable_bulk_put_enabled(bool on) { memtable_bulk_put_enabled_ = on; }
+  void set_embed_batch_max_frame_bytes(std::uint64_t bytes) { embed_batch_max_frame_bytes_ = bytes; }
 
   Manifest& manifest() { return manifest_; }
   const Manifest& manifest() const { return manifest_; }
@@ -296,11 +304,15 @@ class StorageEngine {
   bool commit_embed_batch_unlocked_(const std::vector<std::string>& dels,
                                     const std::vector<std::pair<std::string, std::string>>& puts, bool fsync_wal,
                                     std::string* error_out);
+  bool commit_embed_batch_unlocked_split_(std::vector<std::string> dels,
+                                          std::vector<std::pair<std::string, std::string>> puts, bool fsync_last,
+                                          std::string* error_out);
   bool put_impl_unlocked_(const std::string& key, const std::string& value, bool fsync_wal, std::uint64_t batch_commit_seq,
                           bool record_versioned_undo);
   /// Latest non-tomb stored value in mem then SST (newest SST first); false if none.
   bool lookup_versioned_raw_for_undo_unlocked_(const std::string& key, std::string* prev_raw_out) const;
   bool append_versioned_undo_if_needed_unlocked_(const std::string& key);
+  bool append_versioned_undo_with_prev_unlocked_(const std::string& key, const std::string& prev_raw);
   std::string logical_to_stored_for_put_unlocked_(const std::string& key, const std::string& logical,
                                                    std::uint64_t batch_commit_seq);
 
@@ -324,6 +336,12 @@ class StorageEngine {
   std::filesystem::path dir_;
   WalWriter wal_;
   MemTableBackend memtable_backend_{MemTableBackend::SkipList};
+  bool batch_undo_lookup_{true};
+  bool batch_undo_mem_only_{false};
+  bool import_batch_skip_undo_{false};
+  bool import_store_raw_logical_{false};
+  bool memtable_bulk_put_enabled_{false};
+  std::uint64_t embed_batch_max_frame_bytes_{0};
   MemTableManager mem_mgr_;
   Manifest manifest_;
   RedoLog redo_;

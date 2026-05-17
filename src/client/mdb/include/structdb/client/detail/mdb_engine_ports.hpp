@@ -19,9 +19,11 @@ namespace structdb::client::mdb {
 struct MdbEnginePorts {
   structdb::facade::Engine* engine = nullptr;
   structdb::client::EmbedClient* client = nullptr;
+  /// When true, `persist_table` omits secondary-index keys (bulk import path).
+  bool skip_secondary_index_on_persist{false};
 
   static MdbEnginePorts from(structdb::facade::Engine& e, structdb::client::EmbedClient& c) {
-    return {&e, &c};
+    return {&e, &c, false};
   }
 
   bool kv_get(std::string_view key, std::string* val, std::uint64_t read_max_seq) const;

@@ -121,6 +121,8 @@ struct CapSessionState {
     embed: Option<usize>,
     mdb_session: Option<usize>,
     data_dir: String,
+    /// MDB `SET DURABILITY` level 0..2 (Wave 4 / C API 1.9).
+    durability_level: Option<u8>,
 }
 
 /// One `CONFIRM_REORDER` step: old row id -> new row id for `table` (session table name, may include schema).
@@ -175,6 +177,11 @@ struct CapApi {
     ),
     engine_begin_mdb_script_batch: unsafe extern "C" fn(*mut c_void, *mut c_void, u64),
     engine_end_mdb_script_batch: unsafe extern "C" fn(*mut c_void),
+    mdb_session_set_durability: unsafe extern "C" fn(*mut c_void, i32) -> i32,
+    backup_bundle:
+        unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, *mut c_char, usize) -> i32,
+    recover_data_dir_to_checkpoint_seq:
+        unsafe extern "C" fn(*const c_char, u64, *mut c_char, usize) -> i32,
 }
 
 static CAP_API: OnceCell<CapApi> = OnceCell::new();
@@ -791,6 +798,22 @@ fn load_cap_api() -> Result<&'static CapApi, String> {
                 unsafe { lib.get(b"structdb_engine_end_mdb_script_batch\0") }.map_err(|e| e.to_string())?;
             *s
         };
+        let mdb_session_set_durability_fn = {
+            let s: Symbol<unsafe extern "C" fn(*mut c_void, i32) -> i32> =
+                unsafe { lib.get(b"structdb_mdb_session_set_durability\0") }.map_err(|e| e.to_string())?;
+            *s
+        };
+        let backup_bundle_fn = {
+            let s: Symbol<
+                unsafe extern "C" fn(*const c_char, *const c_char, *const c_char, *mut c_char, usize) -> i32,
+            > = unsafe { lib.get(b"structdb_backup_bundle\0") }.map_err(|e| e.to_string())?;
+            *s
+        };
+        let recover_data_dir_to_checkpoint_seq_fn = {
+            let s: Symbol<unsafe extern "C" fn(*const c_char, u64, *mut c_char, usize) -> i32> =
+                unsafe { lib.get(b"structdb_recover_data_dir_to_checkpoint_seq\0") }.map_err(|e| e.to_string())?;
+            *s
+        };
 
         Ok(CapApi {
             _lib: lib,
@@ -810,8 +833,25 @@ fn load_cap_api() -> Result<&'static CapApi, String> {
             long_task_control_set_progress_callback: long_task_control_set_progress_callback_fn,
             engine_begin_mdb_script_batch: engine_begin_mdb_script_batch_fn,
             engine_end_mdb_script_batch: engine_end_mdb_script_batch_fn,
+            mdb_session_set_durability: mdb_session_set_durability_fn,
+            backup_bundle: backup_bundle_fn,
+            recover_data_dir_to_checkpoint_seq: recover_data_dir_to_checkpoint_seq_fn,
         })
     })
+}
+
+fn apply_cap_durability(api: &CapApi, cap: &mut CapSessionState, level: u8) -> Result<(), String> {
+    if level > 2 {
+        return Err("durability level must be 0, 1, or 2".to_string());
+    }
+    cap.durability_level = Some(level);
+    if let Some(mdb) = cap.mdb_session {
+        let rc = unsafe { (api.mdb_session_set_durability)(mdb as *mut c_void, level as i32) };
+        if rc != STRUCTDB_CAPI_OK {
+            return Err(format!("structdb_mdb_session_set_durability failed (rc={rc})"));
+        }
+    }
+    Ok(())
 }
 
 fn runtime_candidate_dirs() -> Vec<PathBuf> {
@@ -1038,6 +1078,9 @@ fn ensure_cap_session(api: &CapApi, st: &SessionState, cap: &mut CapSessionState
     }
     cap.mdb_session = Some(mdb as usize);
     cap.data_dir = st.data_dir.clone();
+    if let Some(level) = cap.durability_level {
+        apply_cap_durability(api, cap, level)?;
+    }
     Ok(())
 }
 
@@ -2597,6 +2640,102 @@ fn get_state(state: State<'_, AppState>) -> UiState {
 }
 
 #[tauri::command]
+fn get_mdb_durability(state: State<'_, AppState>) -> Option<u8> {
+    state
+        .inner()
+        .cap
+        .lock()
+        .expect("cap lock")
+        .durability_level
+}
+
+#[tauri::command]
+fn set_mdb_durability(state: State<'_, AppState>, level: u32) -> Result<(), String> {
+    let api = load_cap_api()?;
+    let app = state.inner();
+    let st = app.st.lock().expect("state lock");
+    let mut cap = app.cap.lock().expect("cap lock");
+    let lvl = level as u8;
+    apply_cap_durability(&api, &mut cap, lvl)?;
+    if !st.data_dir.trim().is_empty() {
+        ensure_cap_session(&api, &st, &mut cap)?;
+        let _ = execute_via_cap_session(&api, &st, &mut cap, &format!("SET DURABILITY {lvl}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn backup_storage_bundle(state: State<'_, AppState>, dest_dir: String) -> Result<String, String> {
+    let api = load_cap_api()?;
+    let app = state.inner();
+    let st = app.st.lock().expect("state lock");
+    if st.data_dir.trim().is_empty() {
+        return Err("workspace data_dir is empty".to_string());
+    }
+    let mut cap = app.cap.lock().expect("cap lock");
+    reset_cap_session(&api, &mut cap);
+    let data_c = as_cstring(st.data_dir.trim());
+    let session_c = as_cstring(
+        Path::new(st.data_dir.trim())
+            .join("embed_session")
+            .to_string_lossy()
+            .as_ref(),
+    );
+    let dest_c = as_cstring(dest_dir.trim());
+    let mut err = vec![0_i8; 4096];
+    let rc = unsafe {
+        (api.backup_bundle)(
+            data_c.as_ptr(),
+            session_c.as_ptr(),
+            dest_c.as_ptr(),
+            err.as_mut_ptr() as *mut c_char,
+            err.len(),
+        )
+    };
+    if rc != STRUCTDB_CAPI_OK {
+        return Err(format!(
+            "structdb_backup_bundle failed (rc={rc}): {}",
+            cstr_err(&err)
+        ));
+    }
+    Ok(dest_dir.trim().to_string())
+}
+
+#[tauri::command]
+fn recover_to_checkpoint_seq(state: State<'_, AppState>, checkpoint_seq: u64) -> Result<String, String> {
+    if checkpoint_seq == 0 {
+        return Err("checkpoint_seq must be > 0".to_string());
+    }
+    let api = load_cap_api()?;
+    let app = state.inner();
+    let st = app.st.lock().expect("state lock");
+    if st.data_dir.trim().is_empty() {
+        return Err("workspace data_dir is empty".to_string());
+    }
+    let mut cap = app.cap.lock().expect("cap lock");
+    reset_cap_session(&api, &mut cap);
+    let data_c = as_cstring(st.data_dir.trim());
+    let mut err = vec![0_i8; 4096];
+    let rc = unsafe {
+        (api.recover_data_dir_to_checkpoint_seq)(
+            data_c.as_ptr(),
+            checkpoint_seq,
+            err.as_mut_ptr() as *mut c_char,
+            err.len(),
+        )
+    };
+    if rc != STRUCTDB_CAPI_OK {
+        return Err(format!(
+            "structdb_recover_data_dir_to_checkpoint_seq failed (rc={rc}): {}",
+            cstr_err(&err)
+        ));
+    }
+    Ok(format!(
+        "Recovered data_dir to checkpoint_seq={checkpoint_seq}. Re-open workspace or refresh tables."
+    ))
+}
+
+#[tauri::command]
 fn set_workspace(state: State<'_, AppState>, data_dir: String) {
     let api = load_cap_api().ok();
     let app = state.inner();
@@ -3844,7 +3983,11 @@ pub fn run() {
             runtime_artifact_info,
             cli_terminal_start,
             cli_terminal_write_line,
-            cli_terminal_stop
+            cli_terminal_stop,
+            get_mdb_durability,
+            set_mdb_durability,
+            backup_storage_bundle,
+            recover_to_checkpoint_seq
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

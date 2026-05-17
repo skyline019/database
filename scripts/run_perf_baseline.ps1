@@ -32,14 +32,14 @@ if (-not $BuildDir) {
   $BuildDir = Join-Path $repoRoot "build"
 }
 
-$benchExe = Join-Path $BuildDir "benchmarks" $BuildConfig "structdb_bench.exe"
+$benchExe = Join-Path (Join-Path (Join-Path $BuildDir "benchmarks") $BuildConfig) "structdb_bench.exe"
 if (-not (Test-Path -LiteralPath $benchExe)) {
   throw "structdb_bench not found: $benchExe (configure with -DSTRUCTDB_BUILD_BENCHMARKS=ON)"
 }
 
 if (-not $OutFile) {
   $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-  $OutFile = Join-Path $repoRoot "benchmarks" "baselines" "structdb_bench_run_$stamp.json"
+  $OutFile = Join-Path (Join-Path (Join-Path $repoRoot "benchmarks") "baselines") "structdb_bench_run_$stamp.json"
 }
 
 $outDir = Split-Path $OutFile -Parent
@@ -66,8 +66,8 @@ foreach ($row in $rows) {
 }
 
 if ($CompareBaseline) {
-  $baseline = Join-Path $repoRoot "benchmarks" "baselines" "structdb_bench_baseline.json"
-  $comparePy = Join-Path $repoRoot "benchmarks" "scripts" "compare_bench.py"
+  $baseline = Join-Path (Join-Path (Join-Path $repoRoot "benchmarks") "baselines") "structdb_bench_baseline.json"
+  $comparePy = Join-Path (Join-Path $repoRoot "benchmarks") "scripts" "compare_bench.py"
   if (-not (Test-Path -LiteralPath $baseline)) {
     throw "Baseline missing: $baseline"
   }

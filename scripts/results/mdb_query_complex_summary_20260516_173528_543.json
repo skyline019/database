@@ -1,0 +1,98 @@
+{
+    "timestamp":  "2026-05-16T17:35:32.7164007Z",
+    "benchmark_profile":  "mdb_query_complex_v1",
+    "table":  "qcx",
+    "load_rows":  8000,
+    "row_count_hint":  8000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  2,
+    "bench_profile":  "all",
+    "schema":  "id,dept,val,k + INDEX ik(k)",
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qcx_20260516_173528_543\\_data",
+    "load_wall_ms":  3918,
+    "load_tps_est":  2041.9,
+    "query_wall_ms":  117,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  2,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "explain_where_hit",
+                             "n":  2,
+                             "ms_avg":  0.005,
+                             "ms_p50":  0.004,
+                             "ms_p95":  0.004
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  2,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.003
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  2,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  2,
+                             "ms_avg":  0.018,
+                             "ms_p50":  0.017,
+                             "ms_p95":  0.017
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  2,
+                             "ms_avg":  0.018,
+                             "ms_p50":  0.018,
+                             "ms_p95":  0.018
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  2,
+                             "ms_avg":  0.032,
+                             "ms_p50":  0.024,
+                             "ms_p95":  0.024
+                         },
+                         {
+                             "name":  "page_json_after_mid",
+                             "n":  2,
+                             "ms_avg":  0.021,
+                             "ms_p50":  0.018,
+                             "ms_p95":  0.018
+                         },
+                         {
+                             "name":  "page_json_cols_id",
+                             "n":  2,
+                             "ms_avg":  0.014,
+                             "ms_p50":  0.011,
+                             "ms_p95":  0.011
+                         },
+                         {
+                             "name":  "page_json_after_stream",
+                             "n":  2,
+                             "ms_avg":  0.033,
+                             "ms_p50":  0.03,
+                             "ms_p95":  0.03
+                         },
+                         {
+                             "name":  "page_json_ids_only",
+                             "n":  2,
+                             "ms_avg":  0.005,
+                             "ms_p50":  0.004,
+                             "ms_p95":  0.004
+                         }
+                     ],
+    "queries_cold":  null,
+    "cold_restart":  false,
+    "engine_bulk_import":  false
+}

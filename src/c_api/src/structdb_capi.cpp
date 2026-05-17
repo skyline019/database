@@ -5,6 +5,7 @@
 #include "structdb/facade/config.hpp"
 #include "structdb/facade/engine.hpp"
 #include "structdb/infra/long_task_progress.hpp"
+#include "structdb/storage/checkpoint_chain.hpp"
 #include "structdb/storage/storage_engine.hpp"
 
 #include <algorithm>
@@ -560,6 +561,124 @@ void structdb_engine_shutdown(structdb_engine* engine) {
   delete engine;
 }
 
+int structdb_recover_data_dir_to_checkpoint_seq(const char* data_dir_utf8, uint64_t checkpoint_seq, char* err,
+                                              size_t err_len) {
+  if (!utf8_nonempty(data_dir_utf8)) {
+    write_err_buf(err, err_len, "null or empty data_dir");
+    return STRUCTDB_CAPI_ERR_NULL_ARG;
+  }
+  if (checkpoint_seq == 0) {
+    write_err_buf(err, err_len, "recover: checkpoint_seq must be > 0");
+    return STRUCTDB_CAPI_ERR_NULL_ARG;
+  }
+  try {
+    std::string e;
+    if (!structdb::storage::recover_data_dir_to_checkpoint_seq(utf8_path_to_fs(data_dir_utf8), checkpoint_seq, &e)) {
+      write_err_buf(err, err_len, e.empty() ? "recover failed" : e.c_str());
+      return STRUCTDB_CAPI_ERR_STORAGE_IO;
+    }
+    return STRUCTDB_CAPI_OK;
+  } catch (const std::exception& ex) {
+    write_err_buf(err, err_len, ex.what());
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  } catch (...) {
+    write_err_buf(err, err_len, "unknown C++ exception");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+}
+
+int structdb_engine_recover_to_checkpoint_seq(structdb_engine* engine, uint64_t checkpoint_seq, char* err,
+                                              size_t err_len) {
+  if (!engine) {
+    write_err_buf(err, err_len, "null engine");
+    return STRUCTDB_CAPI_ERR_NULL_ARG;
+  }
+  if (engine->started) {
+    write_err_buf(err, err_len, "recover: call structdb_engine_shutdown() first");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+  if (checkpoint_seq == 0) {
+    write_err_buf(err, err_len, "recover: checkpoint_seq must be > 0");
+    return STRUCTDB_CAPI_ERR_NULL_ARG;
+  }
+  try {
+    std::string e;
+    if (!engine->engine.recover_to_checkpoint_seq(checkpoint_seq, &e)) {
+      write_err_buf(err, err_len, e.empty() ? "recover failed" : e.c_str());
+      return STRUCTDB_CAPI_ERR_STORAGE_IO;
+    }
+    return STRUCTDB_CAPI_OK;
+  } catch (const std::exception& ex) {
+    write_err_buf(err, err_len, ex.what());
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  } catch (...) {
+    write_err_buf(err, err_len, "unknown C++ exception");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+}
+
+int structdb_backup_bundle(const char* data_dir_utf8, const char* session_dir_utf8, const char* out_dir_utf8, char* err,
+                           size_t err_len) {
+  if (!utf8_nonempty(data_dir_utf8) || !utf8_nonempty(session_dir_utf8) || !utf8_nonempty(out_dir_utf8)) {
+    write_err_buf(err, err_len, "null or empty path");
+    return STRUCTDB_CAPI_ERR_NULL_ARG;
+  }
+  namespace fs = std::filesystem;
+  const fs::path data = utf8_path_to_fs(data_dir_utf8);
+  const fs::path sess = utf8_path_to_fs(session_dir_utf8);
+  const fs::path out_root = utf8_path_to_fs(out_dir_utf8);
+  if (!fs::exists(data)) {
+    write_err_buf(err, err_len, "backup: data_dir not found");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+  if (!fs::exists(sess)) {
+    write_err_buf(err, err_len, "backup: session_dir not found");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+  try {
+    std::error_code ec;
+    fs::create_directories(out_root, ec);
+    const fs::path out_data = out_root / "data_dir";
+    const fs::path out_sess = out_root / "session_dir";
+    auto copy_tree = [&](const fs::path& src, const fs::path& dst) -> bool {
+      if (!fs::exists(src)) return true;
+      fs::create_directories(dst, ec);
+      for (fs::recursive_directory_iterator it(src, fs::directory_options::skip_permission_denied);
+           it != fs::recursive_directory_iterator(); ++it) {
+        const auto rel = fs::relative(it->path(), src, ec);
+        if (ec) return false;
+        const fs::path target = dst / rel;
+        if (it->is_directory()) {
+          fs::create_directories(target, ec);
+        } else if (it->is_regular_file()) {
+          fs::create_directories(target.parent_path(), ec);
+          fs::copy_file(it->path(), target, fs::copy_options::overwrite_existing, ec);
+          if (ec) return false;
+        }
+      }
+      return true;
+    };
+    if (!copy_tree(data, out_data) || !copy_tree(sess, out_sess)) {
+      write_err_buf(err, err_len, "backup copy failed");
+      return STRUCTDB_CAPI_ERR_STORAGE_IO;
+    }
+    std::vector<structdb::storage::CheckpointChainEntry> chain_entries;
+    if (structdb::storage::checkpoint_chain_read_all(data, &chain_entries, nullptr) && !chain_entries.empty()) {
+      std::ofstream manifest(out_root / "backup_manifest.json", std::ios::trunc);
+      if (manifest) {
+        manifest << "{\"last_checkpoint_seq\":" << chain_entries.back().checkpoint_seq << "}\n";
+      }
+    }
+    return STRUCTDB_CAPI_OK;
+  } catch (const std::exception& ex) {
+    write_err_buf(err, err_len, ex.what());
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  } catch (...) {
+    write_err_buf(err, err_len, "unknown C++ exception");
+    return STRUCTDB_CAPI_ERR_STORAGE_IO;
+  }
+}
+
 structdb_embed_client* structdb_embed_open(structdb_engine* engine, const char* session_dir, char* err,
                                            size_t err_len) {
   if (!engine) {
@@ -689,6 +808,13 @@ void structdb_mdb_session_destroy(structdb_mdb_session* session) { delete sessio
 void structdb_mdb_session_reset(structdb_mdb_session* session) {
   if (!session) return;
   structdb::client::mdb::mdb_repl_reset(session->impl);
+}
+
+int structdb_mdb_session_set_durability(structdb_mdb_session* session, int level) {
+  if (!session) return STRUCTDB_CAPI_ERR_NULL_ARG;
+  if (level < 0 || level > 2) return STRUCTDB_CAPI_ERR_NULL_ARG;
+  session->impl.set_session_durability_level(level);
+  return STRUCTDB_CAPI_OK;
 }
 
 int structdb_mdb_execute_line(structdb_engine* engine, structdb_embed_client* client, structdb_mdb_session* session,

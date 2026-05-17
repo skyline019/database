@@ -1,0 +1,48 @@
+# Optional nightly / manual persist + bench gate (does not block PR CI).
+name: StructDB Perf (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_mega:
+        description: "Also run mega_data_mdb_stress (100k rows, default + ImportMode)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  windows-perf:
+    name: Windows perf baseline
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DSTRUCTDB_BUILD_TESTS=ON
+          -DSTRUCTDB_BUILD_BENCHMARKS=ON
+          -DSTRUCTDB_BUILD_CAPI_SHARED=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel --target structdb_bench structdb_tests structdb_app
+
+      - name: Phase39/40 persist tests
+        run: .\build\tests\Release\structdb_tests.exe --gtest_filter=Mdb.Phase39*:Mdb.Phase40*:StorageEngine.WalReplayImportRaw*:StorageEngine.CommitEmbedBatchAutoSplit*
+
+      - name: Persist baseline
+        shell: pwsh
+        run: |
+          if ('${{ inputs.run_mega }}' -eq 'true') {
+            ./scripts/run_persist_baseline.ps1 -BuildDir build -RunMega
+          } else {
+            ./scripts/run_persist_baseline.ps1 -BuildDir build
+          }
+
+      - name: Compare to checked-in bench baseline
+        shell: pwsh
+        run: |
+          $run = Get-ChildItem benchmarks/baselines/structdb_bench_run_*.json | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          python benchmarks/scripts/compare_bench.py --baseline benchmarks/baselines/structdb_bench_baseline.json --current $run.FullName --max-ratio 1.5

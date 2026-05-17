@@ -1,0 +1,102 @@
+{
+    "timestamp":  "2026-05-16T12:23:51.6825714Z",
+    "table":  "mega",
+    "load_rows":  1000000,
+    "row_count_hint":  1000000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  3,
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qbench_20260516_122309_791\\_data",
+    "load_wall_ms":  3194,
+    "load_tps_est":  313087,
+    "query_wall_ms":  18759,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  3,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  3,
+                             "ms_avg":  124.214,
+                             "ms_p50":  123.787,
+                             "ms_p95":  123.787
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  3,
+                             "ms_avg":  123.603,
+                             "ms_p50":  122.445,
+                             "ms_p95":  122.445
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  3,
+                             "ms_avg":  115.496,
+                             "ms_p50":  117.925,
+                             "ms_p95":  117.925
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  3,
+                             "ms_avg":  1275.157,
+                             "ms_p50":  1248.37,
+                             "ms_p95":  1248.37
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  3,
+                             "ms_avg":  2427.027,
+                             "ms_p50":  2447.14,
+                             "ms_p95":  2447.14
+                         }
+                     ],
+    "queries_cold":  [
+                         {
+                             "name":  "count",
+                             "n":  3,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  3,
+                             "ms_avg":  124.19,
+                             "ms_p50":  123.608,
+                             "ms_p95":  123.608
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  3,
+                             "ms_avg":  123.834,
+                             "ms_p50":  123.404,
+                             "ms_p95":  123.404
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  3,
+                             "ms_avg":  111.867,
+                             "ms_p50":  109.982,
+                             "ms_p95":  109.982
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  3,
+                             "ms_avg":  1221.103,
+                             "ms_p50":  1208.68,
+                             "ms_p95":  1208.68
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  3,
+                             "ms_avg":  2463.04,
+                             "ms_p50":  2522.95,
+                             "ms_p95":  2522.95
+                         }
+                     ],
+    "cold_restart":  true
+}

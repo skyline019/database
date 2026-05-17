@@ -13,6 +13,32 @@
 6. **[phases/WAL_REPLAY.md](phases/WAL_REPLAY.md)** — `STDBBW1` 与文本行、`rollback` 混排、checkpoint `wal_offset`。  
 7. **[phases/TESTING_TXN_CHAIN.md](phases/TESTING_TXN_CHAIN.md)** — 读路径审计与 GTest filter（含 `txn_phase23` 等）。
 
+## MDB 事务与存储回滚（三档配置）
+
+`SHOW TXN` / `SHOW SNAPSHOT` 输出 **`storage_rollback_policy=`**（当前门闩，非运行时切换）。部署时在 **`EngineConfigSnapshot`** 启动前选定一档：
+
+| 档位 | `mdb_persist_in_begin` | `mdb_chain_rollback_on_mdb_rollback` | `storage_rollback_policy` | 行为摘要 |
+|------|------------------------|--------------------------------------|---------------------------|----------|
+| **A（默认）** | `true` | `false` | `session_only` | `BEGIN` 内可落盘；**`ROLLBACK` 仅恢复会话表**，不链式弹 `undo_stack_` |
+| **B（链式 undo）** | `true` | `true` | `chain_undo` | MDB **`ROLLBACK` 将 `undo_stack_` 弹回 `BEGIN` 水位**（受限模型，见 [`PHASE23.md`](phases/PHASE23.md)） |
+| **C（事务内不落盘）** | `false` | （任意） | `no_persist_in_txn` | 事务内不写 `mdb$`；`ROLLBACK` 仅会话 |
+
+耐久类比见 **[`phases/TXN_INNODB_MAP.md`](phases/TXN_INNODB_MAP.md) §2**（非 InnoDB 等价）。组合矩阵回归：**[`phases/PHASE31.md`](phases/PHASE31.md)**、`Mdb.IntegrateTxnRecoverRollbackRestartChain`。
+
+## OLTP 写路径（非 bulk）
+
+- 默认 **`mdb_incremental_persist=true`**（小批量脏行增量落盘）。
+- **勿** 对单行 OLTP 开启 `mdb_bulk_import_mode` / 脚本 bulk 摊销；压测见 **`scripts/bench/oltp_persist_micro.ps1`** → [`benchmarks/baselines/oltp_persist_baseline.json`](../benchmarks/baselines/oltp_persist_baseline.json)。
+- REPL 下 **`mdb_script_amortize_bulk_dml`** 仅影响脚本 **`BULKINSERT*`** EOF 落盘，**不**改变单行 `INSERT`/`UPDATE` 的立即 persist（默认）。
+
+配置预设表：**[`ENGINE_RUNTIME_CONFIG.md`](ENGINE_RUNTIME_CONFIG.md) §4.5**（事务 profile）、§6（LSM/压测）。
+
+## PITR 与 checkpoint 链（Wave 3）
+
+- 每次 `flush_memtable` 成功可在 `data_dir/checkpoint.chain` 追加序号记录。
+- **`SHOW CHECKPOINTS`** / **`RECOVER TO CHECKPOINT_SEQ n`**：破坏性截断 WAL；须 **`Engine::shutdown()`** 后恢复并重启（见 [`phases/PHASE43.md`](phases/PHASE43.md)）。
+- 脚本：**`scripts/recover_to_checkpoint.ps1`**；冷备仍见 **[`BACKUP_RESTORE_RUNBOOK.md`](BACKUP_RESTORE_RUNBOOK.md)**。
+
 ## 路线图索引
 
 - 计划草案：**[phases/PHASE13_PLUS_PLAN.md](phases/PHASE13_PLUS_PLAN.md)**  

@@ -13,7 +13,7 @@
 \fpath{src/client/mdb/src/mdb_command_parser.cpp} & 词法入口（\texttt{mdb\_parse\_command\_line}）；与 argv/配置字段分列说明见第 \ref{sec:parsing-entry} 节。 \\
 \fpath{src/client/mdb/src/mdb_dispatch.cpp} & 命令路由与 Phase1/Phase2 判定（与 REPL/脚本共享）。 \\
 \fpath{src/client/mdb/src/mdb_runner.cpp} & 会话状态机、与 \texttt{EmbedClient}/\texttt{Engine} 交互 orchestration。 \\
-\fpath{src/client/mdb/src/mdb_persistence.cpp} & \texttt{persist\_table}、存储读写、\texttt{mdb\_storage\_read\_seq} 等。 \\
+\fpath{src/client/mdb/src/mdb_persistence.cpp} & \texttt{persist\_table}、\texttt{persist\_table\_chunked}、\texttt{build/submit\_persist\_command\_batch}、plain/raw 导入提示；\texttt{mdb\_storage\_read\_seq}。 \\
 \fpath{src/client/mdb/src/mdb_query_paging.cpp} & \texttt{PAGE}、排序与分页参数。 \\
 \fpath{src/client/mdb/src/mdb_ops_txn_log.cpp} & 事务、\texttt{SAVEPOINT}、\texttt{ROLLBACK TO}、\texttt{TXNISOLATION}。 \\
 \fpath{src/client/mdb/src/mdb_ops_predicate.cpp} & \texttt{WHERE}/\texttt{WHEREP} 等谓词路径。 \\
@@ -32,7 +32,7 @@
 \begin{itemize}
   \item 子目录常量（见头文件 \texttt{kEmbedSessionArtifactsDir}）：会话产物置于 \texttt{session\_dir} 下该子目录。
   \item \texttt{CommandBatch}：\texttt{client\_session\_id}、单调 \texttt{term}、\texttt{idempotency\_token}、\texttt{puts}/\texttt{dels} 列表。
-  \item \texttt{submit(batch, fsync\_journal, error\_out)}：写引擎 + 追加 journal；\texttt{fsync\_journal==true} 时在批次末尾 \texttt{wal\_sync()}（耐久 Level 1 类比，见头文件注释与 \fpath{Docs/phases/TXN_INNODB_MAP.md}）。
+  \item \texttt{submit(batch, fsync\_journal, error\_out)} / \texttt{submit\_ex(..., write\_journal)}：写引擎 + 可选 journal；大导入 plain 批次可 \texttt{write\_journal=false}（WAL 权威）。\texttt{fsync\_journal==true} 时在批次末尾 \texttt{wal\_sync()}（耐久 Level 1 类比，见 \fpath{Docs/phases/TXN_INNODB_MAP.md}）。
   \item 幂等：非空 \texttt{idempotency\_token} 重放会被忽略（\texttt{idem\_completed\_} 集合）。
   \item \texttt{read\_snapshot\_seq()}：钉住 \texttt{mdb\$} 读视图；在 \texttt{open}/\texttt{recover}/成功 \texttt{submit} 后更新。
 \end{itemize}

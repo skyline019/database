@@ -1,0 +1,67 @@
+{
+    "timestamp":  "2026-05-16T12:31:08.2382534Z",
+    "table":  "mega",
+    "load_rows":  1000000,
+    "row_count_hint":  1000000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  3,
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qbench_20260516_123055_114\\_data",
+    "load_wall_ms":  5064,
+    "load_tps_est":  197472.4,
+    "query_wall_ms":  6423,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  3,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "explain_where_hit",
+                             "n":  3,
+                             "ms_avg":  0.005,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.003
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  3,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.003
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  3,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  3,
+                             "ms_avg":  169.813,
+                             "ms_p50":  171.325,
+                             "ms_p95":  171.325
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  3,
+                             "ms_avg":  170.228,
+                             "ms_p50":  170.257,
+                             "ms_p95":  170.257
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  3,
+                             "ms_avg":  167.3,
+                             "ms_p50":  168.19,
+                             "ms_p95":  168.19
+                         }
+                     ],
+    "queries_cold":  null,
+    "cold_restart":  false,
+    "varied_schema":  false
+}

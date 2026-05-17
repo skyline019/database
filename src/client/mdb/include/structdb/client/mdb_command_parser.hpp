@@ -67,10 +67,33 @@ enum class MdbVerb : int {
   Scan,
   ImportDir,
   BulkInsertFast,
+  FlushPersist,
+  ImportMode,
+  RebuildIndex,
   ReleaseSavepoint,
   Exit,
   ShowPlan,
   ExplainWhere,
+  /// Session durability 0/1/2 (maps to `fsync_each_batch` / `fsync_each_session_txn_op`; PHASE41).
+  SetDurability,
+  /// `ALTER TABLE t ADD COLUMN (name:type[,default])` — subset only.
+  AlterTableAddColumn,
+  /// `ALTER TABLE t RENAME COLUMN (old,new)`.
+  AlterTableRenameColumn,
+  /// `CREATE INDEX idx ON table(col)` / `CREATE UNIQUE INDEX …`.
+  CreateIndex,
+  /// `DROP INDEX idx ON table`.
+  DropIndex,
+  /// `GROUP BY (col) COUNT` or `GROUP BY (col) SUM(col)` (PHASE42).
+  GroupBy,
+  /// `SCAN INDEX(idx_name)` — rows in named-index key order (PHASE42).
+  ScanIndex,
+  /// `SHOW CHECKPOINTS` — list `checkpoint.chain` (PHASE43).
+  ShowCheckpoints,
+  /// `RECOVER TO CHECKPOINT_SEQ n` — destructive; engine must restart after (PHASE43).
+  RecoverToCheckpointSeq,
+  /// `IMPORT SEGMENT (token)` — segment idempotency prefix for next bulk persist (PHASE44).
+  ImportSegment,
   /// newdb-only / heap-only verbs: dispatch prints `[NOT_SUPPORTED]` with `tail` as the matched prefix.
   NotPortable,
 };

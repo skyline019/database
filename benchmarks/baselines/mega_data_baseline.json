@@ -1,0 +1,8 @@
+{
+  "timestamp": "2026-05-16T10:39:27.4140000Z",
+  "benchmark_profile": "mega_data_mdb_bulk_v1",
+  "runtime_pressure_tps_est": 238000.0,
+  "total_rows": 1000000,
+  "rows_per_bulk_line": 1000,
+  "note": "Reference floor from COMPETITIVE_MATRIX §7.1 (~238K default script); weekly_bench uses 90% of this file or latest archived summary."
+}

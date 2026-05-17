@@ -157,3 +157,34 @@ static void BM_StdbStoragePressureSnapshot(benchmark::State& state) {
   std::filesystem::remove_all(dir);
 }
 BENCHMARK(BM_StdbStoragePressureSnapshot);
+
+static void BM_StdbStorageEmbedBatchManyKeys(benchmark::State& state) {
+  const int n = static_cast<int>(state.range(0));
+  const auto dir = std::filesystem::temp_directory_path() / "structdb_bm_embed_batch";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  structdb::storage::StorageEngine eng(dir / "data");
+  std::string err;
+  if (!eng.open(&err)) {
+    state.SkipWithError(err.c_str());
+    return;
+  }
+  eng.set_import_batch_skip_undo(true);
+  eng.set_import_store_raw_logical(true);
+  eng.set_memtable_bulk_put_enabled(true);
+  std::vector<std::pair<std::string, std::string>> puts;
+  puts.reserve(static_cast<std::size_t>(n));
+  for (int i = 0; i < n; ++i) {
+    puts.emplace_back("mdb$v2$row$bm$" + std::to_string(i), std::string(32, 'v'));
+  }
+  const std::vector<std::string> dels;
+  for (auto _ : state) {
+    if (!eng.commit_embed_batch(dels, puts, false, &err)) {
+      state.SkipWithError(err.c_str());
+      break;
+    }
+  }
+  eng.close();
+  std::filesystem::remove_all(dir);
+}
+BENCHMARK(BM_StdbStorageEmbedBatchManyKeys)->Arg(32768);

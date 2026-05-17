@@ -344,6 +344,7 @@ bool apply_reorder_pairs_in_memory(LogicalTable* t, const std::vector<std::pair<
     t->rows.emplace(new_id, std::move(cells));
   }
 
+  logical_row_index_rebuild_from_rows(t);
   logical_rebuild_str_index(t);
   return true;
 }

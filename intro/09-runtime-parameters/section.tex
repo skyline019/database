@@ -22,6 +22,7 @@
   \item[节流与令牌桶] \texttt{compaction\_merge\_*}、\texttt{wal\_append\_*}、\texttt{compaction\_io\_*}、\texttt{compaction\_parallel\_sst\_reads} 等。
   \item[压力到调度器] \texttt{storage\_pressure\_*}、\texttt{wal\_scheduler\_*}（与 \texttt{WalMutationBudget}、\texttt{sync\_scheduler\_budget\_from\_storage\_pressure} 配对）。
   \item[MDB 与 24A] \texttt{mdb\_persist\_in\_begin}、\texttt{mdb\_chain\_rollback\_on\_mdb\_rollback}、\texttt{observe\_embed\_bypass\_*}、\texttt{strict\_reject\_direct\_kv\_put\_*}、\texttt{mdb\_incremental\_persist}。
+  \item[MDB persist 性能（39/40）] \texttt{mdb\_script\_amortize\_bulk\_dml}、\texttt{mdb\_bulk\_import\_mode}、\texttt{mdb\_bulk\_persist\_plain\_rows}、\texttt{mdb\_persist\_chunk\_*}、\texttt{storage\_import\_*}、\texttt{storage\_embed\_batch\_max\_frame\_bytes}、\texttt{memtable\_bulk\_put\_enabled}（专文 \fpath{Docs/phases/PHASE39\_PERSIST\_PERF.md}、\fpath{PHASE40\_PERSIST\_PERF.md}）。
   \item[门面写队列] \texttt{kv\_put\_async\_queue\_depth}（第 \ref{sec:impl-walkthrough} 节）。
 \end{description}
 
@@ -79,9 +80,20 @@
 \texttt{exclusive\_data\_dir\_lock} & \texttt{bool} & \texttt{false} & \texttt{data\_dir/.structdb\_exclusive.lock} 建议锁（35）。 \\
 \texttt{kv\_put\_async\_queue\_depth} & \texttt{uint32} & \texttt{0} & Facade \texttt{kv\_put} 异步队列深度；\texttt{0}=同步（36）。 \\
 \texttt{mdb\_incremental\_persist} & \texttt{bool} & \texttt{true} & 仅脏行 + 行索引增量持久化（v2 表）。 \\
+\texttt{mdb\_script\_amortize\_bulk\_dml} & \texttt{bool} & \texttt{true} & 脚本内 bulk DML 推迟到 EOF/\texttt{FLUSH PERSIST}（Phase40）。 \\
+\texttt{mdb\_bulk\_persist\_plain\_rows} & \texttt{bool} & \texttt{true} & bulk 行 tab 分隔 plain，免 \texttt{mdbhex1:}（Phase40）。 \\
+\texttt{mdb\_persist\_chunk\_max\_puts} & \texttt{uint32} & \texttt{32768} & 分块 persist 每帧行 put 上限。 \\
+\texttt{mdb\_persist\_chunk\_max\_frame\_bytes} & \texttt{uint64} & \texttt{8MiB} & 分块 persist 帧字节上限；\texttt{0}=仅按行数。 \\
+\texttt{storage\_import\_store\_raw\_logical} & \texttt{bool} & \texttt{false} & 导入批 raw 逻辑值（bulk 模式自动开）。 \\
+\texttt{storage\_embed\_batch\_max\_frame\_bytes} & \texttt{uint64} & \texttt{0} & \texttt{commit\_embed\_batch} 存储层分帧；\texttt{0}=关。 \\
+\texttt{memtable\_bulk\_put\_enabled} & \texttt{bool} & \texttt{false} & 大批 MemTable 排序批量 put（opt-in）。 \\
 \bottomrule
 \end{longtable}
 }
+
+\subsection{MDB 导入压测与推荐组合（四十期）}
+
+本机 \textbf{1M 行}、\texttt{RowsPerLine=1000}（\fpath{scripts/bench/mega\_data\_mdb\_stress.ps1}）参考：默认脚本约 \textbf{238K TPS}；\texttt{--mdb-bulk-import} 约 \textbf{328K TPS}（相对三十九期基线 $\sim$7.5K 约 32--44$\times$）。推荐组合：\texttt{mdb\_script\_amortize\_bulk\_dml} + \texttt{mdb\_bulk\_import\_mode} + \texttt{mdb\_bulk\_persist\_plain\_rows} + 适度增大 \texttt{mdb\_persist\_chunk\_max\_puts}；可选 \texttt{memtable\_bulk\_put\_enabled}、\texttt{storage\_embed\_batch\_max\_frame\_bytes}。向 100$\times$ 的后续项见 \fpath{Docs/OPTIMIZATION\_PLAN.md} §0.4。
 
 \noindent\textbf{用法提示：}生产调参应同时阅读 \fpath{Docs/ENGINE_RUNTIME_CONFIG.md}、\fpath{Docs/POLICY.md} \S3--\S4 与相关 \fpath{Docs/phases/PHASE*.md}，避免仅按默认值推断耐久语义。
 

@@ -1,0 +1,18 @@
+# Wave 4 (I-PORT) placeholder: Linux compile smoke — manual / optional until IO backend matrix is ready.
+name: structdb-linux-smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ubuntu-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (no IOCP)
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRUCTDB_BUILD_TESTS=ON
+      - name: Build tests
+        run: cmake --build build --config Release --target structdb_tests -j2
+      - name: Note
+        run: echo "Linux smoke is optional; see Docs/phases/PHASE46_NAMESPACE.md and OS_IO_ISOLATION.md"

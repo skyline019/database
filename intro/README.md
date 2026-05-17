@@ -6,7 +6,8 @@
 - **存储**：\texttt{StorageEngine}、版本化 KV、WAL、MemTable、LSM/compaction、checkpoint/undo 协同（按头文件逐项梳理）
 - **MDB / Embed / C API / GUI**：\texttt{mdb\_ops\_*} 源文件表、\texttt{EmbedClient}、C API 与 Tauri 入口路径
 - **参数**：\texttt{EngineConfigSnapshot} 全字段表（默认值 + 语义）
-- **测试**：正确性、失败路径、复杂/嵌套场景与 \texttt{gtest\_filter} 示例
+- **测试**：正确性、失败路径、复杂/嵌套场景与 \texttt{gtest\_filter} 示例（含 **PHASE40** \texttt{Mdb.Phase40*} 与 \texttt{Mdb.*} 127 项回归）
+- **MDB 导入性能**：三十九/四十期 persist 摊销、分块 WAL、plain/raw 快路径（见 \fpath{Docs/phases/PHASE40\_PERSIST\_PERF.md}）
 
 ## 重要区分
 

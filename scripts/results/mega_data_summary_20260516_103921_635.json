@@ -1,0 +1,17 @@
+{
+    "timestamp":  "2026-05-16T10:39:26.9636010Z",
+    "benchmark_profile":  "mega_data_mdb_bulk_v1",
+    "import_mode":  false,
+    "engine_bulk_import":  false,
+    "persist_coalesce":  false,
+    "embed_journal_skip":  false,
+    "memtable_bulk_put":  false,
+    "persist_chunk_max_puts":  0,
+    "storage_embed_batch_max_frame_bytes":  0,
+    "runtime_pressure_tps_est":  237981.913,
+    "runtime_pressure_batch_ms_p95":  4202,
+    "total_rows":  1000000,
+    "rows_per_bulk_line":  1000,
+    "wall_ms":  4202,
+    "build_dir":  "build"
+}

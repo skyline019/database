@@ -1,0 +1,95 @@
+{
+    "timestamp":  "2026-05-16T13:33:24.9316574Z",
+    "table":  "mega",
+    "load_rows":  1000000,
+    "row_count_hint":  1000000,
+    "bench_page_size":  100,
+    "bench_warmup":  1,
+    "bench_iters":  5,
+    "data_dir":  "C:\\Users\\74339\\AppData\\Local\\Temp\\structdb_qbench_20260516_133307_281\\_data",
+    "load_wall_ms":  5647,
+    "load_tps_est":  177085.2,
+    "query_wall_ms":  10380,
+    "queries_warm":  [
+                         {
+                             "name":  "count",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "explain_where_hit",
+                             "n":  5,
+                             "ms_avg":  0.005,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.004
+                         },
+                         {
+                             "name":  "where_hit",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.003,
+                             "ms_p95":  0.003
+                         },
+                         {
+                             "name":  "where_miss",
+                             "n":  5,
+                             "ms_avg":  0.003,
+                             "ms_p50":  0.002,
+                             "ms_p95":  0.002
+                         },
+                         {
+                             "name":  "page_json_first",
+                             "n":  5,
+                             "ms_avg":  180.502,
+                             "ms_p50":  174.006,
+                             "ms_p95":  195.782
+                         },
+                         {
+                             "name":  "page_json_mid",
+                             "n":  5,
+                             "ms_avg":  161.317,
+                             "ms_p50":  161.37,
+                             "ms_p95":  162.005
+                         },
+                         {
+                             "name":  "page_json_last",
+                             "n":  5,
+                             "ms_avg":  161.258,
+                             "ms_p50":  160.778,
+                             "ms_p95":  164
+                         },
+                         {
+                             "name":  "page_json_after_mid",
+                             "n":  5,
+                             "ms_avg":  78.84,
+                             "ms_p50":  79.078,
+                             "ms_p95":  79.199
+                         },
+                         {
+                             "name":  "page_json_cols_id",
+                             "n":  5,
+                             "ms_avg":  161.571,
+                             "ms_p50":  158.139,
+                             "ms_p95":  158.787
+                         },
+                         {
+                             "name":  "page_json_after_stream",
+                             "n":  5,
+                             "ms_avg":  79.972,
+                             "ms_p50":  80.148,
+                             "ms_p95":  80.161
+                         },
+                         {
+                             "name":  "page_json_ids_only",
+                             "n":  5,
+                             "ms_avg":  79.59,
+                             "ms_p50":  79.318,
+                             "ms_p95":  79.969
+                         }
+                     ],
+    "queries_cold":  null,
+    "cold_restart":  false,
+    "varied_schema":  false
+}

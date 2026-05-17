@@ -39,6 +39,8 @@
   \item \textbf{WAL 重放失败形态}：\texttt{StorageEngine.WalReplayRejectsMissingEquals*}、\texttt{WalReplayIgnoresUnframedTrailing*}（非法行、无长度前缀尾部）。
   \item \textbf{三层嵌套 embed 批次冷启}：\texttt{EmbedClient.TripleNestedBatch*}。
   \item \textbf{Phase36/37 对称并发}：延后 L0 drain + L1$\rightarrow$L2 双后台 + 主线程写（见 \fpath{Docs/phases/TESTING_TXN_CHAIN.md} \S14）。
+  \item \textbf{PHASE40 persist（四十期）}：\texttt{Mdb.Phase40*}（\textbf{24} 项）——分块元数据、10K 延迟索引、嵌套 bulk、多表 FLUSH、WAL 尾/损坏帧、增量 persist/coalesce/embed 分帧/checkpoint；更广 \texttt{Mdb.*} \textbf{127} 项全绿（2026-05-16）。
+  \item \textbf{存储 import raw + 分帧}：\texttt{StorageEngine.WalReplayImportRaw*}、\texttt{WalReplay*ChunkedMdb*}、\texttt{CommitEmbedBatchAutoSplit*}。
 \end{itemize}
 
 \subsection{存储与耐久切片（示例 filter）}
@@ -48,6 +50,9 @@
 \begin{lstlisting}[language=bash]
 structdb_tests --gtest_filter="Mdb.TxnChain*:Mdb.Repl*:Mdb.WhereUpdateWhereTxn:Mdb.EngineKvReadSeqVisibility:Mdb.TwoEmbedSessions*"
 structdb_tests --gtest_filter="StorageEngine.VersionedUndo*:StorageEngine.EmbedWalBatch*:StorageEngine.WalTrim*:StorageEngine.UndoTruncate*"
+structdb_tests --gtest_filter="Mdb.Phase40*"
+structdb_tests --gtest_filter="Mdb.*"
+structdb_tests --gtest_filter="StorageEngine.WalReplayImportRaw*:StorageEngine.WalReplay*Chunked*"
 \end{lstlisting}
 
 \subsection{编排层失败路径样例}

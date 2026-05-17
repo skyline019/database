@@ -34,6 +34,10 @@ class CheckpointWriter {
   /// Phase 5: write non-active slot + fsync, then `checkpoint.active` + fsync, then legacy `checkpoint` line
   /// (dual-write). Increments `checkpoint_seq` relative to `read_latest` before persist.
   bool write_rotating(const std::filesystem::path& dir, const CheckpointState& st, std::string* error_out = nullptr);
+
+  /// Phase 43: write both slots with **exact** `st.checkpoint_seq` (no increment). Appends `checkpoint.chain`.
+  bool write_recovery_checkpoint(const std::filesystem::path& dir, const CheckpointState& st,
+                                 std::uint64_t written_unix_ns, std::string* error_out = nullptr);
 };
 
 }  // namespace structdb::storage

@@ -35,6 +35,15 @@ struct MdbDispatchEnv {
   std::optional<std::size_t>& txn_undo_stack_depth_at_begin;
   /// `SCAN MORE` / paging cursor state (script or REPL session).
   MdbQueryPagingState& paging;
+  bool persist_coalesce{false};
+  bool bulk_import_mode{false};
+  std::optional<bool>* bulk_import_session_override{nullptr};
+  /// Script runner: defer bulk DML persist until flush/EOF (REPL keeps per-line persist).
+  bool script_amortize_bulk_dml{false};
+  /// REPL `SET DURABILITY` level (optional).
+  std::optional<int>* session_durability_level{nullptr};
+  /// `IMPORT SEGMENT (token)` idempotency suffix (PHASE44).
+  std::optional<std::string>* import_segment_token{nullptr};
 };
 
 MdbRunResult mdb_dispatch_execute_line(MdbDispatchEnv& env);

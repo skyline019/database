@@ -44,6 +44,9 @@ class Engine {
   bool startup(std::string* error_out = nullptr);
   void shutdown();
 
+  /// Phase 43: destructive PITR to `checkpoint_seq` in `checkpoint.chain` (storage must be shut down first).
+  bool recover_to_checkpoint_seq(std::uint64_t checkpoint_seq, std::string* error_out = nullptr);
+
   orchestrator::Orchestrator* orchestrator() { return orch_.get(); }
   storage::StorageEngine* storage() { return storage_.get(); }
 

@@ -1,15 +1,18 @@
-﻿#include "structdb/client/mdb_runner.hpp"
+#include "structdb/client/mdb_runner.hpp"
 
 #include "structdb/client/detail/mdb_dispatch_env.hpp"
+#include "structdb/client/detail/mdb_ops_agg_cache.hpp"
 #include "structdb/client/detail/mdb_runner_internal.hpp"
 #include "structdb/client/embed_client.hpp"
 #include "structdb/client/mdb_command_parser.hpp"
+#include "structdb/client/mdb_persistence.hpp"
 #include "structdb/facade/engine.hpp"
 #include "structdb/infra/long_task_progress.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <istream>
 #include <map>
 #include <memory>
@@ -73,6 +76,8 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
   std::map<std::string, LogicalTable> savepoints;
   std::string script_str = opt.script_path.string();
   MdbQueryPagingState script_paging;
+  std::optional<bool> bulk_import_override;
+  std::optional<std::string> import_segment_token;
 
   infra::LongTaskReporter* const lt = opt.long_task;
   std::size_t executable_total = 0;
@@ -108,6 +113,10 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
     std::vector<std::string>* log_sink = opt.log_sink;
     const bool fsync_batch = opt.fsync_each_batch;
     auto flush_line_log = [&]() {
+      if (opt.stream_log_lines) {
+        for (const auto& s : line_log) std::cout << s << '\n';
+        if (!line_log.empty()) std::cout.flush();
+      }
       if (log_sink) {
         for (auto& s : line_log) log_sink->push_back(std::move(s));
       }
@@ -130,12 +139,31 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
         mdb_storage_read_seq_for_script(engine, client, txn_active, txn_read_committed, txn_snap_seq);
 
     const bool eng_mdb_persist_in_begin = engine.config().snapshot().mdb_persist_in_begin;
+    const bool coalesce = mdb_session_persist_coalesce_active(engine, opt);
+    const bool bulk_import = mdb_session_bulk_import_active(engine, bulk_import_override, opt);
+    const bool script_amortize_bulk = mdb_script_amortize_bulk_dml_active(engine, opt);
     auto persist_now = [&]() -> bool {
+      const std::string pidem = mdb_resolve_persist_idem(idem, current, &import_segment_token);
+      if (coalesce || bulk_import) {
+        if (current.mdb_persist_schema_dirty || current.schema.empty()) {
+          MdbEnginePorts ports = MdbEnginePorts::from(engine, client);
+          mdb_ports_set_bulk_import_persist(&ports, bulk_import);
+          return persist_table(ports, current, pidem, fsync_batch, &err);
+        }
+        const auto snap = engine.config().snapshot();
+        if (coalesce && snap.mdb_persist_coalesce_max_dirty_rows > 0 &&
+            current.mdb_persist_dirty_rows.size() >= snap.mdb_persist_coalesce_max_dirty_rows) {
+          MdbEnginePorts ports = MdbEnginePorts::from(engine, client);
+          mdb_ports_set_bulk_import_persist(&ports, bulk_import);
+          return mdb_flush_coalesced_persist(ports, current, pidem, fsync_batch, &err);
+        }
+        return true;
+      }
       if (txn_active) {
         if (!eng_mdb_persist_in_begin || !opt.allow_persist_while_txn_active_experimental) return true;
-        return persist_table(MdbEnginePorts::from(engine, client), current, idem, fsync_batch, &err);
+        return persist_table(MdbEnginePorts::from(engine, client), current, pidem, fsync_batch, &err);
       }
-      return persist_table(MdbEnginePorts::from(engine, client), current, idem, fsync_batch, &err);
+      return persist_table(MdbEnginePorts::from(engine, client), current, pidem, fsync_batch, &err);
     };
 
     const bool fsync_session_txn_op = opt.fsync_each_session_txn_op;
@@ -165,7 +193,13 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
                        txn_snap_seq,
                        savepoints,
                        txn_undo_stack_depth_at_begin,
-                       script_paging};
+                       script_paging,
+                       coalesce,
+                       bulk_import,
+                       &bulk_import_override,
+                       script_amortize_bulk && !txn_active,
+                       nullptr,
+                       &import_segment_token};
     res = mdb_dispatch_execute_line(env);
     if (!res.ok) {
       if (lt) lt->report(infra::LongTaskStatus::Failed, executable_done, executable_total);
@@ -177,6 +211,11 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
     }
     ++executable_done;
     if (lt) lt->report(infra::LongTaskStatus::Running, executable_done, executable_total);
+    if (opt.stream_log_lines && executable_total > 0 &&
+        (executable_done == 1 || executable_done == executable_total || executable_done % 20 == 0)) {
+      std::cout << "[MDB_PROGRESS] " << executable_done << "/" << executable_total << "\n";
+      std::cout.flush();
+    }
   }
 
   if (txn_active) {
@@ -190,6 +229,38 @@ MdbRunResult run_mdb_script(facade::Engine& engine, EmbedClient& client, const M
     current = clone_table(txn_base);
     logical_rebuild_str_index(&current);
     txn_active = false;
+  }
+
+  {
+    const bool bulk_active = mdb_session_bulk_import_active(engine, bulk_import_override, opt);
+    const bool need_eof_flush = bulk_active || mdb_session_persist_coalesce_active(engine, opt) ||
+                                !current.mdb_persist_dirty_rows.empty() || current.mdb_persist_schema_dirty;
+    if (need_eof_flush) {
+      std::string flush_err;
+      const std::string flush_idem =
+          mdb_resolve_persist_idem("mdb:" + script_str + ":eof_flush", current, &import_segment_token);
+      MdbEnginePorts flush_ports = MdbEnginePorts::from(engine, client);
+      mdb_ports_set_bulk_import_persist(&flush_ports,
+                                        bulk_import_override.value_or(false) || bulk_active);
+      if (!mdb_flush_coalesced_persist(flush_ports, current, flush_idem, opt.fsync_each_batch, &flush_err)) {
+        res.ok = false;
+        res.last_error = flush_err;
+        if (lt) lt->report(infra::LongTaskStatus::Failed, executable_done, executable_total);
+        return res;
+      }
+      if (bulk_active && !current.name.empty()) {
+        if (!rebuild_secondary_index_storage(MdbEnginePorts::from(engine, client), current,
+                                             flush_idem + ":rebuild", opt.fsync_each_batch, &flush_err)) {
+          res.ok = false;
+          res.last_error = flush_err;
+          if (lt) lt->report(infra::LongTaskStatus::Failed, executable_done, executable_total);
+          return res;
+        }
+      }
+      if (current.rows.size() >= 4096) {
+        logical_table_refresh_analytics_caches(&current);
+      }
+    }
   }
 
   txn_log_remove_if_exists(client);
@@ -232,7 +303,10 @@ MdbRunResult mdb_repl_execute_line(facade::Engine& engine, EmbedClient& client, 
   res.last_line_no = ++st->repl_line_no;
 
   std::vector<std::string> line_log;
-  const bool fsync_batch = fsync_each_batch;
+  const MdbDurabilityFsyncFlags dur =
+      mdb_effective_durability_fsync(st->session_durability_level, fsync_each_batch, fsync_session_txn_op);
+  const bool fsync_batch = dur.fsync_each_batch;
+  const bool fsync_txn_op = dur.fsync_each_session_txn_op;
   auto flush_line_log = [&]() {
     if (log_sink) {
       for (auto& s : line_log) log_sink->push_back(std::move(s));
@@ -280,18 +354,38 @@ MdbRunResult mdb_repl_execute_line(facade::Engine& engine, EmbedClient& client, 
   const bool allow_txn_persist = eng_mdb_persist_in_begin &&
                                  (allow_persist_while_txn_active_experimental ||
                                   st->allow_persist_while_txn_active_experimental);
+  MdbRunOptions repl_coalesce_probe{};
+  repl_coalesce_probe.persist_coalesce = false;
+  const bool coalesce = mdb_session_persist_coalesce_active(engine, repl_coalesce_probe);
+  const bool bulk_import = mdb_session_bulk_import_active(engine, st->bulk_import_mode_override, repl_coalesce_probe);
 
   auto persist_now = [&]() -> bool {
+    const std::string pidem = mdb_resolve_persist_idem(idem, current, &st->import_segment_token);
+    if (coalesce || bulk_import) {
+      if (current.mdb_persist_schema_dirty || current.schema.empty()) {
+        MdbEnginePorts ports = MdbEnginePorts::from(engine, client);
+        mdb_ports_set_bulk_import_persist(&ports, bulk_import);
+        return persist_table(ports, current, pidem, fsync_batch, &err);
+      }
+      const auto snap = engine.config().snapshot();
+      if (coalesce && snap.mdb_persist_coalesce_max_dirty_rows > 0 &&
+          current.mdb_persist_dirty_rows.size() >= snap.mdb_persist_coalesce_max_dirty_rows) {
+        MdbEnginePorts ports = MdbEnginePorts::from(engine, client);
+        mdb_ports_set_bulk_import_persist(&ports, bulk_import);
+        return mdb_flush_coalesced_persist(ports, current, pidem, fsync_batch, &err);
+      }
+      return true;
+    }
     if (txn_active) {
       if (!allow_txn_persist) return true;
-      return persist_table(MdbEnginePorts::from(engine, client), current, idem, fsync_batch, &err);
+      return persist_table(MdbEnginePorts::from(engine, client), current, pidem, fsync_batch, &err);
     }
-    return persist_table(MdbEnginePorts::from(engine, client), current, idem, fsync_batch, &err);
+    return persist_table(MdbEnginePorts::from(engine, client), current, pidem, fsync_batch, &err);
   };
 
   auto txn_v2_append = [&](std::string_view kind, std::string_view payload) -> bool {
     if (!txn_active) return true;
-    return txn_log_append_v2_op(client, kind, payload, fsync_session_txn_op, &err);
+    return txn_log_append_v2_op(client, kind, payload, fsync_txn_op, &err);
   };
 
   MdbDispatchEnv env{pl,
@@ -315,7 +409,13 @@ MdbRunResult mdb_repl_execute_line(facade::Engine& engine, EmbedClient& client, 
                      txn_snap_seq,
                      savepoints,
                      txn_undo_stack_depth_at_begin,
-                     st->query_paging};
+                     st->query_paging,
+                     coalesce,
+                     bulk_import,
+                     &st->bulk_import_mode_override,
+                     false,
+                     &st->session_durability_level,
+                     &st->import_segment_token};
   res = mdb_dispatch_execute_line(env);
 
   if (err_out && !res.ok && !res.last_error.empty()) *err_out = res.last_error;
@@ -328,6 +428,10 @@ void MdbInteractiveSession::set_allow_persist_while_txn_active_experimental(bool
 
 bool MdbInteractiveSession::allow_persist_while_txn_active_experimental() const {
   return impl_ && impl_->allow_persist_while_txn_active_experimental;
+}
+
+void MdbInteractiveSession::set_session_durability_level(int level) {
+  if (impl_ && level >= 0 && level <= 2) impl_->session_durability_level = level;
 }
 
 }  // namespace structdb::client::mdb

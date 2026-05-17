@@ -56,6 +56,14 @@ struct MdbRunOptions {
   bool allow_persist_while_txn_active_experimental{true};
   /// Optional cooperative cancel + progress (`units` = executable script lines). Not owned.
   infra::LongTaskReporter* long_task{nullptr};
+  /// AND with `EngineConfigSnapshot::mdb_persist_coalesce` when true.
+  bool persist_coalesce{false};
+  /// AND with `EngineConfigSnapshot::mdb_bulk_import_mode` for this script run.
+  bool bulk_import_mode{false};
+  /// When true (default), `BULKINSERT`/`BULKINSERTFAST` in scripts defer persist until EOF / `FLUSH PERSIST`.
+  bool amortize_bulk_dml_in_script{true};
+  /// Echo each script log line to stdout as it is produced (for bench progress).
+  bool stream_log_lines{false};
 };
 
 struct MdbRunResult {
@@ -84,6 +92,8 @@ class MdbInteractiveSession {
 
   void set_allow_persist_while_txn_active_experimental(bool enable);
   bool allow_persist_while_txn_active_experimental() const;
+  /// REPL `SET DURABILITY n` (`n` in 0..2); unset until first call.
+  void set_session_durability_level(int level);
 
  private:
   friend MdbRunResult mdb_repl_execute_line(facade::Engine& engine, EmbedClient& client, MdbInteractiveSession& session,

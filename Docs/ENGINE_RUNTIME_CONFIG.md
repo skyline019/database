@@ -40,20 +40,106 @@
 | 能力 | 配置字段 | 默认 | 说明 |
 |------|----------|------|------|
 | MDB `BEGIN` 内 persist | `mdb_persist_in_begin`、`mdb_chain_rollback_on_mdb_rollback` | `true` / `false` | 见 `POLICY.md`、`TXN_BEGIN_PERSIST_DESIGN.md`。 |
+| MDB 增量 persist | `mdb_incremental_persist` | `true` | 小批量 dirty 仅写脏行 + row_index；见 [`PHASE39_PERSIST_PERF.md`](phases/PHASE39_PERSIST_PERF.md)。 |
+| MDB 线格式 | `mdb_wire_encoding`（`Hex` / `Wire2`） | `Hex` | `Wire2` 为 `mdbwire2:` 长度前缀；persist 批次在 Wire2 下跳过文本 journal（WAL 权威）。 |
+| MDB 合并落盘 | `mdb_persist_coalesce`、`mdb_persist_coalesce_max_dirty_rows` | `false` / `0` | 脚本 / `MdbRunOptions::persist_coalesce`；`FLUSH PERSIST` 或脚本结束刷盘；DDL（空 schema / schema_dirty）仍立即 persist。 |
+| MDB 批量导入 | `mdb_bulk_import_mode` | `false` | `IMPORT MODE ON` 或 `MdbRunOptions::bulk_import_mode`；跳过写入期 `kSecIdx`，结束 `REBUILD INDEX`。 |
+| Embed journal（导入） | `embed_journal_skip_until_commit` | `false` | 导入模式可延迟 session.journal；WAL 仍为恢复权威。 |
+| Embed journal 二进制 | `embed_journal_binary` | `false` | 预留；默认仍为 tab 分隔文本。 |
+| 存储批量 undo | `storage_batch_undo_lookup` | `true` | `commit_embed_batch` 单遍 undo 查找。 |
+| MDB 脚本 bulk 摊销 | `mdb_script_amortize_bulk_dml` | `true` | 脚本 `BULKINSERT*` 推迟 persist；REPL/事务内语义见 PHASE40。 |
+| MDB plain 行落盘 | `mdb_bulk_persist_plain_rows` | `true` | bulk 行免 `mdbhex1:`；大导入配合 `write_journal=false`。 |
+| MDB 分块 persist | `mdb_persist_chunk_max_puts`、`mdb_persist_chunk_max_frame_bytes` | `32768` / `8MiB` | 大表 EOF 多帧 WAL；元数据仅末帧；多表须分表 `FLUSH PERSIST`。 |
+| 导入 raw 落盘 | `storage_import_store_raw_logical` | `false` | `mdb_bulk_import_mode` 时 persist 自动开启。 |
+| 导入 skip undo | `storage_import_batch_skip_undo` | `true` | 与 raw/plain 导入批配合；非导入勿默认依赖。 |
+| Embed 批分帧 | `storage_embed_batch_max_frame_bytes` | `0` | 存储层巨型 `commit_embed_batch` 兜底拆分。 |
+| MemTable 批量 put | `memtable_bulk_put_enabled` | `false` | 导入批内排序 + `reserve_capacity`（opt-in）。 |
 | MDB 链 txn 观测 / 严格拒绝 | `observe_embed_bypass_*`、`strict_reject_direct_kv_put_*` | `false` | Phase 24A。 |
 | 每次写入 fsync | `fsync_every_write` | `false` | 更强耐久，性能代价高。 |
 | WAL trim / archive GC / undo truncate | `wal_auto_trim_*`、`wal_archive_gc_after_flush`、`undo_auto_truncate_after_flush` | 多为 `false` | 与 checkpoint 顺序相关。 |
 
 ---
 
-## 4. 回归入口
+## 4. 部署预设（Wave 1：OLTP / LSM / bulk）
+
+在 **`Engine::startup` 之前** 通过 `EngineConfigSnapshot` 合并下列组合（字段见 [`config.hpp`](../src/engine/facade/include/structdb/facade/config.hpp)）。
+
+### 4.1 OLTP（单行 DML / 交互 REPL）
+
+| 字段 | 建议值 |
+|------|--------|
+| `mdb_incremental_persist` | `true`（默认） |
+| `mdb_bulk_import_mode` | `false` |
+| `mdb_script_amortize_bulk_dml` | `false`（仅当 REPL 不用 bulk 脚本时可关；默认 `true` 不影响单行 DML） |
+| `mdb_bulk_persist_plain_rows` | 默认即可（bulk 专用） |
+| `l0_compact_defer_after_flush` | `false` 或 **桌面** 档 |
+
+基线：`scripts/bench/oltp_persist_micro.ps1`；门禁 P99 ≤ **1.2×** [`oltp_persist_baseline.json`](../benchmarks/baselines/oltp_persist_baseline.json)。
+
+### 4.2 LSM 尾延迟（三档）
+
+| 档位 | `l0_compact_defer_after_flush` | `l0_compact_max_inline_rounds_per_flush` | `enable_compaction_worker` | 说明 |
+|------|------------------------------|------------------------------------------|----------------------------|------|
+| **开发** | `true` | `0` 或 `1` | `false` | flush 后延后 drain，便于调试写路径 |
+| **压测** | `true` | 默认 | `true` | worker + `drain_pending_l0_compactions`；观察 `SHOW STORAGE` **`pending_deferred_l0`** |
+| **桌面** | `false` | `2`～默认 | 可选 `true` | 平衡 flush P99；见 [`COMPACTION.md`](COMPACTION.md) |
+
+`SHOW STORAGE` / JSON 中 **`pending_deferred_l0_compact`** 与 [`COMPACTION.md`](COMPACTION.md)、[`PHASE21.md`](phases/PHASE21.md) §21C 压力联动；**无** `last_merge_throttle_ns` 字段（节流见 `compaction_merge_*_bytes_per_second`）。
+
+### 4.3 Bulk 导入（四十期）
+
+| 字段 | 默认脚本 | `--mdb-bulk-import` |
+|------|----------|---------------------|
+| `mdb_script_amortize_bulk_dml` | `true` | `true` |
+| `mdb_bulk_import_mode` | 脚本 `IMPORT MODE` 或 CLI | `true` |
+| `mdb_bulk_persist_plain_rows` | `true` | `true` |
+| `mdb_persist_chunk_max_puts` / `mdb_persist_chunk_max_frame_bytes` | 32K / 8MiB | 同左 |
+| `storage_import_batch_skip_undo` | `true`（导入批） | `true` |
+
+门禁：`scripts/weekly_bench.ps1` 或 `mega_data_mdb_stress.ps1` 1M 行，TPS ≥ 矩阵 §7.1 **90%**（~214K 默认脚本）。可选 **`-SampleWorkingSet`** 将进程峰值 `WorkingSet64` 写入 summary JSON（`peak_working_set_bytes`，PHASE44 内存验收）。
+
+**命名索引（PHASE41）**：导入期仍跳过隐式 `kSecIdx`；`FLUSH PERSIST` 后 **`REBUILD INDEX`** 重建行索引、隐式 string 侧车与 **`CREATE INDEX` 命名 postings**。大表可在导入结束再 `CREATE INDEX`（全表扫描建 postings）。
+
+### 4.5 MDB 事务 profile（Wave 3，不改默认）
+
+与 [`ONBOARDING.md`](ONBOARDING.md) 三档一致，启动前在 `EngineConfigSnapshot` 选定：
+
+| Profile | `mdb_persist_in_begin` | `mdb_chain_rollback_on_mdb_rollback` | 场景 |
+|---------|------------------------|--------------------------------------|------|
+| `session_only`（默认） | `true` | `false` | 桌面 OLTP |
+| `chain_rollback` | `true` | `true` | 需要 MDB ROLLBACK 弹 undo |
+| `bulk_import` | `true` | `false` | + `mdb_bulk_import_mode` / `IMPORT MODE` |
+
+### 4.6 读放大基准（Wave 4 注记）
+
+`structdb_bench` 的 **`BM_StdbStorageVisitPrefix`** 与 [`benchmarks/baselines/structdb_bench_baseline.json`](../benchmarks/baselines/structdb_bench_baseline.json) 对比，用于 LSM 读放大趋势观察（非合入门禁）。Compaction 组合仍见 [`COMPACTION.md`](COMPACTION.md) 与 §4.1–4.3。
+
+### 4.7 PITR 链校验
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `checkpoint_chain_strict` | `false` | `true` 时 `Engine::startup` 在 chain 与 `read_latest` 不一致时失败 |
+
+### 4.8 `commit_embed_batch` 小批分帧（审计摘要）
+
+- **`storage_embed_batch_max_frame_bytes`** 默认 **`0`**（不拆分）；巨型批次才在存储层按帧上限拆分 WAL。
+- 典型 OLTP 单帧键数 **≪** `mdb_persist_chunk_max_puts`（32K）；小批主要成本在 **WAL fsync / `persist_table` / undo**，而非分帧。
+- 调大 `storage_embed_batch_max_frame_bytes` 仅用于 **超大 embed 批** 兜底，见 PHASE40 与 `StorageEngine.CommitEmbedBatchAutoSplitByFrameBytes` 测试。
+
+---
+
+## 5. 回归入口
 
 - `ctest -C Release --output-on-failure -R "structdb_tests|mdb_tests"`
+- MDB 全量：`structdb_tests --gtest_filter=Mdb.*`（**151** 项，含 **Phase40** 24、**Phase41** 9、**Phase42** 3、**Phase43** 1、**Phase44–45** 与 Wave0–1 smoke）
+- OLTP 基线：`scripts/bench/oltp_persist_micro.ps1`；bulk 周门禁：`scripts/weekly_bench.ps1`
+- PHASE40 切片：`--gtest_filter=Mdb.Phase40*`；存储 WAL：`StorageEngine.WalReplayImportRaw*:StorageEngine.WalReplay*Chunked*`
+- 导入压测：`scripts/bench/mega_data_mdb_stress.ps1`（`-ImportMode`、`-EngineBulkImport`、`-MemtableBulkPut` 等）
 - 调度与图：`structdb_tests` 中 `GraphExecutor.*`、`Orchestrator.*`、`Engine.*Phase19*` 等。
 
 ---
 
-## 5. 相关代码路径
+## 6. 相关代码路径
 
 - `Engine::sync_scheduler_budget_from_storage_pressure`、`Engine::storage_pressure_snapshot`：`engine.cpp`
 - `Orchestrator::set_before_graph_execute`：`orchestrator.{hpp,cpp}`

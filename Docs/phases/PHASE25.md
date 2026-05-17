@@ -12,14 +12,14 @@
 | **25D** | `EXIT` / `QUIT`（`MdbRunResult::repl_exit_requested` + `app/main` REPL）；`SHOWLOG`（`session.journal` 尾部）；`RELEASE SAVEPOINT name`。 |
 | **25E** | `SHOW TUNING` / `SHOW STATUS`、`SHOW TUNING JSON` / `SHOW STATUS JSON`（StructDB 自有 JSON 形态）；`SHOW STORAGE` / `SHOW STORAGE JSON`（`storage_pressure_snapshot`）。 |
 | **25F** | `QBAL(col,min_int)`（整列 `>= min` 的匹配行 **计数与求和**）；`SHOW PLAN` / `EXPLAIN WHERE`（**文本级**谓词 + 匹配行数 + 是否可能走 string 等值侧车提示）。 |
-| **25G** | **拒绝矩阵**：`AUTOVACUUM`、`WALSYNC`、`GROUPCOMMIT`、`RECOVER TO …`、`WALADAPTIVE`、`SEGMENT`、`HOTINDEX`、`WRITECONFLICT`、`CREATE SCHEMA`、`DROP SCHEMA`、`LIST SCHEMAS`、`SHOW SCHEMAS`、`ALTER TABLE` 等 → `[NOT_SUPPORTED]` + 指向本文；`CREATE SCHEMA` / `DROP SCHEMA` 在解析阶段即归入 **NotPortable**，避免被误解析为 `CREATE TABLE`。**`CONFIRM_REORDER`** 已迁至 **三十八期**（[`PHASE38.md`](PHASE38.md)），不再归入本矩阵。 |
+| **25G** | **拒绝矩阵**：`AUTOVACUUM`、`RECOVER TO …`、`WALADAPTIVE`、`SEGMENT`、`WRITECONFLICT`、`CREATE SCHEMA`、`DROP SCHEMA`、`LIST SCHEMAS`、`SHOW SCHEMAS` 等 → `[NOT_SUPPORTED]`。**`WALSYNC`/`GROUPCOMMIT`** → 定向文案（`SET DURABILITY 0|1|2`，见 **四十一期**）。**`HOTINDEX`** → 定向 `CREATE INDEX`。**`ALTER TABLE`**：仅 **未实现的子命令** 仍 NotPortable；**`ADD COLUMN` / `RENAME COLUMN`** 见 [`PHASE41.md`](PHASE41.md)。`CREATE SCHEMA` / `DROP SCHEMA` 在解析阶段即归入 **NotPortable**。**`CONFIRM_REORDER`** 见 [`PHASE38.md`](PHASE38.md)。 |
 
 ## 2. 非目标
 
 - **不**扩展 `structdb_capi`（本期仅限 MDB/REPL）。
 - **不**实现 newdb 堆专属语义（行重排、堆 `VACUUM` 文件紧凑、跨进程 index catalog 等）。
 - **不**实现 `RECOVER TO LSN/TIME` 等 PITR CLI。
-- `RENAME` / `DROP` 与 `persist_table` 的 **两阶段提交** 非原子跨批：崩溃窗口见 `CHANGELOG` 与 `POLICY` 一般耐久叙述。
+- **`RENAME TABLE`**：自 **四十一期** 起为单 `CommandBatch` 原子 submit（见 [`PHASE41.md`](PHASE41.md)）。**`DROP TABLE`** 仍为 gather + 单批；更复杂 DDL 崩溃窗口见 `PHASE31` / `POLICY`。
 
 ## 3. 验收
 
@@ -35,3 +35,4 @@
 | 2026-05-13 | **`DEFATTR`/`type_matches`**：`int`/`string`/`varchar`/`text`/`char`/`float`/`double`/`datetime`/`timestamp`；**`Mdb.Strict*`** 与 **`Mdb.IntegrateTxnRecoverRollbackRestartChain`**；`BEGIN` 内 **`SCAN`**、**`SHOWLOG`**、**`VACUUM` 无 storage** 测试。 |
 | 2026-05-14 | **25G**：从 NotPortable 矩阵移除 **`CONFIRM_REORDER`**（实现见 [`PHASE38.md`](PHASE38.md)）。 |
 | 2026-05-14 | **25C**：补充 **`SCAN MORE`** / **`SCAN MORE(n)`** / **`SCAN RESET`** 与验收 **`Mdb.ScanMoreCursorPaging`**。 |
+| 2026-05-16 | **25G**：**PHASE41** — `SET DURABILITY`；`ALTER TABLE ADD|RENAME COLUMN`；`CREATE INDEX`；`WALSYNC`/`GROUPCOMMIT`/`HOTINDEX` 定向提示；`RENAME TABLE` 单批原子性。 |

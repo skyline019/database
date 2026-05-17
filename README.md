@@ -8,6 +8,8 @@
 |------|------|
 | **LaTeX 源码级手册（与 newdb/intro 同构；WSL 仅用于 `latexmk` 生成 PDF，非引擎编译）** | [intro/README.md](intro/README.md) → `intro/out/structdb-intro.pdf` |
 | **架构总览（数据流 Mermaid + 代码版图 + 源码摘录）** | [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md) |
+| **竞品与能力矩阵（全维度 / SQLite / RocksDB / 缺口清单）** | [Docs/COMPETITIVE_MATRIX.md](Docs/COMPETITIVE_MATRIX.md) |
+| **竞品差距完善计划（W0–W4 / PHASE41+）** | [Docs/COMPETITIVE_IMPROVEMENT_PLAN.md](Docs/COMPETITIVE_IMPROVEMENT_PLAN.md) |
 | 工程方针（含 **§4.0 文件系统保底**、事务链 §4.1–4.3） | [Docs/POLICY.md](Docs/POLICY.md) |
 | 版本变更记录 | [Docs/CHANGELOG.md](Docs/CHANGELOG.md) |
 | 文档索引（含 `phases/` 专文目录） | [Docs/README.md](Docs/README.md) |

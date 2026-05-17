@@ -9,7 +9,10 @@
 
 #include "structdb/client/embed_client.hpp"
 #include "structdb/client/mdb_command_parser.hpp"
+#include "structdb/client/detail/mdb_ops_agg_cache.hpp"
+#include "structdb/client/detail/mdb_ops_aggregate.hpp"
 #include "structdb/client/mdb_runner.hpp"
+#include "structdb/storage/checkpoint_chain.hpp"
 #include "structdb/facade/engine.hpp"
 #include "structdb/infra/long_task_progress.hpp"
 #include "structdb/storage/mdb_keyspace.hpp"
@@ -983,6 +986,110 @@ TEST(Mdb, TxnChainTxnIsolationUnknownTailUsesSnapshot) {
   EXPECT_NE(line.find("read_committed=no"), std::string::npos);
   ASSERT_TRUE(H.repl("ROLLBACK").ok);
   H.close();
+}
+
+TEST(Mdb, ShowTxnStorageRollbackPolicyDefault) {
+  TxnChainStrictRepl H("mdb_show_txn_rb_pol");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tpol", "DEFATTR(x:string)"));
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SHOW TXN").ok);
+  EXPECT_NE(require_single_log_line(H.log, "[SHOW TXN]").find("storage_rollback_policy=session_only"),
+            std::string::npos);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SHOW SNAPSHOT").ok);
+  EXPECT_NE(require_single_log_line(H.log, "[SHOW SNAPSHOT]").find("storage_rollback_policy=session_only"),
+            std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, ShowTxnStorageRollbackPolicyChainUndo) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_show_txn_chain_pol");
+  fs::remove_all(root);
+  fs::create_directories(root);
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_chain_rollback_on_mdb_rollback = true;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "sess", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "SHOW TXN", &log, false, false, nullptr).ok);
+  EXPECT_NE(require_single_log_line(log, "[SHOW TXN]").find("storage_rollback_policy=chain_undo"), std::string::npos);
+  client.close();
+  eng.shutdown();
+}
+
+TEST(Mdb, BackupRestoreRunbookSmoke) {
+  namespace fs = std::filesystem;
+  namespace mk = structdb::storage::mdb_keyspace;
+  const auto root = temp_dir("mdb_backup_smoke");
+  fs::remove_all(root);
+  const auto data = root / "_data";
+  const auto sess = root / "embed_session";
+  const auto backup = root / "backup_bundle";
+  const auto restored = root / "restored";
+  {
+    structdb::facade::Engine eng;
+    structdb::facade::EngineConfigSnapshot snap;
+    snap.data_dir = data.string();
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(sess, &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, nullptr);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(br)").ok);
+    ASSERT_TRUE(run("USE(br)").ok);
+    ASSERT_TRUE(run("DEFATTR(k:string)").ok);
+    ASSERT_TRUE(run("INSERT(1,one)").ok);
+    ASSERT_TRUE(run("COUNT").ok);
+    EXPECT_NE(require_single_log_line(log, "[COUNT]").find("rows=1"), std::string::npos);
+    client.close();
+    eng.shutdown();
+  }
+  fs::create_directories(backup);
+  fs::copy(data, backup / "data_dir", fs::copy_options::recursive);
+  fs::copy(sess, backup / "session_dir", fs::copy_options::recursive);
+  fs::remove_all(data);
+  fs::remove_all(sess);
+  fs::create_directories(restored);
+  fs::copy(backup / "data_dir", data, fs::copy_options::recursive);
+  fs::copy(backup / "session_dir", sess, fs::copy_options::recursive);
+  {
+    structdb::facade::Engine eng2;
+    structdb::facade::EngineConfigSnapshot snap2;
+    snap2.data_dir = data.string();
+    eng2.config().update(1, snap2);
+    std::string err;
+    ASSERT_TRUE(eng2.startup(&err)) << err;
+    structdb::client::EmbedClient client2(eng2);
+    ASSERT_TRUE(client2.open(sess, &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session2;
+    std::vector<std::string> log2;
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(br)", &log2, false, false,
+                                                             nullptr)
+                    .ok);
+    log2.clear();
+    ASSERT_TRUE(
+        structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, nullptr)
+            .ok);
+    EXPECT_NE(require_single_log_line(log2, "[COUNT]").find("rows=1"), std::string::npos);
+    std::string v;
+    EXPECT_TRUE(eng2.kv_get(mk::row_key("br", "1"), &v));
+    client2.close();
+    eng2.shutdown();
+  }
 }
 
 TEST(Mdb, TxnChainAddAttrAfterDefattrAppendsColumn) {
@@ -2263,8 +2370,192 @@ TEST(Mdb, Phase25StrictStringEqExplainIndexHint) {
   ASSERT_TRUE(T.repl("INSERT(1,1,x)").ok);
   T.log.clear();
   ASSERT_TRUE(T.repl("SHOW PLAN(tag,=,x)").ok);
-  EXPECT_NE(join_logs(T.log).find("string_eq_sidecar_maybe"), std::string::npos);
+  const std::string plan = join_logs(T.log);
+  EXPECT_TRUE(plan.find("string_eq_index") != std::string::npos ||
+              plan.find("string_eq_sidecar_maybe") != std::string::npos)
+      << plan;
   T.close();
+}
+
+TEST(Mdb, WhereIdEqPointLookupAndExplain) {
+  TxnChainStrictRepl T("mdb_id_point");
+  ASSERT_TRUE(T.start());
+  ASSERT_TRUE(T.strict_new_table_from_create("pt", "DEFATTR(id:int,a:int)"));
+  for (int i = 1; i <= 50; ++i) {
+    ASSERT_TRUE(T.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + ",0)").ok);
+  }
+  T.log.clear();
+  ASSERT_TRUE(T.repl("EXPLAIN WHERE(id,=,25)").ok);
+  EXPECT_NE(join_logs(T.log).find("row_key_point_lookup"), std::string::npos);
+  T.log.clear();
+  ASSERT_TRUE(T.repl("WHERE(id,=,25)").ok);
+  EXPECT_NE(join_logs(T.log).find("matched 1"), std::string::npos);
+  T.log.clear();
+  ASSERT_TRUE(T.repl("WHERE(id,=,999)").ok);
+  EXPECT_NE(join_logs(T.log).find("matched 0"), std::string::npos);
+  T.close();
+}
+
+TEST(Mdb, PageJsonIdCursorPaging) {
+  TxnChainStrictRepl T("mdb_page_cursor");
+  ASSERT_TRUE(T.start());
+  ASSERT_TRUE(T.strict_new_table_from_create("pg", "DEFATTR(id:int,v:int)"));
+  std::ostringstream bulk;
+  bulk << "BULKINSERTFAST(";
+  for (int i = 1; i <= 250; ++i) {
+    if (i > 1) bulk << '|';
+    bulk << i << ',' << i << ',' << (i * 10);
+  }
+  bulk << ')';
+  ASSERT_TRUE(T.repl(bulk.str()).ok);
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(3,10,id,asc)").ok) << T.err;
+  const std::string pj = join_logs(T.log);
+  EXPECT_NE(pj.find("\"21\""), std::string::npos) << pj;
+  EXPECT_NE(pj.find("\"30\""), std::string::npos) << pj;
+  T.close();
+}
+
+TEST(Mdb, PageJsonAfterCursorAndColsPrune) {
+  TxnChainStrictRepl T("mdb_page_after");
+  ASSERT_TRUE(T.start());
+  ASSERT_TRUE(T.strict_new_table_from_create("pa", "DEFATTR(id:int,a:int,b:int)"));
+  for (int i = 1; i <= 100; ++i) {
+    ASSERT_TRUE(T.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + "," + std::to_string(i) + "," +
+                       std::to_string(i * 2) + ")")
+                    .ok)
+        << T.err;
+  }
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,40,10,id,asc)").ok) << T.err;
+  const std::string after = join_logs(T.log);
+  EXPECT_NE(after.find("\"mode\":\"after\""), std::string::npos) << after;
+  EXPECT_NE(after.find("\"41\""), std::string::npos) << after;
+  EXPECT_NE(after.find("\"50\""), std::string::npos) << after;
+  EXPECT_NE(after.find("\"next_after\":\"50\""), std::string::npos) << after;
+  EXPECT_NE(after.find("\"has_more\":true"), std::string::npos) << after;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,50,10,id,asc)").ok) << T.err;
+  const std::string after2 = join_logs(T.log);
+  EXPECT_NE(after2.find("\"51\""), std::string::npos) << after2;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(1,5,id,asc,COLS,id)").ok) << T.err;
+  const std::string pruned = join_logs(T.log);
+  EXPECT_NE(pruned.find("\"compact\":true"), std::string::npos) << pruned;
+  EXPECT_EQ(pruned.find("\"ty\""), std::string::npos) << pruned;
+  EXPECT_NE(pruned.find("\"1\""), std::string::npos) << pruned;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(1,3,id,asc,STREAM)").ok) << T.err;
+  const std::string streamed = join_logs(T.log);
+  EXPECT_NE(streamed.find("[PAGE_JSON_META]"), std::string::npos) << streamed;
+  EXPECT_NE(streamed.find("[PAGE_JSON_ROW]"), std::string::npos) << streamed;
+  EXPECT_NE(streamed.find("[PAGE_JSON_END]"), std::string::npos) << streamed;
+  EXPECT_EQ(streamed.find("[PAGE_JSON]{"), std::string::npos) << streamed;
+  T.close();
+}
+
+TEST(Mdb, PageJsonStrictIdsOnlyDenseAndErrors) {
+  TxnChainStrictRepl T("mdb_page_json_strict");
+  ASSERT_TRUE(T.start());
+  ASSERT_TRUE(T.strict_new_table_from_create("pj", "DEFATTR(id:int,a:int)"));
+  std::ostringstream bulk;
+  bulk << "BULKINSERTFAST(";
+  for (int i = 1; i <= 200; ++i) {
+    if (i > 1) bulk << '|';
+    bulk << i << ',' << i << ',' << (i * 3);
+  }
+  bulk << ')';
+  ASSERT_TRUE(T.repl(bulk.str()).ok) << T.err;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,150,5,id,asc,IDS_ONLY)").ok) << T.err;
+  const std::string ids = join_logs(T.log);
+  EXPECT_NE(ids.find("\"ids_only\":true"), std::string::npos) << ids;
+  EXPECT_NE(ids.find("\"ids\":["), std::string::npos) << ids;
+  EXPECT_NE(ids.find("\"151\""), std::string::npos) << ids;
+  EXPECT_NE(ids.find("\"155\""), std::string::npos) << ids;
+  EXPECT_EQ(ids.find("\"rows\""), std::string::npos) << ids;
+  EXPECT_EQ(ids.find("\"headers\""), std::string::npos) << ids;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,155,3,id,asc,IDS_ONLY,STREAM)").ok) << T.err;
+  const std::string ids_stream = join_logs(T.log);
+  EXPECT_NE(ids_stream.find("[PAGE_JSON_IDS]"), std::string::npos) << ids_stream;
+  EXPECT_NE(ids_stream.find("\"156\""), std::string::npos) << ids_stream;
+  EXPECT_NE(ids_stream.find("[PAGE_JSON_END]"), std::string::npos) << ids_stream;
+  T.log.clear();
+  ASSERT_FALSE(T.repl("PAGE_JSON(1,5,a,asc,IDS_ONLY)").ok);
+  EXPECT_NE(T.err.find("id"), std::string::npos) << T.err;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,99999,10,id,asc)").ok) << T.err;
+  const std::string empty_after = join_logs(T.log);
+  EXPECT_NE(empty_after.find("\"returned\":0"), std::string::npos) << empty_after;
+  EXPECT_NE(empty_after.find("\"has_more\":false"), std::string::npos) << empty_after;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("DELETE(160)").ok) << T.err;
+  ASSERT_TRUE(T.repl("PAGE_JSON(AFTER,159,3,id,asc,IDS_ONLY)").ok) << T.err;
+  const std::string after_del = join_logs(T.log);
+  EXPECT_NE(after_del.find("\"161\""), std::string::npos) << after_del;
+  EXPECT_NE(after_del.find("\"163\""), std::string::npos) << after_del;
+  EXPECT_EQ(after_del.find("\"160\""), std::string::npos) << after_del;
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(2,4,id,asc)").ok) << T.err;
+  const std::string page2 = join_logs(T.log);
+  EXPECT_NE(page2.find("\"5\""), std::string::npos) << page2;
+  EXPECT_NE(page2.find("\"8\""), std::string::npos) << page2;
+  T.close();
+}
+
+TEST(Mdb, PageJsonStrictBulkDenseRestart) {
+  const auto root = temp_dir("mdb_page_json_dense_restart");
+  fs::remove_all(root);
+  fs::create_directories(root);
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_bulk_import_mode = true;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "session", &err)) << err;
+  std::ostringstream script;
+  script << "CREATE TABLE(dr)\nUSE(dr)\nDEFATTR(id:int,v:int)\n";
+  for (int batch = 0; batch < 5; ++batch) {
+    script << "BULKINSERTFAST(";
+    for (int i = 0; i < 100; ++i) {
+      const int rid = batch * 100 + i + 1;
+      if (i > 0) script << '|';
+      script << rid << ',' << rid << ',' << rid;
+    }
+    script << ")\n";
+  }
+  script << "FLUSH PERSIST\n";
+  const fs::path mdb_path = root / "dense.mdb";
+  write_script(mdb_path, script.str());
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = mdb_path;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(dr)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "PAGE_JSON(AFTER,450,8,id,asc,IDS_ONLY)", &log2,
+                                                   false, false, &err)
+          .ok);
+  const std::string out = join_logs(log2);
+  EXPECT_NE(out.find("\"451\""), std::string::npos) << out;
+  EXPECT_NE(out.find("\"458\""), std::string::npos) << out;
+  EXPECT_EQ(out.find("\"459\""), std::string::npos) << out;
+  client2.close();
+  eng2.shutdown();
 }
 
 TEST(Mdb, ScanMoreCursorPaging) {
@@ -2573,7 +2864,10 @@ TEST(Mdb, WhereDatetimeAndExplainLikeHints) {
   EXPECT_NE(join_logs(T.log).find("like_full_scan"), std::string::npos);
   T.log.clear();
   ASSERT_TRUE(T.repl("SHOW PLAN(s,  =  ,alpha)").ok);
-  EXPECT_NE(join_logs(T.log).find("string_eq_sidecar_maybe"), std::string::npos);
+  const std::string plan_s = join_logs(T.log);
+  EXPECT_TRUE(plan_s.find("string_eq_index") != std::string::npos ||
+              plan_s.find("string_eq_sidecar_maybe") != std::string::npos)
+      << plan_s;
   T.close();
 }
 
@@ -2686,6 +2980,26 @@ TEST(Mdb, Phase38ReorderSwap) {
   T.log.clear();
   ASSERT_TRUE(T.repl("COUNT").ok);
   EXPECT_NE(join_logs(T.log).find("rows=2"), std::string::npos);
+  T.close();
+}
+
+/// GUI 快捷重排：4→3、5→4 后 PAGE_JSON 仍应返回 4 行（row_ids_ordered 须重建）。
+TEST(Mdb, Phase38ReorderPageJsonAfterRenumber) {
+  TxnChainStrictRepl T("phase38_pgjson");
+  ASSERT_TRUE(T.start());
+  ASSERT_TRUE(T.strict_new_table_from_create("pg", "DEFATTR(id:int,name:string)"));
+  ASSERT_TRUE(T.repl("INSERT(1,1,a)").ok);
+  ASSERT_TRUE(T.repl("INSERT(2,2,b)").ok);
+  ASSERT_TRUE(T.repl("INSERT(4,4,d)").ok);
+  ASSERT_TRUE(T.repl("INSERT(5,5,e)").ok);
+  ASSERT_TRUE(T.repl("CONFIRM_REORDER({\"table\":\"pg\",\"pairs\":[[\"1\",\"1\"],[\"2\",\"2\"],[\"4\",\"3\"],[\"5\",\"4\"]]})")
+                  .ok);
+  T.log.clear();
+  ASSERT_TRUE(T.repl("PAGE_JSON(1,12,id,asc)").ok);
+  const std::string all = join_logs(T.log);
+  EXPECT_NE(all.find("[PAGE_JSON]"), std::string::npos);
+  EXPECT_NE(all.find("\"returned\":4"), std::string::npos) << all;
+  EXPECT_EQ(all.find("\"5\""), std::string::npos) << "stale row id 5 must not appear after renumber";
   T.close();
 }
 
@@ -3218,4 +3532,1888 @@ TEST(Mdb, PageJsonNonIdColumnPartialSortWindow) {
     EXPECT_NE(out3.find("[\"3\",\"1\",\"c\""), std::string::npos) << out3;
   }
   T.close();
+}
+
+/// Incremental row_index cache: many INSERTs then cold restart COUNT matches.
+TEST(Mdb, Phase39BulkInsertFastRowIndexCountAfterRestart) {
+  const auto root = temp_dir("mdb_p39_rowidx");
+  fs::remove_all(root);
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  const fs::path script = root / "bulk.mdb";
+  write_script(script,
+               "CREATE TABLE(t)\n"
+               "USE(t)\n"
+               "DEFATTR(id:int)\n"
+               "IMPORT MODE ON\n"
+               "BULKINSERTFAST(1,1|2,2|3,3|4,4|5,5)\n"
+               "FLUSH PERSIST\n"
+               "REBUILD INDEX\n");
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = script;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "s", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(t)", &log, false, false, &err).ok);
+  log.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok);
+  EXPECT_NE(join_logs(log).find("rows=5"), std::string::npos) << join_logs(log);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// `mdbwire2:` encoding parity with hex after restart.
+TEST(Mdb, Phase39Wire2EncodingParityAfterRestart) {
+  const std::string_view scr =
+      "CREATE TABLE(w2)\n"
+      "USE(w2)\n"
+      "DEFATTR(s:string)\n"
+      "INSERT(1,hello)\n"
+      "INSERT(2,world)\n";
+
+  const auto root_hex = temp_dir("mdb_p39_hex");
+  const auto root_w2 = temp_dir("mdb_p39_w2");
+  structdb::facade::EngineConfigSnapshot snap_hex;
+  snap_hex.data_dir = (root_hex / "_data").string();
+  snap_hex.mdb_wire_encoding = structdb::facade::MdbWireEncoding::Hex;
+  structdb::facade::EngineConfigSnapshot snap_w2;
+  snap_w2.data_dir = (root_w2 / "_data").string();
+  snap_w2.mdb_wire_encoding = structdb::facade::MdbWireEncoding::Wire2;
+
+  auto verify_count_after_restart = [](const fs::path& root, structdb::facade::EngineConfigSnapshot snap,
+                                       std::string_view script_text, const char* table) -> bool {
+    fs::remove_all(root);
+    structdb::facade::Engine eng;
+    snap.data_dir = (root / "_data").string();
+    eng.config().update(1, snap);
+    std::string err;
+    if (!eng.startup(&err)) return false;
+    structdb::client::EmbedClient client(eng);
+    if (!client.open(root / "sess", &err)) {
+      eng.shutdown();
+      return false;
+    }
+    const fs::path script = root / "run.mdb";
+    write_script(script, script_text);
+    structdb::client::mdb::MdbRunOptions opt;
+    opt.script_path = script;
+    if (!structdb::client::mdb::run_mdb_script(eng, client, opt).ok) {
+      client.close();
+      eng.shutdown();
+      return false;
+    }
+    client.close();
+    eng.shutdown();
+
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    if (!eng2.startup(&err)) return false;
+    structdb::client::EmbedClient client2(eng2);
+    if (!client2.open(root / "sess", &err)) {
+      eng2.shutdown();
+      return false;
+    }
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    const std::string use_line = std::string("USE(") + table + ")";
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, use_line, &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    log.clear();
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    const bool ok = join_logs(log).find("rows=2") != std::string::npos;
+    client2.close();
+    eng2.shutdown();
+    return ok;
+  };
+
+  ASSERT_TRUE(verify_count_after_restart(root_hex, snap_hex, scr, "w2"));
+  ASSERT_TRUE(verify_count_after_restart(root_w2, snap_w2, scr, "w2"));
+}
+
+/// Default script amortize: `BULKINSERTFAST` without IMPORT still persists at EOF (cold COUNT).
+TEST(Mdb, Phase39ScriptAmortizeBulkInsertFastDefault) {
+  const auto root = temp_dir("mdb_p39_amort");
+  fs::remove_all(root);
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_script_amortize_bulk_dml = true;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  const fs::path script = root / "amort.mdb";
+  write_script(script,
+               "CREATE TABLE(a)\n"
+               "USE(a)\n"
+               "DEFATTR(id:int)\n"
+               "BULKINSERTFAST(1,1|2,2|3,3)\n"
+               "BULKINSERTFAST(4,4|5,5)\n");
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = script;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "s", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(a)", &log, false, false, &err).ok);
+  log.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok);
+  EXPECT_NE(join_logs(log).find("rows=5"), std::string::npos) << join_logs(log);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// Coalesce: dirty rows flushed on FLUSH PERSIST, visible after restart.
+TEST(Mdb, Phase39PersistCoalesceFlushPersist) {
+  const auto root = temp_dir("mdb_p39_coalesce");
+  fs::remove_all(root);
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_persist_coalesce = true;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  const fs::path script = root / "coalesce.mdb";
+  write_script(script,
+               "CREATE TABLE(c)\n"
+               "USE(c)\n"
+               "DEFATTR(id:int)\n"
+               "INSERT(1,1)\n"
+               "INSERT(2,2)\n"
+               "FLUSH PERSIST\n");
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = script;
+  opt.persist_coalesce = true;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "s", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(c)", &log, false, false, &err).ok);
+  log.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok);
+  EXPECT_NE(join_logs(log).find("rows=2"), std::string::npos) << join_logs(log);
+  client2.close();
+  eng2.shutdown();
+}
+
+namespace {
+
+std::uint32_t read_u32_le(std::string_view b, std::size_t off) {
+  if (off + 4 > b.size()) return 0;
+  const auto* p = reinterpret_cast<const unsigned char*>(b.data() + off);
+  return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+         (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+bool stdbbw1_has_put_key(std::string_view body, std::string_view key) {
+  if (body.size() < 8 || body.compare(0, 7, "STDBBW1") != 0) return false;
+  std::size_t off = 8;
+  const std::uint32_t nd = read_u32_le(body, off);
+  off += 4;
+  for (std::uint32_t i = 0; i < nd; ++i) {
+    const std::uint32_t klen = read_u32_le(body, off);
+    off += 4 + klen;
+    if (off > body.size()) return false;
+  }
+  if (off + 4 > body.size()) return false;
+  const std::uint32_t np = read_u32_le(body, off);
+  off += 4;
+  for (std::uint32_t i = 0; i < np; ++i) {
+    if (off + 4 > body.size()) return false;
+    const std::uint32_t klen = read_u32_le(body, off);
+    off += 4;
+    if (off + klen > body.size()) return false;
+    const std::string_view k(body.data() + off, klen);
+    off += klen;
+    if (off + 4 > body.size()) return false;
+    const std::uint32_t vlen = read_u32_le(body, off);
+    off += 4 + vlen;
+    if (k == key) return true;
+  }
+  return false;
+}
+
+std::vector<std::string> wal_stdbbw1_payloads(const fs::path& data_dir) {
+  const fs::path wal = data_dir / "wal.log";
+  std::ifstream in(wal, std::ios::binary);
+  if (!in) return {};
+  std::vector<std::string> out;
+  for (;;) {
+    std::uint32_t len = 0;
+    if (!in.read(reinterpret_cast<char*>(&len), sizeof(len))) break;
+    std::string body(len, '\0');
+    if (!in.read(body.data(), static_cast<std::streamsize>(len))) break;
+    if (body.size() >= 7 && body.compare(0, 7, "STDBBW1") == 0) out.push_back(std::move(body));
+  }
+  return out;
+}
+
+std::string bulkinsertfast_rows(std::size_t n) {
+  std::ostringstream o;
+  o << "BULKINSERTFAST(";
+  for (std::size_t i = 1; i <= n; ++i) {
+    if (i > 1) o << '|';
+    o << i << ',' << i;
+  }
+  o << ")\n";
+  return o.str();
+}
+
+/// One `int` column besides PK: `(id, id)`.
+std::string bulkinsertfast_line_int_col(int start_id, int count) {
+  std::ostringstream o;
+  o << "BULKINSERTFAST(";
+  for (int i = 0; i < count; ++i) {
+    const int id = start_id + i;
+    if (i > 0) o << '|';
+    o << id << ',' << id;
+  }
+  o << ")\n";
+  return o.str();
+}
+
+/// `DEFATTR(id:int,s:string)` → `(pk, id, s)`.
+std::string bulkinsertfast_line_id_string(int start_id, int count, std::string_view s_prefix = "r") {
+  std::ostringstream o;
+  o << "BULKINSERTFAST(";
+  for (int i = 0; i < count; ++i) {
+    const int id = start_id + i;
+    if (i > 0) o << '|';
+    o << id << ',' << id << ',' << s_prefix << id;
+  }
+  o << ")\n";
+  return o.str();
+}
+
+/// `DEFATTR(id:int,v:int)` → `(pk, id, v)`.
+std::string bulkinsertfast_line_id_v(int start_id, int count) {
+  std::ostringstream o;
+  o << "BULKINSERTFAST(";
+  for (int i = 0; i < count; ++i) {
+    const int id = start_id + i;
+    if (i > 0) o << '|';
+    o << id << ',' << id << ',' << id;
+  }
+  o << ")\n";
+  return o.str();
+}
+
+std::string bulkinsertfast_mixed_string_ids() {
+  return "BULKINSERTFAST(10,10,t10|2,2,t2|100,100,t100|9,9,t9|11,11,t11|3,3,t3)\n";
+}
+
+struct Phase40StrictHarness {
+  fs::path root;
+  structdb::facade::Engine eng;
+  structdb::facade::EngineConfigSnapshot snap{};
+  std::string err;
+  structdb::client::EmbedClient client{eng};
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+
+  explicit Phase40StrictHarness(const char* subdir) : root(temp_dir(subdir)) {
+    fs::remove_all(root);
+    snap.data_dir = (root / "_data").string();
+    snap.mdb_bulk_persist_plain_rows = true;
+    snap.mdb_script_amortize_bulk_dml = true;
+  }
+
+  bool start() {
+    eng.config().update(1, snap);
+    return eng.startup(&err) && client.open(root / "session", &err);
+  }
+
+  structdb::client::mdb::MdbRunResult repl(std::string_view line) {
+    return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, &err);
+  }
+
+  bool run_script(const fs::path& script_path, structdb::client::mdb::MdbRunResult* result_out = nullptr) {
+    structdb::client::mdb::MdbRunOptions opt;
+    opt.script_path = script_path;
+    const auto r = structdb::client::mdb::run_mdb_script(eng, client, opt);
+    if (result_out) *result_out = r;
+    if (!r.ok) err = r.last_error;
+    return r.ok;
+  }
+
+  void shutdown_session() {
+    client.close();
+    eng.shutdown();
+  }
+};
+
+}  // namespace
+
+/// Chunked full snapshot: many rows, small chunk size, COUNT after restart.
+TEST(Mdb, Phase40ChunkedPersistCountAfterRestart) {
+  const auto root = temp_dir("mdb_p40_chunk_cnt");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_persist_chunk_max_puts = 16;
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  const fs::path script = root / "chunk.mdb";
+  write_script(script,
+               "CREATE TABLE(t)\n"
+               "USE(t)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(64));
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = script;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "s", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(t)", &log, false, false, &err).ok);
+  log.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok);
+  EXPECT_NE(join_logs(log).find("rows=64"), std::string::npos) << join_logs(log);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// `row_index` / schema metadata only on the final persist chunk (earlier WAL frames are row-only).
+TEST(Mdb, Phase40ChunkedMetadataOnlyOnLastChunk) {
+  const auto root = temp_dir("mdb_p40_chunk_meta");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_persist_chunk_max_puts = 2;
+  snap.mdb_incremental_persist = false;
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  const fs::path script = root / "meta.mdb";
+  write_script(script,
+               "CREATE TABLE(m)\n"
+               "USE(m)\n"
+               "DEFATTR(id:int)\n"
+               "BULKINSERTFAST(1,1|2,2|3,3|4,4|5,5|6,6)\n");
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = script;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  const auto frames = wal_stdbbw1_payloads(root / "_data");
+  ASSERT_GE(frames.size(), 3u) << frames.size();
+  const std::string idx_key = std::string(structdb::storage::mdb_keyspace::row_index_key("m"));
+  std::size_t row_only_frames = 0;
+  std::size_t row_frames_with_idx = 0;
+  for (const auto& f : frames) {
+    const bool has_row_put = f.find("mdb$v2$row$m$") != std::string::npos;
+    if (!has_row_put) continue;
+    if (stdbbw1_has_put_key(f, idx_key))
+      ++row_frames_with_idx;
+    else
+      ++row_only_frames;
+  }
+  EXPECT_GE(row_only_frames, 2u) << "expected multiple row-only persist chunks";
+  EXPECT_EQ(row_frames_with_idx, 1u) << "row_index metadata on exactly one chunk";
+}
+
+/// Engine bulk + raw logical encoding: parity with default hex after restart.
+TEST(Mdb, Phase40ImportRawParityAfterRestart) {
+  const std::string script_body =
+      "CREATE TABLE(r)\n"
+      "USE(r)\n"
+      "DEFATTR(id:int)\n"
+      "BULKINSERTFAST(1,1|2,2|3,3)\n";
+
+  auto run_and_count = [&script_body](const fs::path& root, structdb::facade::EngineConfigSnapshot snap) -> bool {
+    fs::remove_all(root);
+    snap.data_dir = (root / "_data").string();
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    if (!eng.startup(&err)) return false;
+    structdb::client::EmbedClient client(eng);
+    if (!client.open(root / "s", &err)) {
+      eng.shutdown();
+      return false;
+    }
+    write_script(root / "raw.mdb", script_body);
+    structdb::client::mdb::MdbRunOptions opt;
+    opt.script_path = root / "raw.mdb";
+    if (!structdb::client::mdb::run_mdb_script(eng, client, opt).ok) {
+      client.close();
+      eng.shutdown();
+      return false;
+    }
+    client.close();
+    eng.shutdown();
+
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    if (!eng2.startup(&err)) return false;
+    structdb::client::EmbedClient client2(eng2);
+    if (!client2.open(root / "s", &err)) {
+      eng2.shutdown();
+      return false;
+    }
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(r)", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    log.clear();
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    const bool ok = join_logs(log).find("rows=3") != std::string::npos;
+    client2.close();
+    eng2.shutdown();
+    return ok;
+  };
+
+  structdb::facade::EngineConfigSnapshot snap_hex;
+  structdb::facade::EngineConfigSnapshot snap_bulk;
+  snap_bulk.mdb_bulk_import_mode = true;
+  ASSERT_TRUE(run_and_count(temp_dir("mdb_p40_raw_hex"), snap_hex));
+  ASSERT_TRUE(run_and_count(temp_dir("mdb_p40_raw_bulk"), snap_bulk));
+}
+
+/// Plain tab row blobs (bulk persist) + monotonic row index: COUNT after restart.
+TEST(Mdb, Phase40PlainRowMonotonicIndexCountAfterRestart) {
+  const auto root = temp_dir("mdb_p40_plain_mono");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_bulk_persist_plain_rows = true;
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "s", &err)) << err;
+  write_script(root / "p.mdb",
+               "CREATE TABLE(t)\n"
+               "USE(t)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(128));
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = root / "p.mdb";
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, snap);
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(root / "s", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(t)", &log, false, false, &err).ok);
+  log.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok);
+  EXPECT_NE(join_logs(log).find("rows=128"), std::string::npos) << join_logs(log);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// >8K bulk 触发延迟 `row_ids_ordered` + 分块 plain persist；冷启动 COUNT / PAGE / WHERE。
+TEST(Mdb, Phase40StrictTenKDeferredIndexRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_10k");
+  H.snap.mdb_persist_chunk_max_puts = 512;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "big.mdb",
+               "CREATE TABLE(big)\n"
+               "USE(big)\n"
+               "DEFATTR(id:int,s:string)\n" +
+                   bulkinsertfast_line_id_string(1, 1000) + bulkinsertfast_line_id_string(1001, 1000) +
+                   bulkinsertfast_line_id_string(2001, 1000) + bulkinsertfast_line_id_string(3001, 1000) +
+                   bulkinsertfast_line_id_string(4001, 1000) + bulkinsertfast_line_id_string(5001, 1000) +
+                   bulkinsertfast_line_id_string(6001, 1000) + bulkinsertfast_line_id_string(7001, 1000) +
+                   bulkinsertfast_line_id_string(8001, 1000) + bulkinsertfast_line_id_string(9001, 1000) + "COUNT\n");
+  ASSERT_TRUE(H.run_script(H.root / "big.mdb")) << H.err;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("USE(big)").ok);
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=10000"), std::string::npos) << join_logs(H.log);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("PAGE(1,5,id,asc)").ok);
+  EXPECT_NE(join_logs(H.log).find("id=1"), std::string::npos) << join_logs(H.log);
+  EXPECT_NE(join_logs(H.log).find("id=5"), std::string::npos) << join_logs(H.log);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("WHERE(id,=,9999)").ok);
+  EXPECT_NE(join_logs(H.log).find("matched 1"), std::string::npos) << join_logs(H.log);
+  const auto data_dir = H.root / "_data";
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(2, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(big)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=10000"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "PAGE_JSON(1,3,id,asc)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("[\"1\",\"1\",\"r1\""), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "WHERE(id,=,5000)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("matched 1"), std::string::npos) << join_logs(log2);
+  const auto frames = wal_stdbbw1_payloads(data_dir);
+  EXPECT_GE(frames.size(), 10u) << "expect chunked WAL frames";
+  client2.close();
+  eng2.shutdown();
+}
+
+/// 非数字序主键（字符串 id）bulk 后分页顺序与 WHERE 精确匹配。
+TEST(Mdb, Phase40StrictLexicographicStringIdsRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_lex");
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "lex.mdb",
+               "CREATE TABLE(lex)\n"
+               "USE(lex)\n"
+               "DEFATTR(id:string,tag:string)\n" +
+                   bulkinsertfast_mixed_string_ids() + "COUNT\n");
+  ASSERT_TRUE(H.run_script(H.root / "lex.mdb")) << H.err;
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(lex)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=6"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "WHERE(id,=,100)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("matched 1"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "PAGE_JSON(1,6,id,asc)", &log2, false, false, &err).ok);
+  const std::string pj = join_logs(log2);
+  EXPECT_NE(pj.find("t10"), std::string::npos) << pj;
+  EXPECT_NE(pj.find("t9"), std::string::npos) << pj;
+  EXPECT_NE(pj.find("t100"), std::string::npos) << pj;
+  client2.close();
+  eng2.shutdown();
+}
+
+/// Bulk 后 UPDATE / DELETE / INSERT，增量脏集 + 再次全量 persist，冷启动一致。
+TEST(Mdb, Phase40StrictBulkThenMutateRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_mut");
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "mut0.mdb",
+               "CREATE TABLE(mut)\n"
+               "USE(mut)\n"
+               "DEFATTR(id:int,v:int)\n" +
+                   bulkinsertfast_line_id_v(1, 9000) + "COUNT\n");
+  ASSERT_TRUE(H.run_script(H.root / "mut0.mdb")) << H.err;
+  ASSERT_TRUE(H.repl("USE(mut)").ok);
+  ASSERT_TRUE(H.repl("UPDATE(5000,5000,99)").ok);
+  ASSERT_TRUE(H.repl("DELETE(1)").ok);
+  ASSERT_TRUE(H.repl("INSERT(9001,9001,7)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=9000"), std::string::npos) << join_logs(H.log);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("WHERE(id,=,5000)").ok);
+  EXPECT_NE(join_logs(H.log).find("matched 1"), std::string::npos) << join_logs(H.log);
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(mut)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=9000"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "WHERE(id,=,5000)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("matched 1"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "WHERE(id,=,1)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("matched 0"), std::string::npos) << join_logs(log2);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// 嵌套 SAVEPOINT + 事务内多批 BULKINSERTFAST，COMMIT 后冷启动 COUNT/PAGE 与 WAL 分块。
+TEST(Mdb, Phase40StrictNestedTxnBulkCommitRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_txn_bulk");
+  H.snap.mdb_persist_chunk_max_puts = 128;
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.repl("CREATE TABLE(txn)").ok);
+  ASSERT_TRUE(H.repl("USE(txn)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int,s:string)").ok);
+  ASSERT_TRUE(H.repl("INSERT(1,1,r1)").ok);
+  ASSERT_TRUE(H.repl("BEGIN").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_line_id_string(2, 80)).ok);
+  ASSERT_TRUE(H.repl("SAVEPOINT s1").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_line_id_string(82, 80)).ok);
+  ASSERT_TRUE(H.repl("INSERT(200,200,r200)").ok);
+  ASSERT_TRUE(H.repl("ROLLBACK TO SAVEPOINT s1").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=81"), std::string::npos) << join_logs(H.log);
+  for (int id = 82; id <= 120; ++id) {
+    const std::string line =
+        "INSERT(" + std::to_string(id) + "," + std::to_string(id) + ",r" + std::to_string(id) + ")";
+    ASSERT_TRUE(H.repl(line).ok) << H.err << " " << line;
+  }
+  H.log.clear();
+  ASSERT_TRUE(H.repl("PAGE_JSON(1,5,id,asc)").ok);
+  EXPECT_NE(join_logs(H.log).find("[\"1\",\"1\",\"r1\""), std::string::npos) << join_logs(H.log);
+  ASSERT_TRUE(H.repl("COMMIT").ok);
+  const auto data_dir = H.root / "_data";
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(txn)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=120"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "PAGE(2,5,id,asc)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("id=6"), std::string::npos) << join_logs(log2);
+  EXPECT_GE(wal_stdbbw1_payloads(data_dir).size(), 2u);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// 双表 bulk + 分表 FLUSH；冷启动各表 COUNT 互不污染。
+TEST(Mdb, Phase40StrictCrossTableBulkIsolation) {
+  Phase40StrictHarness H("mdb_p40_strict_xtab");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.repl("CREATE TABLE(a)").ok);
+  ASSERT_TRUE(H.repl("CREATE TABLE(b)").ok);
+  ASSERT_TRUE(H.repl("USE(a)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int)").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_rows(200)).ok);
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=200"), std::string::npos) << join_logs(H.log);
+  ASSERT_TRUE(H.repl("USE(b)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int)").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_rows(150)).ok);
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  auto count_table = [&](const char* table, const char* expect_rows) {
+    log.clear();
+    const std::string use_line = std::string("USE(") + table + ")";
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, use_line, &log, false, false, &err).ok)
+        << err;
+    log.clear();
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok)
+        << err;
+    EXPECT_NE(join_logs(log).find(expect_rows), std::string::npos) << join_logs(log);
+  };
+  count_table("a", "rows=200");
+  count_table("b", "rows=150");
+  client2.close();
+  eng2.shutdown();
+}
+
+/// plain 行 vs `mdbhex1:` 对含特殊字符字符串列的冷启动 parity。
+TEST(Mdb, Phase40StrictPlainVsHexStringParity) {
+  const char* script_body =
+      "CREATE TABLE(txt)\n"
+      "USE(txt)\n"
+      "DEFATTR(id:int,payload:string)\n"
+      "INSERT(1,1,hello)\n"
+      "INSERT(2,2,world)\n"
+      "INSERT(3,3,a|b)\n"
+      "FLUSH PERSIST\n";
+
+  auto verify = [&](const fs::path& root, structdb::facade::EngineConfigSnapshot snap) {
+    fs::remove_all(root);
+    snap.data_dir = (root / "_data").string();
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    if (!eng.startup(&err)) return false;
+    structdb::client::EmbedClient client(eng);
+    if (!client.open(root / "s", &err)) {
+      eng.shutdown();
+      return false;
+    }
+    write_script(root / "t.mdb", script_body);
+    structdb::client::mdb::MdbRunOptions opt;
+    opt.script_path = root / "t.mdb";
+    opt.persist_coalesce = true;
+    if (!structdb::client::mdb::run_mdb_script(eng, client, opt).ok) {
+      client.close();
+      eng.shutdown();
+      return false;
+    }
+    client.close();
+    eng.shutdown();
+
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    if (!eng2.startup(&err)) return false;
+    structdb::client::EmbedClient client2(eng2);
+    if (!client2.open(root / "s", &err)) {
+      eng2.shutdown();
+      return false;
+    }
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "USE(txt)", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    log.clear();
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "COUNT", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    if (join_logs(log).find("rows=3") == std::string::npos) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    log.clear();
+    if (!structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session, "WHERE(payload,=,a|b)", &log, false, false, &err).ok) {
+      client2.close();
+      eng2.shutdown();
+      return false;
+    }
+    const bool ok = join_logs(log).find("matched 1") != std::string::npos;
+    client2.close();
+    eng2.shutdown();
+    return ok;
+  };
+
+  structdb::facade::EngineConfigSnapshot snap_plain;
+  snap_plain.mdb_bulk_persist_plain_rows = true;
+  structdb::facade::EngineConfigSnapshot snap_hex;
+  snap_hex.mdb_bulk_persist_plain_rows = false;
+  ASSERT_TRUE(verify(temp_dir("mdb_p40_plain_txt"), snap_plain));
+  ASSERT_TRUE(verify(temp_dir("mdb_p40_hex_txt"), snap_hex));
+}
+
+/// IMPORT MODE + 大 bulk + REBUILD INDEX + 字符串列 WHERE（冷启动）。
+TEST(Mdb, Phase40StrictImportModeSecIdxRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_import");
+  ASSERT_TRUE(H.start()) << H.err;
+  std::ostringstream script;
+  script << "CREATE TABLE(im)\n"
+            "USE(im)\n"
+            "DEFATTR(id:int,name:string)\n"
+            "IMPORT MODE ON\n";
+  for (int batch = 0; batch < 10; ++batch) {
+    script << bulkinsertfast_line_id_string(batch * 100 + 1, 100, "n") << '\n';
+  }
+  script << "FLUSH PERSIST\n"
+            "REBUILD INDEX\n"
+            "COUNT\n";
+  write_script(H.root / "im.mdb", script.str());
+  ASSERT_TRUE(H.run_script(H.root / "im.mdb")) << H.err;
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(im)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=1000"), std::string::npos) << join_logs(log2);
+  log2.clear();
+  ASSERT_TRUE(
+      structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "WHERE(name,=,n500)", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("matched 1"), std::string::npos) << join_logs(log2);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// 极小 chunk（64）+ 300 行：多 WAL 帧 + 冷启动 COUNT。
+TEST(Mdb, Phase40StrictTinyChunkPersistRestart) {
+  Phase40StrictHarness H("mdb_p40_strict_tiny_chunk");
+  H.snap.mdb_persist_chunk_max_puts = 64;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "tiny.mdb",
+               "CREATE TABLE(tc)\n"
+               "USE(tc)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(300) + "COUNT\n");
+  ASSERT_TRUE(H.run_script(H.root / "tiny.mdb")) << H.err;
+  const auto frames = wal_stdbbw1_payloads(H.root / "_data");
+  EXPECT_GE(frames.size(), 3u) << frames.size();
+  H.shutdown_session();
+
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_TRUE(eng2.startup(&err)) << err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &err)) << err;
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(tc)", &log2, false, false, &err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=300"), std::string::npos) << join_logs(log2);
+  client2.close();
+  eng2.shutdown();
+}
+
+namespace {
+
+std::string read_wal_file_bytes(const fs::path& data_dir) {
+  const fs::path wal = data_dir / "wal.log";
+  std::ifstream in(wal, std::ios::binary);
+  EXPECT_TRUE(in.is_open()) << wal;
+  return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+void rewrite_wal_file_bytes(const fs::path& data_dir, const std::string& bytes) {
+  const fs::path wal = data_dir / "wal.log";
+  std::ofstream out(wal, std::ios::binary | std::ios::trunc);
+  ASSERT_TRUE(out.is_open()) << wal;
+  if (!bytes.empty()) out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  ASSERT_TRUE(static_cast<bool>(out));
+}
+
+void wal_append_corrupt_length_prefixed_record(std::string* wal_bytes) {
+  const std::uint32_t le = 3;
+  wal_bytes->append(reinterpret_cast<const char*>(&le), sizeof(le));
+  wal_bytes->append("xx\n", 3);
+}
+
+bool cold_restart_table_count(const fs::path& session_path, structdb::facade::EngineConfigSnapshot snap,
+                              std::string_view table, std::string_view expect_substr, std::string* err_out) {
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  if (!eng.startup(&err)) {
+    if (err_out) *err_out = err;
+    return false;
+  }
+  structdb::client::EmbedClient client(eng);
+  if (!client.open(session_path, &err)) {
+    eng.shutdown();
+    if (err_out) *err_out = err;
+    return false;
+  }
+  structdb::client::mdb::MdbInteractiveSession session;
+  std::vector<std::string> log;
+  const std::string use_line = std::string("USE(") + std::string(table) + ")";
+  if (!structdb::client::mdb::mdb_repl_execute_line(eng, client, session, use_line, &log, false, false, &err).ok) {
+    client.close();
+    eng.shutdown();
+    if (err_out) *err_out = err;
+    return false;
+  }
+  log.clear();
+  if (!structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "COUNT", &log, false, false, &err).ok) {
+    client.close();
+    eng.shutdown();
+    if (err_out) *err_out = err;
+    return false;
+  }
+  const bool ok = join_logs(log).find(expect_substr) != std::string::npos;
+  client.close();
+  eng.shutdown();
+  if (err_out && !ok) *err_out = "expected " + std::string(expect_substr) + " in:\n" + join_logs(log);
+  return ok;
+}
+
+bool run_bulk_script_then_cold_count(const fs::path& root, structdb::facade::EngineConfigSnapshot snap,
+                                     std::string_view script_body, std::string_view table,
+                                     std::string_view expect_count_substr) {
+  fs::remove_all(root);
+  snap.data_dir = (root / "_data").string();
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  if (!eng.startup(&err)) return false;
+  structdb::client::EmbedClient client(eng);
+  if (!client.open(root / "session", &err)) {
+    eng.shutdown();
+    return false;
+  }
+  write_script(root / "run.mdb", script_body);
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = root / "run.mdb";
+  if (!structdb::client::mdb::run_mdb_script(eng, client, opt).ok) {
+    client.close();
+    eng.shutdown();
+    return false;
+  }
+  client.close();
+  eng.shutdown();
+  return cold_restart_table_count(root / "session", snap, table, expect_count_substr, &err);
+}
+
+}  // namespace
+
+/// BULKINSERTFAST 参数个数 / 重复主键：须失败且不落盘。
+TEST(Mdb, Phase40FailureBulkFastArityAndDuplicate) {
+  Phase40StrictHarness H("mdb_p40_fail_bulk_parse");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.repl("CREATE TABLE(pf)").ok);
+  ASSERT_TRUE(H.repl("USE(pf)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int,v:int)").ok);
+  const auto bad_arity = H.repl("BULKINSERTFAST(1,1)");
+  EXPECT_FALSE(bad_arity.ok);
+  EXPECT_NE(bad_arity.last_error.find("arity"), std::string::npos) << bad_arity.last_error;
+  const auto bad_dup = H.repl("BULKINSERTFAST(1,1,1|2,2,2|2,2,2)");
+  EXPECT_FALSE(bad_dup.ok);
+  EXPECT_NE(bad_dup.last_error.find("duplicate"), std::string::npos) << bad_dup.last_error;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  // 逐行校验；第三行重复 id 时前两行已写入 session（非原子批）。
+  EXPECT_NE(join_logs(H.log).find("rows=2"), std::string::npos) << join_logs(H.log);
+  H.shutdown_session();
+}
+
+/// 分块 persist 后 WAL 尾部残缺字节：应忽略并完整重放。
+TEST(Mdb, Phase40RecoveryWalTailAfterChunkedBulk) {
+  Phase40StrictHarness H("mdb_p40_rec_wal_tail");
+  H.snap.mdb_persist_chunk_max_puts = 16;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "tail.mdb",
+               "CREATE TABLE(tail)\n"
+               "USE(tail)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(48) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "tail.mdb")) << H.err;
+  ASSERT_GT(H.eng.storage()->wal_log_bytes_on_disk(), 0u);
+  std::string wal_snap = read_wal_file_bytes(H.root / "_data");
+  ASSERT_FALSE(wal_snap.empty());
+  H.client.close();
+  H.eng.shutdown();
+  wal_snap.push_back(static_cast<char>(0x7f));
+  rewrite_wal_file_bytes(H.root / "_data", wal_snap);
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(H.root / "session", H.snap, "tail", "rows=48", &err)) << err;
+}
+
+/// 分块 persist 后追加非法 WAL 帧：引擎 startup 须拒绝。
+TEST(Mdb, Phase40FailureWalCorruptAfterChunkedPersist) {
+  Phase40StrictHarness H("mdb_p40_fail_wal_corrupt");
+  H.snap.mdb_persist_chunk_max_puts = 8;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "bad.mdb",
+               "CREATE TABLE(bad)\n"
+               "USE(bad)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(24) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "bad.mdb")) << H.err;
+  ASSERT_GT(H.eng.storage()->wal_log_bytes_on_disk(), 0u);
+  std::string wal_snap = read_wal_file_bytes(H.root / "_data");
+  ASSERT_FALSE(wal_snap.empty());
+  H.client.close();
+  H.eng.shutdown();
+  wal_append_corrupt_length_prefixed_record(&wal_snap);
+  rewrite_wal_file_bytes(H.root / "_data", wal_snap);
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  std::string err;
+  ASSERT_FALSE(eng2.startup(&err)) << err;
+  EXPECT_NE(err.find("missing '='"), std::string::npos) << err;
+}
+
+/// 脚本 EOF persist 后不做 memtable flush：仅靠 WAL 重放恢复行数。
+TEST(Mdb, Phase40RecoveryWalReplayWithoutMemtableFlush) {
+  Phase40StrictHarness H("mdb_p40_rec_wal_only");
+  H.snap.mdb_persist_chunk_max_puts = 32;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "walonly.mdb",
+               "CREATE TABLE(wo)\n"
+               "USE(wo)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(80) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "walonly.mdb")) << H.err;
+  ASSERT_GT(H.eng.storage()->wal_log_bytes_on_disk(), 0u);
+  H.shutdown_session();
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(H.root / "session", H.snap, "wo", "rows=80", &err)) << err;
+}
+
+/// bulk + FLUSH + memtable flush（WAL trim）后从 SST 冷启动 COUNT。
+TEST(Mdb, Phase40RecoverySstAfterWalTrim) {
+  Phase40StrictHarness H("mdb_p40_rec_sst_trim");
+  H.snap.wal_auto_trim_prefix_after_flush = true;
+  H.snap.mdb_persist_chunk_max_puts = 64;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "trim.mdb",
+               "CREATE TABLE(tr)\n"
+               "USE(tr)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(120) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "trim.mdb")) << H.err;
+  ASSERT_TRUE(H.eng.storage()->flush_memtable(&H.err)) << H.err;
+  EXPECT_EQ(H.eng.storage()->wal_log_bytes_on_disk(), 0u);
+  H.shutdown_session();
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(H.root / "session", H.snap, "tr", "rows=120", &err)) << err;
+}
+
+/// 事务内 bulk（REPL 立即 persist）+ `mdb_chain_rollback_on_mdb_rollback`：ROLLBACK 回滚 session 与存储。
+TEST(Mdb, Phase40StrictTxnRollbackDiscardsBulk) {
+  Phase40StrictHarness H("mdb_p40_txn_rb_bulk");
+  H.snap.mdb_chain_rollback_on_mdb_rollback = true;
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.repl("CREATE TABLE(rb)").ok);
+  ASSERT_TRUE(H.repl("USE(rb)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int)").ok);
+  ASSERT_TRUE(H.repl("BEGIN").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_rows(60)).ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=60"), std::string::npos) << join_logs(H.log);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("ROLLBACK").ok);
+  EXPECT_NE(join_logs(H.log).find("[ROLLBACK] rolled back"), std::string::npos) << join_logs(H.log);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=0"), std::string::npos) << join_logs(H.log);
+  H.shutdown_session();
+}
+
+/// `mdb_incremental_persist` 开/关 + 大 bulk：冷启动 COUNT/WHERE 等价。
+TEST(Mdb, Phase40IntegrationIncrementalPersistBulkParity) {
+  const std::string script =
+      "CREATE TABLE(inc)\n"
+      "USE(inc)\n"
+      "DEFATTR(id:int,s:string)\n" +
+      bulkinsertfast_line_id_string(1, 120) + "FLUSH PERSIST\n";
+
+  auto verify = [&](const fs::path& root, bool incremental) {
+    structdb::facade::EngineConfigSnapshot snap;
+    snap.mdb_bulk_persist_plain_rows = true;
+    snap.mdb_incremental_persist = incremental;
+    snap.mdb_persist_chunk_max_puts = 32;
+    ASSERT_TRUE(run_bulk_script_then_cold_count(root, snap, script, "inc", "rows=120"));
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "session", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "USE(inc)", &log, false, false, &err).ok);
+    log.clear();
+    ASSERT_TRUE(
+        structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "WHERE(id,=,77)", &log, false, false, &err).ok);
+    EXPECT_NE(join_logs(log).find("matched 1"), std::string::npos) << join_logs(log);
+    client.close();
+    eng.shutdown();
+  };
+
+  verify(temp_dir("mdb_p40_inc_on"), true);
+  verify(temp_dir("mdb_p40_inc_off"), false);
+}
+
+/// coalesce + 脚本 bulk：FLUSH 后重启 COUNT。
+TEST(Mdb, Phase40IntegrationCoalesceBulkRestart) {
+  const auto root = temp_dir("mdb_p40_coalesce_bulk");
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  snap.mdb_persist_coalesce = true;
+  snap.mdb_bulk_persist_plain_rows = true;
+  snap.mdb_persist_chunk_max_puts = 48;
+  const std::string script =
+      "CREATE TABLE(cc)\n"
+      "USE(cc)\n"
+      "DEFATTR(id:int)\n" +
+      bulkinsertfast_rows(90) + "FLUSH PERSIST\n";
+  fs::remove_all(root);
+  structdb::facade::Engine eng;
+  eng.config().update(1, snap);
+  std::string err;
+  ASSERT_TRUE(eng.startup(&err)) << err;
+  structdb::client::EmbedClient client(eng);
+  ASSERT_TRUE(client.open(root / "session", &err)) << err;
+  write_script(root / "cc.mdb", script);
+  structdb::client::mdb::MdbRunOptions opt;
+  opt.script_path = root / "cc.mdb";
+  opt.persist_coalesce = true;
+  ASSERT_TRUE(structdb::client::mdb::run_mdb_script(eng, client, opt).ok);
+  client.close();
+  eng.shutdown();
+  ASSERT_TRUE(cold_restart_table_count(root / "session", snap, "cc", "rows=90", &err)) << err;
+}
+
+/// `storage_embed_batch_max_frame_bytes` 与 MDB 分块 persist 叠加：多帧 + 冷启动。
+TEST(Mdb, Phase40IntegrationEmbedBatchSplitBulkRestart) {
+  Phase40StrictHarness H("mdb_p40_embed_split");
+  H.snap.storage_embed_batch_max_frame_bytes = 384;
+  H.snap.mdb_persist_chunk_max_puts = 128;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "split.mdb",
+               "CREATE TABLE(sp)\n"
+               "USE(sp)\n"
+               "DEFATTR(id:int,s:string)\n" +
+                   bulkinsertfast_line_id_string(1, 100) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "split.mdb")) << H.err;
+  EXPECT_GT(wal_stdbbw1_payloads(H.root / "_data").size(), 2u);
+  H.shutdown_session();
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(H.root / "session", H.snap, "sp", "rows=100", &err)) << err;
+}
+
+/// `memtable_bulk_put_enabled` 与默认路径冷启动 COUNT 一致。
+TEST(Mdb, Phase40IntegrationMemtableBulkPutRestart) {
+  const std::string script =
+      "CREATE TABLE(mb)\n"
+      "USE(mb)\n"
+      "DEFATTR(id:int)\n" +
+      bulkinsertfast_rows(256) + "FLUSH PERSIST\n";
+  structdb::facade::EngineConfigSnapshot snap_base;
+  snap_base.mdb_bulk_persist_plain_rows = true;
+  snap_base.mdb_persist_chunk_max_puts = 64;
+  structdb::facade::EngineConfigSnapshot snap_bulk = snap_base;
+  snap_bulk.memtable_bulk_put_enabled = true;
+  const auto root_base = temp_dir("mdb_p40_mem_base");
+  const auto root_bulk = temp_dir("mdb_p40_mem_bulk");
+  ASSERT_TRUE(run_bulk_script_then_cold_count(root_base, snap_base, script, "mb", "rows=256"));
+  ASSERT_TRUE(run_bulk_script_then_cold_count(root_bulk, snap_bulk, script, "mb", "rows=256"));
+}
+
+/// bulk persist 后 embed `save_checkpoint`，关会话再开仍可读 COUNT。
+TEST(Mdb, Phase40IntegrationCheckpointAfterBulkPersist) {
+  Phase40StrictHarness H("mdb_p40_ckpt_bulk");
+  H.snap.mdb_persist_chunk_max_puts = 32;
+  ASSERT_TRUE(H.start()) << H.err;
+  write_script(H.root / "ck.mdb",
+               "CREATE TABLE(ck)\n"
+               "USE(ck)\n"
+               "DEFATTR(id:int)\n" +
+                   bulkinsertfast_rows(70) + "FLUSH PERSIST\n");
+  ASSERT_TRUE(H.run_script(H.root / "ck.mdb")) << H.err;
+  ASSERT_TRUE(H.client.save_checkpoint(&H.err)) << H.err;
+  const auto ack0 = H.client.last_ack_seq();
+  const auto ckpt0 = H.client.last_engine_checkpoint_seq();
+  EXPECT_TRUE(fs::exists(H.root / "session" / structdb::client::kEmbedSessionArtifactsDir / "session.ckpt"));
+  H.shutdown_session();
+  structdb::facade::Engine eng2;
+  eng2.config().update(1, H.snap);
+  ASSERT_TRUE(eng2.startup(&H.err)) << H.err;
+  structdb::client::EmbedClient client2(eng2);
+  ASSERT_TRUE(client2.open(H.root / "session", &H.err)) << H.err;
+  EXPECT_EQ(client2.last_ack_seq(), ack0);
+  EXPECT_EQ(client2.last_engine_checkpoint_seq(), ckpt0);
+  structdb::client::mdb::MdbInteractiveSession session2;
+  std::vector<std::string> log2;
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(ck)", &log2, false, false, &H.err).ok);
+  log2.clear();
+  ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, &H.err).ok);
+  EXPECT_NE(join_logs(log2).find("rows=70"), std::string::npos) << join_logs(log2);
+  client2.close();
+  eng2.shutdown();
+}
+
+/// IMPORT MODE + 分块 + 事务 ROLLBACK TO：与既有嵌套 bulk 测试互补，验证导入提示下回滚可恢复基线。
+TEST(Mdb, Phase40IntegrationImportModeTxnRollbackToRestart) {
+  Phase40StrictHarness H("mdb_p40_import_rb");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.repl("CREATE TABLE(imr)").ok);
+  ASSERT_TRUE(H.repl("USE(imr)").ok);
+  ASSERT_TRUE(H.repl("DEFATTR(id:int)").ok);
+  ASSERT_TRUE(H.repl("INSERT(1,1)").ok);
+  ASSERT_TRUE(H.repl("IMPORT MODE ON").ok);
+  ASSERT_TRUE(H.repl("BEGIN").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_line_int_col(2, 40)).ok);
+  ASSERT_TRUE(H.repl("SAVEPOINT s0").ok);
+  ASSERT_TRUE(H.repl(bulkinsertfast_line_int_col(50, 30)).ok);
+  ASSERT_TRUE(H.repl("ROLLBACK TO SAVEPOINT s0").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("rows=41"), std::string::npos) << join_logs(H.log);
+  ASSERT_TRUE(H.repl("COMMIT").ok);
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  H.shutdown_session();
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(H.root / "session", H.snap, "imr", "rows=41", &err)) << err;
+}
+
+TEST(Mdb, Phase41DurabilitySetAndShowTuning) {
+  TxnChainStrictRepl H("mdb_p41_dur");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tdur", "DEFATTR(x:string)"));
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SET DURABILITY 1").ok);
+  ASSERT_TRUE(H.repl("SHOW TUNING").ok);
+  EXPECT_NE(join_logs(H.log).find("session_durability_level=1"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase41DurabilityNotSupportedHint) {
+  TxnChainStrictRepl H("mdb_p41_walsync");
+  ASSERT_TRUE(H.start()) << H.err;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("WALSYNC ON").ok);
+  const std::string out = join_logs(H.log);
+  EXPECT_NE(out.find("[NOT_SUPPORTED]"), std::string::npos);
+  EXPECT_NE(out.find("SET DURABILITY"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase41AlterTableAddColumn) {
+  TxnChainStrictRepl H("mdb_p41_addcol");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tac", "DEFATTR(a:string)"));
+  ASSERT_TRUE(H.repl("INSERT(1,x)").ok);
+  ASSERT_TRUE(H.repl("ALTER TABLE ADD COLUMN (b:int)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,y,7)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(require_single_log_line(H.log, "[COUNT]").find("rows=2"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase41AlterTableRenameColumn) {
+  TxnChainStrictRepl H("mdb_p41_rencol");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("trc", "DEFATTR(id:int,oldname:int)"));
+  ASSERT_TRUE(H.repl("ALTER TABLE RENAME COLUMN (oldname,newname)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SHOW ATTR").ok);
+  EXPECT_NE(join_logs(H.log).find("newname"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase41DropRenameAtomicSmoke) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_p41_rename_atomic");
+  fs::remove_all(root);
+  {
+    structdb::facade::Engine eng;
+    structdb::facade::EngineConfigSnapshot snap;
+    snap.data_dir = (root / "_data").string();
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "sess", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false,
+                                                          nullptr);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(ra)").ok);
+    ASSERT_TRUE(run("USE(ra)").ok);
+    ASSERT_TRUE(run("DEFATTR(k:string)").ok);
+    ASSERT_TRUE(run("INSERT(1,one)").ok);
+    ASSERT_TRUE(run("RENAME TABLE(rb)").ok);
+    client.close();
+    eng.shutdown();
+  }
+  {
+    structdb::facade::Engine eng2;
+    structdb::facade::EngineConfigSnapshot snap2;
+    snap2.data_dir = (root / "_data").string();
+    eng2.config().update(1, snap2);
+    std::string err;
+    ASSERT_TRUE(eng2.startup(&err)) << err;
+    structdb::client::EmbedClient client2(eng2);
+    ASSERT_TRUE(client2.open(root / "sess", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session2;
+    std::vector<std::string> log2;
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "USE(rb)", &log2, false, false,
+                                                             nullptr)
+                    .ok);
+    log2.clear();
+    ASSERT_TRUE(
+        structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "COUNT", &log2, false, false, nullptr)
+            .ok);
+    EXPECT_NE(require_single_log_line(log2, "[COUNT]").find("rows=1"), std::string::npos);
+    client2.close();
+    eng2.shutdown();
+  }
+}
+
+TEST(Mdb, Phase41CreateIndexExplainWhere) {
+  TxnChainStrictRepl H("mdb_p41_cidx");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tix", "DEFATTR(id:int,tag:string)"));
+  for (int i = 1; i <= 50; ++i) {
+    ASSERT_TRUE(H.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + ",t" + std::to_string(i) + ")").ok);
+  }
+  ASSERT_TRUE(H.repl("CREATE INDEX idx_tag ON tix(tag)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("EXPLAIN WHERE(tag,=,t25)").ok);
+  EXPECT_NE(join_logs(H.log).find("named_index=idx_tag"), std::string::npos);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("WHERE(tag,=,t25)").ok);
+  EXPECT_NE(join_logs(H.log).find("matched 1 /"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase41DurabilityColdRestart) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_p41_dur_cold");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  {
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "session", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, &err);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(dc)").ok);
+    ASSERT_TRUE(run("USE(dc)").ok);
+    ASSERT_TRUE(run("DEFATTR(k:string)").ok);
+    ASSERT_TRUE(run("SET DURABILITY 2").ok);
+    ASSERT_TRUE(run("INSERT(1,a)").ok);
+    ASSERT_TRUE(run("FLUSH PERSIST").ok);
+    client.close();
+    eng.shutdown();
+  }
+  std::string err;
+  ASSERT_TRUE(cold_restart_table_count(root / "session", snap, "dc", "rows=1", &err)) << err;
+  {
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    ASSERT_TRUE(eng2.startup(&err)) << err;
+    structdb::client::EmbedClient client2(eng2);
+    ASSERT_TRUE(client2.open(root / "session", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session2;
+    std::vector<std::string> log2;
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, "SHOW TUNING", &log2, false,
+                                                             false, &err)
+                    .ok);
+    EXPECT_EQ(join_logs(log2).find("session_durability_level=2"), std::string::npos);
+    client2.close();
+    eng2.shutdown();
+  }
+}
+
+TEST(Mdb, Phase41IndexColdRestart) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_p41_idx_cold");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  {
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "session", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, &err);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(tic)").ok);
+    ASSERT_TRUE(run("USE(tic)").ok);
+    ASSERT_TRUE(run("DEFATTR(id:int,tag:string)").ok);
+    ASSERT_TRUE(run("INSERT(1,1,t1)").ok);
+    ASSERT_TRUE(run("INSERT(2,2,t2)").ok);
+    ASSERT_TRUE(run("CREATE INDEX ix ON tic(tag)").ok);
+    client.close();
+    eng.shutdown();
+  }
+  {
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "session", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    ASSERT_TRUE(structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "USE(tic)", &log, false, false, &err)
+                    .ok);
+    log.clear();
+    ASSERT_TRUE(
+        structdb::client::mdb::mdb_repl_execute_line(eng, client, session, "WHERE(tag,=,t2)", &log, false, false, &err)
+            .ok);
+    EXPECT_NE(join_logs(log).find("matched 1 /"), std::string::npos);
+    client.close();
+    eng.shutdown();
+  }
+}
+
+TEST(Mdb, Phase41DropRenameCrashOldTableGone) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_p41_rn_crash");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  {
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "sess", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, &err);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(ra)").ok);
+    ASSERT_TRUE(run("USE(ra)").ok);
+    ASSERT_TRUE(run("DEFATTR(k:string)").ok);
+    ASSERT_TRUE(run("INSERT(1,x)").ok);
+    ASSERT_TRUE(run("RENAME TABLE(rb)").ok);
+    client.close();
+    eng.shutdown();
+  }
+  {
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng2.startup(&err)) << err;
+    structdb::client::EmbedClient client2(eng2);
+    ASSERT_TRUE(client2.open(root / "sess", &err)) << err;
+    structdb::client::mdb::MdbInteractiveSession session2;
+    std::vector<std::string> log2;
+    auto run2 = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng2, client2, session2, line, &log2, false, false, &err);
+    };
+    log2.clear();
+    ASSERT_TRUE(run2("LIST TABLES").ok);
+    const std::string listed = join_logs(log2);
+    EXPECT_NE(listed.find("[TABLE] rb"), std::string::npos);
+    EXPECT_EQ(listed.find("[TABLE] ra"), std::string::npos);
+    log2.clear();
+    const auto use_ra = run2("USE(ra)");
+    EXPECT_FALSE(use_ra.ok);
+    client2.close();
+    eng2.shutdown();
+  }
+}
+
+TEST(Mdb, Phase42GroupByCountAndSum) {
+  TxnChainStrictRepl H("mdb_p42_gb");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tg", "DEFATTR(dept:string,val:int)"));
+  ASSERT_TRUE(H.repl("INSERT(1,A,10)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,A,20)").ok);
+  ASSERT_TRUE(H.repl("INSERT(3,B,5)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("GROUP BY (dept) COUNT").ok);
+  const std::string gc = join_logs(H.log);
+  EXPECT_NE(gc.find("[GROUP BY] groups=2"), std::string::npos);
+  EXPECT_NE(gc.find("key=A count=2"), std::string::npos);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("GROUP BY (dept) SUM(val)").ok);
+  const std::string gs = join_logs(H.log);
+  EXPECT_NE(gs.find("key=A"), std::string::npos);
+  EXPECT_NE(gs.find("sum=30"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase42ScanIndexOrder) {
+  TxnChainStrictRepl H("mdb_p42_scanidx");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("ts", "DEFATTR(id:int,k:string)"));
+  ASSERT_TRUE(H.repl("INSERT(3,3,c)").ok);
+  ASSERT_TRUE(H.repl("INSERT(1,1,a)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,2,b)").ok);
+  ASSERT_TRUE(H.repl("CREATE INDEX ik ON ts(k)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SCAN INDEX(ik)").ok) << H.err;
+  const std::string out = join_logs(H.log);
+  EXPECT_NE(out.find("[SCAN INDEX]"), std::string::npos);
+  EXPECT_NE(out.find("rows_shown="), std::string::npos);
+  EXPECT_EQ(out.find("rows_shown=0"), std::string::npos) << out;
+  EXPECT_NE(out.find("order=index_key"), std::string::npos);
+  EXPECT_NE(out.find(" k="), std::string::npos) << out;
+  H.close();
+}
+
+TEST(Mdb, ParseScanIndexSpecUnit) {
+  structdb::client::mdb::MdbScanIndexSpec spec;
+  std::string err;
+  EXPECT_TRUE(structdb::client::mdb::parse_scan_index_spec({"ik"}, &spec, &err));
+  EXPECT_EQ(spec.index_name, "ik");
+  EXPECT_EQ(spec.emit, structdb::client::mdb::MdbScanIndexEmit::FullRow);
+  EXPECT_EQ(spec.max_rows, 5000u);
+
+  EXPECT_TRUE(structdb::client::mdb::parse_scan_index_spec({"ik", "STATS"}, &spec, &err));
+  EXPECT_EQ(spec.emit, structdb::client::mdb::MdbScanIndexEmit::StatsOnly);
+
+  EXPECT_TRUE(structdb::client::mdb::parse_scan_index_spec({"ik", "100", "IDS"}, &spec, &err));
+  EXPECT_EQ(spec.emit, structdb::client::mdb::MdbScanIndexEmit::IdsOnly);
+  EXPECT_EQ(spec.max_rows, 100u);
+
+  EXPECT_TRUE(structdb::client::mdb::parse_scan_index_spec({"ik", "5000", "STATS"}, &spec, &err));
+  EXPECT_EQ(spec.emit, structdb::client::mdb::MdbScanIndexEmit::StatsOnly);
+  EXPECT_EQ(spec.max_rows, 5000u);
+
+  EXPECT_FALSE(structdb::client::mdb::parse_scan_index_spec({"ik", "STATS", "IDS"}, &spec, &err));
+}
+
+TEST(Mdb, Phase42ScanIndexStatsAndIds) {
+  TxnChainStrictRepl H("mdb_p42_scan_modes");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("ts", "DEFATTR(id:int,k:string)"));
+  ASSERT_TRUE(H.repl("INSERT(1,1,a)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,2,b)").ok);
+  ASSERT_TRUE(H.repl("CREATE INDEX ik ON ts(k)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SCAN INDEX(ik,STATS)").ok) << H.err;
+  const std::string stats = join_logs(H.log);
+  EXPECT_NE(stats.find("mode=stats"), std::string::npos) << stats;
+  EXPECT_NE(stats.find("rows_shown=2"), std::string::npos) << stats;
+  EXPECT_EQ(stats.find(" k="), std::string::npos) << stats;
+
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SCAN INDEX(ik,1,STATS)").ok) << H.err;
+  const std::string stats_cap = join_logs(H.log);
+  EXPECT_NE(stats_cap.find("mode=stats"), std::string::npos) << stats_cap;
+  EXPECT_NE(stats_cap.find("rows_shown=1"), std::string::npos) << stats_cap;
+
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SCAN INDEX(ik,IDS)").ok) << H.err;
+  const std::string ids = join_logs(H.log);
+  EXPECT_NE(ids.find("mode=ids"), std::string::npos) << ids;
+  EXPECT_NE(ids.find("  id=1"), std::string::npos) << ids;
+  EXPECT_NE(ids.find("  id=2"), std::string::npos) << ids;
+  EXPECT_EQ(ids.find(" k="), std::string::npos) << ids;
+  H.close();
+}
+
+TEST(Mdb, Phase43RecoverCheckpointSeqSmoke) {
+  namespace fs = std::filesystem;
+  const auto root = temp_dir("mdb_p43_recover");
+  fs::remove_all(root);
+  structdb::facade::EngineConfigSnapshot snap;
+  snap.data_dir = (root / "_data").string();
+  std::uint64_t seq_after_first = 0;
+  {
+    structdb::facade::Engine eng;
+    eng.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng.startup(&err)) << err;
+    structdb::client::EmbedClient client(eng);
+    ASSERT_TRUE(client.open(root / "session", &err)) << err;
+    auto* st = eng.storage();
+    ASSERT_NE(st, nullptr);
+    structdb::client::mdb::MdbInteractiveSession session;
+    std::vector<std::string> log;
+    auto run = [&](const char* line) {
+      return structdb::client::mdb::mdb_repl_execute_line(eng, client, session, line, &log, false, false, &err);
+    };
+    ASSERT_TRUE(run("CREATE TABLE(pr)").ok);
+    ASSERT_TRUE(run("USE(pr)").ok);
+    ASSERT_TRUE(run("DEFATTR(k:string)").ok);
+    ASSERT_TRUE(run("INSERT(1,one)").ok);
+    ASSERT_TRUE(run("FLUSH PERSIST").ok);
+    ASSERT_TRUE(st->flush_memtable(&err)) << err;
+    log.clear();
+    ASSERT_TRUE(run("SHOW CHECKPOINTS").ok);
+    EXPECT_NE(join_logs(log).find("[CHECKPOINT]"), std::string::npos);
+    std::vector<structdb::storage::CheckpointChainEntry> chain0;
+    ASSERT_TRUE(structdb::storage::checkpoint_chain_read_all(root / "_data", &chain0, &err)) << err;
+    ASSERT_FALSE(chain0.empty());
+    seq_after_first = chain0.back().checkpoint_seq;
+    ASSERT_GE(seq_after_first, 1u);
+    ASSERT_TRUE(run("INSERT(2,two)").ok);
+    ASSERT_TRUE(run("FLUSH PERSIST").ok);
+    client.close();
+    eng.shutdown();
+  }
+  {
+    structdb::facade::Engine eng2;
+    eng2.config().update(1, snap);
+    std::string err;
+    ASSERT_TRUE(eng2.recover_to_checkpoint_seq(seq_after_first, &err)) << err;
+  }
+}
+
+TEST(Mdb, Phase45DropIndex) {
+  TxnChainStrictRepl H("mdb_p45_dropidx");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("td", "DEFATTR(id:int,k:string)"));
+  ASSERT_TRUE(H.repl("INSERT(1,1,a)").ok);
+  ASSERT_TRUE(H.repl("CREATE INDEX ik ON td(k)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("EXPLAIN WHERE(k,=,a)").ok);
+  const std::string before = join_logs(H.log);
+  EXPECT_NE(before.find("index_hint=named_index=ik"), std::string::npos) << before;
+  ASSERT_TRUE(H.repl("DROP INDEX ik ON td").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("EXPLAIN WHERE(k,=,a)").ok);
+  const std::string after = join_logs(H.log);
+  EXPECT_EQ(after.find("index_hint=named_index=ik"), std::string::npos) << after;
+  H.close();
+}
+
+TEST(Mdb, Phase45UniqueIndexInsertConflict) {
+  TxnChainStrictRepl H("mdb_p45_uq");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tu", "DEFATTR(id:int,k:string)"));
+  ASSERT_TRUE(H.repl("INSERT(1,1,1)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,2,1)").ok);
+  ASSERT_FALSE(H.repl("CREATE UNIQUE INDEX uk ON tu(k)").ok);
+  H.close();
+}
+
+TEST(Mdb, Phase44ImportSegmentTwoSegments) {
+  TxnChainStrictRepl H("mdb_p44_seg");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("ti", "DEFATTR(id:int)"));
+  ASSERT_TRUE(H.repl("IMPORT MODE ON").ok);
+  ASSERT_TRUE(H.repl("IMPORT SEGMENT (1)").ok);
+  ASSERT_TRUE(H.repl("BULKINSERTFAST(1,1)").ok);
+  ASSERT_TRUE(H.repl("IMPORT SEGMENT (2)").ok);
+  ASSERT_TRUE(H.repl("BULKINSERTFAST(2,2)").ok);
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  ASSERT_TRUE(H.repl("IMPORT MODE OFF").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("COUNT").ok);
+  EXPECT_NE(join_logs(H.log).find("[COUNT] rows=2"), std::string::npos) << join_logs(H.log);
+  H.close();
+}
+
+TEST(Mdb, Phase42OrderByPageJson) {
+  TxnChainStrictRepl H("mdb_p42_page");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tp", "DEFATTR(id:int,v:int)"));
+  ASSERT_TRUE(H.repl("INSERT(3,3,30)").ok);
+  ASSERT_TRUE(H.repl("INSERT(1,1,10)").ok);
+  ASSERT_TRUE(H.repl("INSERT(2,2,20)").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("PAGE_JSON(1,10,v,desc)").ok);
+  const std::string out = join_logs(H.log);
+  EXPECT_NE(out.find("[PAGE_JSON]"), std::string::npos);
+  EXPECT_NE(out.find("30"), std::string::npos);
+  H.close();
+}
+
+TEST(Mdb, Phase47AggCacheSumAndGroupBy) {
+  TxnChainStrictRepl H("mdb_p47_agg");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("ta", "DEFATTR(id:int,dept:int,val:int)"));
+  for (int i = 1; i <= 50; ++i) {
+    const int dept = i % 5;
+    ASSERT_TRUE(H.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + "," + std::to_string(dept) + "," +
+                      std::to_string(i * 10) + ")")
+                    .ok);
+  }
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SUM(val)").ok) << H.err;
+  const std::string sum_out = join_logs(H.log);
+  EXPECT_NE(sum_out.find("[SUM] val=12750"), std::string::npos) << sum_out;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("GROUP BY (dept) COUNT").ok);
+  const std::string gb = join_logs(H.log);
+  EXPECT_NE(gb.find("[GROUP BY] groups=5"), std::string::npos) << gb;
+  EXPECT_NE(gb.find("count=10"), std::string::npos) << gb;
+  H.close();
+}
+
+TEST(Mdb, AggCacheQbalIntGeUnit) {
+  structdb::client::mdb::LogicalTable t;
+  t.name = "u";
+  t.schema = {{"id", "int"}, {"val", "int"}};
+  t.rows["1"] = {"1", "10"};
+  t.rows["2"] = {"2", "20"};
+  t.rows["3"] = {"3", "30"};
+  structdb::client::mdb::logical_agg_rebuild(&t);
+  ASSERT_TRUE(t.agg_cache.valid);
+
+  long long sum = 0;
+  std::size_t matched = 0;
+  EXPECT_TRUE(structdb::client::mdb::logical_agg_try_qbal_int_ge(t, "val", 0, &sum, &matched));
+  EXPECT_EQ(sum, 60);
+  EXPECT_EQ(matched, 3u);
+
+  EXPECT_FALSE(structdb::client::mdb::logical_agg_try_qbal_int_ge(t, "val", 25, &sum, &matched));
+
+  structdb::client::mdb::logical_agg_invalidate(&t);
+  EXPECT_FALSE(structdb::client::mdb::logical_agg_try_qbal_int_ge(t, "val", 0, &sum, &matched));
+}
+
+TEST(Mdb, Phase47QbalAggCacheFastPathRepl) {
+  TxnChainStrictRepl H("mdb_p47_qbal");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tq", "DEFATTR(id:int,val:int)"));
+  for (int i = 1; i <= 50; ++i) {
+    ASSERT_TRUE(H.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + "," + std::to_string(i * 10) +
+                      ")")
+                    .ok);
+  }
+  ASSERT_TRUE(H.repl("FLUSH PERSIST").ok);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("SUM(val)").ok) << H.err;
+  const std::string sum_out = join_logs(H.log);
+  EXPECT_NE(sum_out.find("[SUM] val=12750"), std::string::npos) << sum_out;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("QBAL(val,0)").ok) << H.err;
+  const std::string qbal_all = join_logs(H.log);
+  EXPECT_NE(qbal_all.find("matched=50"), std::string::npos) << qbal_all;
+  EXPECT_NE(qbal_all.find("sum=12750"), std::string::npos) << qbal_all;
+
+  H.log.clear();
+  ASSERT_TRUE(H.repl("QBAL(val,500)").ok) << H.err;
+  const std::string qbal_part = join_logs(H.log);
+  EXPECT_NE(qbal_part.find("matched=1"), std::string::npos) << qbal_part;
+  EXPECT_NE(qbal_part.find("sum=500"), std::string::npos) << qbal_part;
+  H.close();
+}
+
+TEST(Mdb, Phase46QueryPerfExplainIntIndexAndColSortPage) {
+  TxnChainStrictRepl H("mdb_p46_qperf");
+  ASSERT_TRUE(H.start()) << H.err;
+  ASSERT_TRUE(H.strict_new_table_from_create("tq", "DEFATTR(id:int,dept:int,val:int,k:string)"));
+  for (int i = 1; i <= 200; ++i) {
+    const int dept = i % 10;
+    const int val = 200 - i;
+    ASSERT_TRUE(H.repl("INSERT(" + std::to_string(i) + "," + std::to_string(i) + "," + std::to_string(dept) + "," +
+                      std::to_string(val) + ",t" + std::to_string(i % 5) + ")")
+                    .ok);
+  }
+  H.log.clear();
+  ASSERT_TRUE(H.repl("EXPLAIN WHERE(dept,=,3)").ok) << H.err;
+  const std::string ex = join_logs(H.log);
+  EXPECT_NE(ex.find("index_hint=int_eq_index"), std::string::npos) << ex;
+  EXPECT_NE(ex.find("matched=20"), std::string::npos) << ex;
+  H.log.clear();
+  ASSERT_TRUE(H.repl("WHERE(dept,=,3)").ok);
+  EXPECT_NE(join_logs(H.log).find("matched 20"), std::string::npos);
+  H.log.clear();
+  ASSERT_TRUE(H.repl("PAGE_JSON(11,10,val,desc)").ok) << H.err;
+  const std::string mid = join_logs(H.log);
+  EXPECT_NE(mid.find("[PAGE_JSON]"), std::string::npos);
+  EXPECT_NE(mid.find("99"), std::string::npos) << mid;
+  H.close();
+}
+
+TEST(StorageEngine, Phase43RecoverWalOnlyRowVisible) {
+  namespace mk = structdb::storage::mdb_keyspace;
+  const auto dir = temp_dir("p43_recover_wal");
+  std::filesystem::remove_all(dir);
+  const std::string rk1 = mk::row_key("t43", "1");
+  const std::string rk2 = mk::row_key("t43", "2");
+  std::uint64_t seq1 = 0;
+  {
+    structdb::storage::StorageEngine st(dir / "d");
+    std::string err;
+    ASSERT_TRUE(st.open(&err)) << err;
+    ASSERT_TRUE(st.put(rk1, "v1", false));
+    ASSERT_TRUE(st.flush_memtable(&err)) << err;
+    std::vector<structdb::storage::CheckpointChainEntry> chain;
+    ASSERT_TRUE(structdb::storage::checkpoint_chain_read_all(dir / "d", &chain, &err));
+    ASSERT_FALSE(chain.empty());
+    seq1 = chain.back().checkpoint_seq;
+    ASSERT_TRUE(st.put(rk2, "v2", false));
+    st.close();
+  }
+  std::string err;
+  ASSERT_TRUE(structdb::storage::recover_data_dir_to_checkpoint_seq(dir / "d", seq1, &err)) << err;
+  structdb::storage::StorageEngine st2(dir / "d");
+  ASSERT_TRUE(st2.open(&err)) << err;
+  std::string v;
+  ASSERT_TRUE(st2.get(rk1, &v));
+  EXPECT_EQ(v, "v1");
+  EXPECT_FALSE(st2.get(rk2, &v));
+  st2.close();
 }

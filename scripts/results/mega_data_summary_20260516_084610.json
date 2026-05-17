@@ -1,0 +1,11 @@
+{
+    "timestamp":  "2026-05-16T08:48:42.8212046Z",
+    "benchmark_profile":  "mega_data_mdb_bulk_import_v1",
+    "import_mode":  true,
+    "runtime_pressure_tps_est":  6619.755,
+    "runtime_pressure_batch_ms_p95":  151063,
+    "total_rows":  1000000,
+    "rows_per_bulk_line":  1000,
+    "wall_ms":  151063,
+    "build_dir":  "e:\\db\\StructDB\\build"
+}

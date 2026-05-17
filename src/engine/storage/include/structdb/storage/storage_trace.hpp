@@ -12,5 +12,6 @@ inline constexpr const char kCompactMergeL0[] = "stdb.storage.compact_merge_l0";
 inline constexpr const char kCompactMergeL1ToL2[] = "stdb.storage.compact_merge_l1_to_l2";
 inline constexpr const char kCompactMergeL2ToL3[] = "stdb.storage.compact_merge_l2_to_l3";
 inline constexpr const char kCompactMergeL3ToL4[] = "stdb.storage.compact_merge_l3_to_l4";
+inline constexpr const char kCommitEmbedBatch[] = "stdb.storage.commit_embed_batch";
 
 }  // namespace structdb::storage::trace

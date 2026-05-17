@@ -3,6 +3,7 @@
 #include "structdb/storage/versioned_kv.hpp"
 
 #include <cstdlib>
+#include <new>
 #include <string_view>
 #include <utility>
 
@@ -19,13 +20,19 @@ MemTableSkipList::~MemTableSkipList() {
   head_ = nullptr;
 }
 
+MemTableSkipList::Node* MemTableSkipList::alloc_node(std::string key, std::string value, int height) {
+  void* mem = arena_.allocate(sizeof(Node), alignof(Node));
+  return new (mem) Node(std::move(key), std::move(value), height);
+}
+
 void MemTableSkipList::destroy_all_nodes() {
   Node* p = head_->fwd[0];
   while (p) {
     Node* n = p->fwd[0];
-    delete p;
+    p->~Node();
     p = n;
   }
+  arena_.reset();
   for (int i = 0; i < kMaxHeight; ++i) head_->fwd[static_cast<std::size_t>(i)] = nullptr;
   n_ = 0;
   bytes_ = 0;
@@ -77,7 +84,7 @@ void MemTableSkipList::put(std::string key, std::string value) {
     return;
   }
   const int nh = random_height(key);
-  Node* nn = new Node(std::move(key), std::move(value), nh);
+  Node* nn = alloc_node(std::move(key), std::move(value), nh);
   bytes_ += nn->key.size() + nn->value.size();
   for (int i = 0; i < nh; ++i) {
     nn->fwd[static_cast<std::size_t>(i)] = pred[i]->fwd[static_cast<std::size_t>(i)];

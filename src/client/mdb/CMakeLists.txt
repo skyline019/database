@@ -11,6 +11,11 @@ add_library(structdb_client_mdb STATIC
   src/mdb_ops_txn_log.cpp
   src/mdb_dispatch.cpp
   src/mdb_command_parser.cpp
+  src/mdb_session_flags.cpp
+  src/mdb_session_durability.cpp
+  src/mdb_named_index.cpp
+  src/mdb_ops_aggregate.cpp
+  src/mdb_ops_agg_cache.cpp
 )
 
 target_include_directories(structdb_client_mdb PUBLIC

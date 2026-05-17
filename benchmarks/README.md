@@ -32,3 +32,11 @@
 ## 端到端高压（MDB / 多进程）
 
 与上述微基准不同，仓库另有 **`structdb_app --run-mdb`** 脚本压测（超大批量、多进程并行），见 [`../scripts/bench/README.md`](../scripts/bench/README.md)。
+
+**MDB 查询 / 插入峰值与基线**（100 万行、QBAL / SCAN INDEX 等）：[`MDB_E2E_PEAK_PERFORMANCE.md`](MDB_E2E_PEAK_PERFORMANCE.md)。
+
+| 基线文件 | 用途 |
+|----------|------|
+| [`baselines/mdb_query_complex_baseline.json`](baselines/mdb_query_complex_baseline.json) | 复杂查询 warm **P95** 门禁（`compare_mdb_query_summary.py`） |
+| [`baselines/mdb_bulk_insert_peak.json`](baselines/mdb_bulk_insert_peak.json) | 插入峰值参考（一体加载 / `EngineBulkImport`） |
+| [`baselines/mega_data_baseline.json`](baselines/mega_data_baseline.json) | `mega_data` TPS 下限参考 |

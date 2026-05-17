@@ -213,6 +213,9 @@ type MenuAction =
   | { kind: "txnRecovery" }
   | { kind: "walRecovery" }
   | { kind: "exportBundle" }
+  | { kind: "backupStorageBundle" }
+  | { kind: "recoverCheckpoint" }
+  | { kind: "setDurability" }
   | { kind: "about" }
   | { kind: "settings" }
   | { kind: "createTableWizard" }
@@ -274,6 +277,9 @@ const lastShowPlanRaw = ref("");
 const lastCommandErrorCodeNumeric = ref<number | null>(null);
 const walRecoveryText = ref("");
 const exportBundlePath = ref("");
+const coldBackupPath = ref("");
+const mdbDurabilityLevel = ref<number | null>(null);
+const recoverCheckpointSeqInput = ref("1");
 const undoStack = ref<UndoUnit[]>([]);
 const redoStack = ref<UndoUnit[]>([]);
 const txnRecorder = ref<TxnSessionRecorder>({
@@ -1347,7 +1353,14 @@ const helpEntries: Array<{
   { category: "导入导出", command: "IMPORTDIR / EXPORT", syntax: "IMPORTDIR(path) / EXPORT [JSON] path", overloads: ["IMPORTDIR(C:/tmp/mdb_scripts)", "EXPORT out.json", "EXPORT JSON out.json"], example: "EXPORT JSON backup.json", desc: "目录脚本导入与 JSON 导出", detail: "IMPORTDIR 按文件名顺序执行目录下 `*.mdb` 脚本。EXPORT 针对当前 USE 表，写入 JSON 数组；`JSON` 关键字可选，亦可 `EXPORT C:/path/file.json`。" },
   { category: "事务", command: "BEGIN / COMMIT / ROLLBACK", syntax: "BEGIN / COMMIT / ROLLBACK", overloads: ["BEGIN", "COMMIT", "ROLLBACK"], example: "BEGIN", desc: "事务控制", detail: "仅接受单独单词 `BEGIN`，无表名后缀。SAVEPOINT name、ROLLBACK TO SAVEPOINT name、RELEASE SAVEPOINT name（空格分隔，非括号形式）。" },
   { category: "维护", command: "VACUUM / SCAN / RESET / SHOWLOG", syntax: "VACUUM | SCAN | RESET | SHOWLOG", overloads: ["VACUUM", "SCAN", "RESET", "SHOWLOG"], example: "VACUUM", desc: "维护与诊断", detail: "VACUUM：flush_memtable + 受限 L0 drain（PHASE25C）。SCAN 最多扫描 5000 行。RESET 清空当前表数据与 schema（危险）。SHOWLOG 输出会话 journal 尾部。" },
-  { category: "维护", command: "SHOW TUNING / SHOW STORAGE", syntax: "SHOW TUNING | SHOW TUNING JSON | SHOW STORAGE | SHOW STORAGE JSON", overloads: ["SHOW TUNING", "SHOW STORAGE JSON"], example: "SHOW TUNING JSON", desc: "引擎状态与存储压力", detail: "JSON 形态为 StructDB 自有结构；非 newdb runtime_stats。" }
+  { category: "维护", command: "SHOW TUNING / SHOW STORAGE", syntax: "SHOW TUNING | SHOW TUNING JSON | SHOW STORAGE | SHOW STORAGE JSON", overloads: ["SHOW TUNING", "SHOW STORAGE JSON"], example: "SHOW TUNING JSON", desc: "引擎状态与存储压力", detail: "JSON 形态为 StructDB 自有结构；非 newdb runtime_stats。" },
+  { category: "维护", command: "SET DURABILITY", syntax: "SET DURABILITY level", overloads: ["SET DURABILITY 0", "SET DURABILITY 1", "SET DURABILITY 2"], example: "SET DURABILITY 1", desc: "MDB 会话耐久档位（Wave 4）", detail: "0=最快（少 fsync）；1=默认；2=每批/关键写 fsync。GUI「工具」菜单可切换；亦可通过 C API `structdb_mdb_session_set_durability`。" },
+  { category: "维护", command: "SHOW CHECKPOINTS", syntax: "SHOW CHECKPOINTS", overloads: ["SHOW CHECKPOINTS"], example: "SHOW CHECKPOINTS", desc: "列出 checkpoint 链摘要", detail: "输出 seq 与 wal 大小等，用于选择 `RECOVER TO CHECKPOINT_SEQ n` 或 GUI 冷恢复目标。" },
+  { category: "维护", command: "RECOVER TO CHECKPOINT_SEQ", syntax: "RECOVER TO CHECKPOINT_SEQ n", overloads: ["RECOVER TO CHECKPOINT_SEQ 3"], example: "RECOVER TO CHECKPOINT_SEQ 3", desc: "按 checkpoint 序号回滚数据目录（PHASE43）", detail: "会截断 WAL/链至目标 seq；执行前须停写（GUI 冷恢复会自动关闭 embed）。详见 Docs/phases/PHASE43.md 与 BACKUP_RESTORE_RUNBOOK。" },
+  { category: "索引", command: "CREATE INDEX / DROP INDEX", syntax: "CREATE [UNIQUE] INDEX name ON table(col) | DROP INDEX name ON table", overloads: ["CREATE INDEX idx_dept ON users(dept)", "CREATE UNIQUE INDEX u_k ON users(k)", "DROP INDEX idx_dept ON users"], example: "CREATE INDEX idx_dept ON users(dept)", desc: "命名二级索引（PHASE45）", detail: "UNIQUE 在定义中加 `u:` 前缀或 `CREATE UNIQUE INDEX`；重复键 INSERT 报错。`SCAN INDEX name` 按索引键扫描。" },
+  { category: "查询", command: "GROUP BY / ORDER BY / PAGE_JSON", syntax: "GROUP BY(col,...) / ORDER BY(col,asc|desc) / PAGE_JSON(...)", overloads: ["GROUP BY(dept)", "ORDER BY(salary,desc)", "PAGE_JSON(1,10,id,asc)"], example: "GROUP BY(dept)", desc: "分组聚合与 JSON 分页（PHASE42）", detail: "与 WHERE 组合使用；PAGE_JSON 返回 JSON 行集，适合脚本与 GUI 扩展。" },
+  { category: "查询", command: "SCAN INDEX", syntax: "SCAN INDEX index_name", overloads: ["SCAN INDEX idx_dept"], example: "SCAN INDEX idx_dept", desc: "按命名索引扫描", detail: "须已 CREATE INDEX；输出受 SCAN 行数上限约束。" },
+  { category: "导入导出", command: "IMPORT SEGMENT", syntax: "IMPORT SEGMENT (token)", overloads: ["IMPORT SEGMENT (batch_a)", "IMPORT SEGMENT (batch_b)"], example: "IMPORT SEGMENT (seg1)", desc: "分块导入幂等边界（PHASE44）", detail: "换 token 时自动 persist 上一段；idem 键 `idem:import:<table>:seg:<token>`。大批量导入见 scripts/bench/import_segment_two_segments.mdb。" }
 ];
 
 const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
@@ -1358,10 +1371,14 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { section: true, label: "工作区" },
       { label: "设置数据目录...", action: { kind: "workspace" } },
       { label: "导入目录...", action: { kind: "dialog", opType: "generic", title: "导入目录", template: "IMPORTDIR({path})", fields: [{ key: "path", label: "目录路径", value: "C:/tmp/structdb_import" }] } },
+      { label: "IMPORT SEGMENT...", action: { kind: "dialog", opType: "generic", title: "IMPORT SEGMENT", template: "IMPORT SEGMENT ({token})", fields: [{ key: "token", label: "分段 token", value: "batch_a" }] } },
       { divider: true, label: "-" },
       { section: true, label: "导出当前表" },
       { label: "导出 JSON...", action: { kind: "dialog", opType: "generic", title: "导出 JSON", template: "EXPORT JSON {file}", fields: [{ key: "file", label: "导出文件", value: "out.json" }] } },
-      { label: "导出（裸路径）...", action: { kind: "dialog", opType: "generic", title: "EXPORT 路径", template: "EXPORT {file}", fields: [{ key: "file", label: "路径（JSON）", value: "C:/backup/table_dump.json" }] } }
+      { label: "导出（裸路径）...", action: { kind: "dialog", opType: "generic", title: "EXPORT 路径", template: "EXPORT {file}", fields: [{ key: "file", label: "路径（JSON）", value: "C:/backup/table_dump.json" }] } },
+      { divider: true, label: "-" },
+      { section: true, label: "存储冷备（C API 1.9）" },
+      { label: "冷备 data_dir（backup_bundle）...", action: { kind: "backupStorageBundle" } }
     ]
   },
   {
@@ -1409,7 +1426,13 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { section: true, label: "表级维护" },
       { label: "清空表（RESET）", action: { kind: "command", command: "RESET", opType: "generic", title: "RESET" } },
       { label: "整理（VACUUM）", action: { kind: "command", command: "VACUUM", opType: "generic", title: "VACUUM" } },
-      { label: "扫描（SCAN）", action: { kind: "command", command: "SCAN", opType: "generic", title: "SCAN" } }
+      { label: "扫描（SCAN）", action: { kind: "command", command: "SCAN", opType: "generic", title: "SCAN" } },
+      { divider: true, label: "-" },
+      { section: true, label: "索引（PHASE45）" },
+      { label: "创建索引...", action: { kind: "dialog", opType: "generic", title: "CREATE INDEX", template: "CREATE INDEX {name} ON {table}({col})", fields: [{ key: "name", label: "索引名", value: "idx_dept" }, { key: "table", label: "表名", value: "users" }, { key: "col", label: "列", value: "dept" }] } },
+      { label: "创建唯一索引...", action: { kind: "dialog", opType: "generic", title: "CREATE UNIQUE INDEX", template: "CREATE UNIQUE INDEX {name} ON {table}({col})", fields: [{ key: "name", label: "索引名", value: "u_k" }, { key: "table", label: "表名", value: "users" }, { key: "col", label: "列", value: "k" }] } },
+      { label: "删除索引...", action: { kind: "dialog", opType: "generic", title: "DROP INDEX", template: "DROP INDEX {name} ON {table}", fields: [{ key: "name", label: "索引名", value: "idx_dept" }, { key: "table", label: "表名", value: "users" }] } },
+      { label: "扫描索引...", action: { kind: "dialog", opType: "generic", title: "SCAN INDEX", template: "SCAN INDEX {name}", fields: [{ key: "name", label: "索引名", value: "idx_dept" }] } }
     ]
   },
   {
@@ -1434,7 +1457,12 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { label: "求和...", action: { kind: "dialog", opType: "aggregate", title: "求和", template: "SUM({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
       { label: "平均值...", action: { kind: "dialog", opType: "aggregate", title: "平均值", template: "AVG({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
       { label: "最小值...", action: { kind: "dialog", opType: "aggregate", title: "最小值", template: "MIN({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
-      { label: "最大值...", action: { kind: "dialog", opType: "aggregate", title: "最大值", template: "MAX({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } }
+      { label: "最大值...", action: { kind: "dialog", opType: "aggregate", title: "最大值", template: "MAX({attr})", fields: [{ key: "attr", label: "字段", value: "age" }] } },
+      { divider: true, label: "-" },
+      { section: true, label: "分组与 JSON 分页" },
+      { label: "GROUP BY...", action: { kind: "dialog", opType: "generic", title: "GROUP BY", template: "GROUP BY({cols})", fields: [{ key: "cols", label: "列（逗号分隔）", value: "dept" }] } },
+      { label: "ORDER BY...", action: { kind: "dialog", opType: "generic", title: "ORDER BY", template: "ORDER BY({col},{dir})", fields: [{ key: "col", label: "列", value: "id" }, { key: "dir", label: "asc|desc", value: "asc" }] } },
+      { label: "PAGE_JSON...", action: { kind: "dialog", opType: "query_page", title: "PAGE_JSON", template: "PAGE_JSON({page},{size},{order},{dir})", fields: [{ key: "page", label: "页码", value: "1" }, { key: "size", label: "每页", value: "12" }, { key: "order", label: "排序列", value: "id" }, { key: "dir", label: "方向", value: "asc" }] } }
     ]
   },
   {
@@ -1447,7 +1475,9 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { label: "回滚事务", action: { kind: "command", command: "ROLLBACK", opType: "txn_rollback", title: "回滚事务" } },
       { divider: true, label: "-" },
       { section: true, label: "恢复与检查点" },
-      { label: "事务与 Savepoint 面板...", action: { kind: "txnRecovery" } }
+      { label: "事务与 Savepoint 面板...", action: { kind: "txnRecovery" } },
+      { label: "SHOW CHECKPOINTS", action: { kind: "command", command: "SHOW CHECKPOINTS", opType: "generic", title: "SHOW CHECKPOINTS" } },
+      { label: "按 checkpoint 冷恢复...", action: { kind: "recoverCheckpoint" } }
     ]
   },
   {
@@ -1457,8 +1487,15 @@ const topMenus: { label: string; key: string; items: MenuNode[] }[] = [
       { section: true, label: "运维与诊断" },
       { label: "SHOW TUNING 摘要...", action: { kind: "walRecovery" } },
       { label: "导出诊断包…", action: { kind: "exportBundle" } },
+      { label: "冷备 data_dir…", action: { kind: "backupStorageBundle" } },
       { divider: true, label: "-" },
       { section: true, label: "会话调优" },
+      { label: "MDB 耐久档位…", action: { kind: "setDurability" } },
+      { label: "SET DURABILITY 0（最快）", action: { kind: "command", command: "SET DURABILITY 0", opType: "generic", title: "SET DURABILITY 0" } },
+      { label: "SET DURABILITY 1（默认）", action: { kind: "command", command: "SET DURABILITY 1", opType: "generic", title: "SET DURABILITY 1" } },
+      { label: "SET DURABILITY 2（最强）", action: { kind: "command", command: "SET DURABILITY 2", opType: "generic", title: "SET DURABILITY 2" } },
+      { divider: true, label: "-" },
+      { section: true, label: "引擎观测" },
       { label: "SHOW TUNING", action: { kind: "command", command: "SHOW TUNING", opType: "generic", title: "SHOW TUNING" } },
       { label: "SHOW TUNING JSON", action: { kind: "command", command: "SHOW TUNING JSON", opType: "generic", title: "SHOW TUNING JSON" } },
       { label: "SHOW STORAGE", action: { kind: "command", command: "SHOW STORAGE", opType: "generic", title: "SHOW STORAGE" } },
@@ -2581,6 +2618,7 @@ async function quickReorderWholeTableIds() {
   const cmd = `CONFIRM_REORDER(${json})`;
   const backwardPairs: [string, string][] = pairs.map(([o, n]) => [n, o]);
   const backwardCmd = `CONFIRM_REORDER(${JSON.stringify({ table, pairs: backwardPairs })})`;
+  page.value = 1;
   await runCommand(cmd, {
     opType: "generic",
     title: `快捷重排 id（${table}，${oldIds.length} 行）`,
@@ -2793,6 +2831,9 @@ async function runCommand(
     const failed = shouldStopAndSkipHistory(text, result, exec.errorCode ?? null);
     if (!failed) {
       applyStateSideEffects(text);
+      if (up.startsWith("CONFIRM_REORDER(")) {
+        page.value = 1;
+      }
       if (!opts?.skipHistory) {
         const op: UndoOp = {
           type: opType,
@@ -2906,6 +2947,116 @@ async function exportBundle() {
     await openUiMessage("alert", "导出完成", `诊断包已生成：\n${path}`);
   } catch (e: any) {
     await openUiMessage("alert", "导出失败", String(e));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function loadMdbDurability() {
+  try {
+    const lvl = await invoke<number | null>("get_mdb_durability");
+    mdbDurabilityLevel.value = lvl;
+  } catch {
+    mdbDurabilityLevel.value = null;
+  }
+}
+
+async function backupStorageBundle() {
+  if (!state.value.dataDir?.trim()) {
+    await openUiMessage("alert", "冷备失败", "请先设置工作区 data_dir。");
+    return;
+  }
+  const dest = await openUiMessage(
+    "prompt",
+    "冷备 data_dir",
+    "目标目录（structdb_backup_bundle；执行前会关闭当前 embed 会话）",
+    "C:/backup/structdb_cold"
+  );
+  if (typeof dest !== "string" || !dest.trim()) return;
+  const ok = await openUiMessage(
+    "confirm",
+    "确认冷备",
+    `将把工作区复制/打包到：\n${dest.trim()}\n\n继续？`
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    const path = await invoke<string>("backup_storage_bundle", { destDir: dest.trim() });
+    coldBackupPath.value = path;
+    logs.value.unshift(`[${now()}] backup_storage_bundle\n${path}`);
+    persistLogs();
+    await loadMdbDurability();
+    await refreshTables();
+    await openUiMessage("alert", "冷备完成", `已写入：\n${path}\n\nembed 已关闭，下一条 MDB 将自动重连。`);
+  } catch (e: any) {
+    await openUiMessage("alert", "冷备失败", String(e));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function recoverToCheckpointSeq() {
+  if (!state.value.dataDir?.trim()) {
+    await openUiMessage("alert", "恢复失败", "请先设置工作区 data_dir。");
+    return;
+  }
+  const raw = await openUiMessage(
+    "prompt",
+    "按 checkpoint 冷恢复",
+    "输入 checkpoint_seq（> 0）。可先运行 SHOW CHECKPOINTS 查看序号。",
+    recoverCheckpointSeqInput.value
+  );
+  if (typeof raw !== "string" || !raw.trim()) return;
+  const seq = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(seq) || seq <= 0) {
+    await openUiMessage("alert", "参数错误", "checkpoint_seq 须为正整数。");
+    return;
+  }
+  recoverCheckpointSeqInput.value = String(seq);
+  const ok = await openUiMessage(
+    "confirm",
+    "确认冷恢复",
+    `将把工作区\n${state.value.dataDir}\n恢复到 checkpoint_seq=${seq}（截断 WAL/链）。此操作不可撤销，继续？`
+  );
+  if (!ok) return;
+  busy.value = true;
+  try {
+    const msg = await invoke<string>("recover_to_checkpoint_seq", { checkpointSeq: seq });
+    logs.value.unshift(`[${now()}] recover_to_checkpoint_seq ${seq}\n${msg}`);
+    persistLogs();
+    await loadMdbDurability();
+    await refreshTables();
+    await refreshPage();
+    await openUiMessage("alert", "恢复完成", msg);
+  } catch (e: any) {
+    await openUiMessage("alert", "恢复失败", String(e));
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function setDurabilityPrompt() {
+  const raw = await openUiMessage(
+    "prompt",
+    "MDB 耐久档位",
+    "0=最快（少 fsync）  1=默认  2=最强（关键写 fsync）",
+    String(mdbDurabilityLevel.value ?? 1)
+  );
+  if (typeof raw !== "string" || !raw.trim()) return;
+  const level = Number.parseInt(raw.trim(), 10);
+  if (![0, 1, 2].includes(level)) {
+    await openUiMessage("alert", "参数错误", "耐久档位须为 0、1 或 2。");
+    return;
+  }
+  busy.value = true;
+  try {
+    await invoke("set_mdb_durability", { level });
+    mdbDurabilityLevel.value = level;
+    logs.value.unshift(`[${now()}] SET DURABILITY ${level}`);
+    persistLogs();
+    await openUiMessage("alert", "已设置", `MDB 耐久档位 = ${level}`);
+  } catch (e: any) {
+    await openUiMessage("alert", "设置失败", String(e));
   } finally {
     busy.value = false;
   }
@@ -3285,6 +3436,7 @@ async function setWorkspace() {
   page.value = 1;
   await refreshTables();
   await refreshPage();
+  await loadMdbDurability();
 }
 
 function cliResizeHandler() {
@@ -3527,6 +3679,18 @@ async function runMenuAction(action: MenuAction) {
     showExportModal.value = true;
     return;
   }
+  if (action.kind === "backupStorageBundle") {
+    await backupStorageBundle();
+    return;
+  }
+  if (action.kind === "recoverCheckpoint") {
+    await recoverToCheckpointSeq();
+    return;
+  }
+  if (action.kind === "setDurability") {
+    await setDurabilityPrompt();
+    return;
+  }
   if (action.kind === "dialog") {
     openDialog(action.title, action.template, action.fields.map((x) => ({ ...x })), action.opType, !!action.reversible);
     return;
@@ -3613,6 +3777,7 @@ onMounted(async () => {
     activeTableKey.value = tab.key;
   }
   await refreshPage();
+  await loadMdbDurability();
   window.addEventListener("click", () => {
     hideContextMenu();
   });
@@ -4619,13 +4784,43 @@ onUnmounted(() => {
           </div>
         </section>
 
+        <section class="txn-section">
+          <div class="txn-section-head">
+            <span class="txn-section-icon-wrap txn-section-icon-wrap--muted" aria-hidden="true">
+              <el-icon><Flag /></el-icon>
+            </span>
+            <div>
+              <h4 class="txn-section-title">Checkpoint 链（PHASE43）</h4>
+              <p class="txn-section-desc">
+                列出链上检查点，或按序号冷恢复整个 <span class="mono">data_dir</span>（会关闭 embed）。
+              </p>
+            </div>
+          </div>
+          <div class="txn-btn-grid txn-btn-grid--2">
+            <el-button :disabled="busy" @click="runCommand('SHOW CHECKPOINTS', { opType: 'generic', title: 'SHOW CHECKPOINTS' })">
+              SHOW CHECKPOINTS
+            </el-button>
+            <el-button type="warning" plain :disabled="busy" @click="recoverToCheckpointSeq()">
+              按 checkpoint 冷恢复…
+            </el-button>
+          </div>
+          <p class="txn-context-hint" style="margin-top: 8px">
+            当前 MDB 耐久档位：<span class="mono">{{ mdbDurabilityLevel ?? "未设置" }}</span>
+            · <el-button link type="primary" :disabled="busy" @click="setDurabilityPrompt()">更改…</el-button>
+          </p>
+        </section>
+
         <div class="txn-callout txn-callout--note">
           <el-icon class="txn-callout-icon"><WarningFilled /></el-icon>
           <div>
-            <div class="txn-callout-title">关于时间点恢复（PITR）</div>
+            <div class="txn-callout-title">关于检查点恢复（PHASE43）</div>
             <p class="txn-callout-body">
-              StructDB MDB 不提供 <span class="mono">RECOVER TO LSN/TIME</span> 等堆级 PITR。备份与迁移请使用
-              <span class="mono">EXPORT</span> 与工作区文件管理（见 <span class="mono">Docs/PHASE25.md</span>）。
+              不支持 <span class="mono">RECOVER TO LSN/TIME</span>。可按 checkpoint 链回滚数据目录：
+              先 <span class="mono">SHOW CHECKPOINTS</span>，再
+              <span class="mono">RECOVER TO CHECKPOINT_SEQ n</span> 或使用「按 checkpoint 冷恢复」
+              （C API <span class="mono">structdb_recover_data_dir_to_checkpoint_seq</span>，执行前会关闭 embed）。
+              表级导出仍用 <span class="mono">EXPORT</span>；整库冷备见「工具 → 冷备 data_dir」与
+              <span class="mono">Docs/BACKUP_RESTORE_RUNBOOK.md</span>。
             </p>
           </div>
         </div>
@@ -4667,6 +4862,16 @@ onUnmounted(() => {
         </div>
       </template>
       <div class="tool-grid">
+        <div class="tool-card">
+          <div class="tool-title">存储冷备（C API backup_bundle）</div>
+          <div class="mini-tip">
+            复制工作区到目标目录并写入 backup_manifest.json；执行前会关闭 embed（与诊断 zip 不同）。
+          </div>
+          <div class="tool-row" style="margin-top: 8px">
+            <el-button size="small" type="warning" plain :disabled="busy" @click="backupStorageBundle">冷备…</el-button>
+            <span class="mini-tip mono" v-if="coldBackupPath">dest={{ coldBackupPath }}</span>
+          </div>
+        </div>
         <div class="tool-card">
           <div class="tool-title">一键导出诊断包（zip）</div>
           <div class="mini-tip">包含：scripts/results、工作区与 manifest.json（版本/路径快照，尽力而为）。</div>

@@ -6,7 +6,8 @@
 
 - **同一 `data_dir` 只能有一个进程持有 WAL**：主窗口已通过 C API 打开 embed 时，内置终端会 **复用进程内引擎**（见 `src-tauri/src/lib.rs` 中 `cap_holds_embed_for_workspace`），避免再起 `structdb_app` 导致 **WAL 二次打开失败**。
 - 若需 **独立** `structdb_app` 子进程，请使用 **不同数据目录**，或在宿主侧使用 **`structdb_engine_open_ex(..., STRUCTDB_ENGINE_OPEN_FLAG_EXCLUSIVE_DIR_LOCK)`** 等策略保证互斥；详见仓库 [Docs/phases/PHASE35.md](../../Docs/phases/PHASE35.md)。
-- **三十六期（可选）**：设置环境变量 **`STRUCTDB_GUI_EXCLUSIVE_DIR_LOCK=1`**（或 **`true`**，大小写不敏感）时，GUI 以 **`STRUCTDB_ENGINE_OPEN_FLAG_EXCLUSIVE_DIR_LOCK`** 打开引擎（`data_dir/.structdb_exclusive.lock` 建议锁），第二进程指向同一目录时会 **打开失败**。**默认不设置**（关闭），便于本机多窗口调试；生产环境可按部署策略开启。
+- **三十六期（可选）**：设置环境变量 **`STRUCTDB_GUI_EXCLUSIVE_DIR_LOCK=1`**（或 **`true`**，大小写不敏感）时，GUI 以 **`STRUCTDB_ENGINE_OPEN_FLAG_EXCLUSIVE_DIR_LOCK`** 打开引擎（`data_dir/.structdb_exclusive.lock` 建议锁），第二进程指向同一目录时会 **打开失败**。**默认不设置**（关闭），便于本机多窗口调试。
+- **推荐开启独占锁的场景**：生产环境 GUI 与 `structdb_app`/第二 GUI 可能共用同一 `data_dir`；**冷备份前**须停写，见 **[`Docs/BACKUP_RESTORE_RUNBOOK.md`](../../Docs/BACKUP_RESTORE_RUNBOOK.md)**。
 
 ## 先决条件
 
@@ -65,7 +66,8 @@ npm run tauri:dev
 | 撤销栈持久化 | `save_stack_units`、`load_stack_units`、`stack_undo_unit`、`stack_redo_unit` | 栈单元序列化 |
 | **MDB 脚本** | **`run_script`**、**`run_script_ex`**、**`cancel_mdb_script`** | 多行脚本逐行执行；**`run_script` / `run_script_ex` 首参为 `AppHandle`**（Tauri 注入）；非空行之间 **`emit("mdb-script-progress", …)`**；`cancel_mdb_script` 置位取消标志；输出可含 **`[SCRIPT] cancelled`**；**`run_script_ex`** 返回 JSON（camelCase）：`ok`、`output`、`errorCode`、`stopLine`、**`cancelled`** |
 | 分页 | `query_page` | `page_size` **1..500** 钳制 |
-| 诊断 / 导出 | `export_bundle`、`dll_info`、`runtime_artifact_info` | 导出诊断包与运行时路径解析 |
+| 诊断 / 导出 | `export_bundle`、`backup_storage_bundle`、`dll_info`、`runtime_artifact_info` | 诊断 zip 与 C API 1.9 冷备（`structdb_backup_bundle`） |
+| Wave 4 / PITR | `recover_to_checkpoint_seq`、`get_mdb_durability`、`set_mdb_durability` | checkpoint 冷恢复与 MDB 耐久档位 |
 | 内置终端 | `cli_terminal_start`、`cli_terminal_write_line`、`cli_terminal_stop` | 子进程终端（与工作区互斥见上文） |
 
 **前端事件（脚本进度）**
@@ -80,6 +82,14 @@ npm run tauri:dev
 - **`SCAN MORE`** / **`SCAN MORE(n)`**：续打（默认每批 500 行，`n`∈1..5000）。
 - **`SCAN RESET`**：清零游标。
 - **`USE(...)`** 成功后游标归零。
+
+**Wave 4（C API 1.9 / MDB PHASE43–45）**
+
+- **耐久**：`SET DURABILITY 0|1|2` 或菜单「工具 → MDB 耐久档位」；Rust 侧 `set_mdb_durability` 同步到 `structdb_mdb_session_set_durability`。
+- **冷备**：`backup_storage_bundle` → `structdb_backup_bundle`（关闭 embed 后复制 `data_dir`，含 `backup_manifest.json`）。
+- **checkpoint 恢复**：`SHOW CHECKPOINTS` / `RECOVER TO CHECKPOINT_SEQ n` 或 `recover_to_checkpoint_seq`（`structdb_recover_data_dir_to_checkpoint_seq`）。
+- **索引 / 分块导入**：菜单「表 → 索引」与「文件 → IMPORT SEGMENT」；帮助面板已收录 `CREATE/DROP INDEX`、`GROUP BY`、`PAGE_JSON` 等条目。
+- 版本号：`npm run sync-version-from-capi` 从 `structdb_capi.h` 同步（当前 **1.9.0**）。
 
 ## 测试
 

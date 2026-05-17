@@ -465,12 +465,18 @@ bool EmbedClient::append_journal_line(std::uint64_t seq, const CommandBatch& bat
 }
 
 bool EmbedClient::submit(const CommandBatch& batch, bool fsync_journal, std::string* error_out) {
-  infra::SpanGuard trace_submit("embed.submit", 0);
+  return submit_ex(batch, fsync_journal, true, error_out);
+}
+
+bool EmbedClient::submit_ex(const CommandBatch& batch, bool fsync_journal, bool write_journal,
+                            std::string* error_out) {
+  const bool is_chunk = batch.idempotency_token.find(":chunk:") != std::string::npos;
+  infra::SpanGuard trace_submit(is_chunk ? "embed.submit.chunk" : "embed.submit", batch.puts.size());
   if (!opened_) {
     if (error_out) *error_out = "EmbedClient::submit: session not open (call EmbedClient::open first)";
     return false;
   }
-  if (!batch_journal_safe(batch)) {
+  if (write_journal && !batch_journal_safe(batch)) {
     if (error_out) *error_out = "journal: batch contains tab/newline in field (unsafe)";
     return false;
   }
@@ -484,6 +490,8 @@ bool EmbedClient::submit(const CommandBatch& batch, bool fsync_journal, std::str
     if (error_out) *error_out = "EmbedClient::submit: engine storage is null";
     return false;
   }
+  const bool skip_journal = engine_.config().snapshot().embed_journal_skip_until_commit;
+  const bool do_journal = write_journal && !skip_journal;
   const std::uint64_t seq = next_seq_++;
   if (!batch.dels.empty() || !batch.puts.empty()) {
     const std::uint64_t est =
@@ -496,14 +504,16 @@ bool EmbedClient::submit(const CommandBatch& batch, bool fsync_journal, std::str
   } else if (fsync_journal && !st->wal_sync(error_out)) {
     return false;
   }
-  if (!append_journal_line(seq, batch, fsync_journal)) {
-    if (error_out) {
-      *error_out = "EmbedClient::submit: append to session.journal failed after storage commit (path=" +
-                   path_u8_for_err(journal_path_) + ", seq=" + std::to_string(seq) + ")";
+  if (do_journal) {
+    if (!append_journal_line(seq, batch, fsync_journal)) {
+      if (error_out) {
+        *error_out = "EmbedClient::submit: append to session.journal failed after storage commit (path=" +
+                     path_u8_for_err(journal_path_) + ", seq=" + std::to_string(seq) + ")";
+      }
+      return false;
     }
-    return false;
+    last_ack_ = seq;
   }
-  last_ack_ = seq;
   if (!batch.idempotency_token.empty()) {
     std::lock_guard<std::mutex> idlk(idem_mu_);
     idem_completed_.insert(batch.idempotency_token);

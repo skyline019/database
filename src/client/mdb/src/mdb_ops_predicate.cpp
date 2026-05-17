@@ -1,10 +1,16 @@
 #include "structdb/client/detail/mdb_ops_detail.hpp"
+#include "structdb/client/detail/mdb_named_index.hpp"
 #include "structdb/client/detail/mdb_runner_internal.hpp"
+#include "structdb/facade/engine.hpp"
+#include "structdb/storage/mdb_keyspace.hpp"
+
+#include <limits>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <functional>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -224,25 +230,150 @@ bool row_matches_predicate(const LogicalTable& t, const std::string& row_id, con
                             pred_op, pred_val);
 }
 
-std::vector<std::string> collect_matching_row_ids(const LogicalTable& t, std::string_view pred_col,
-                                                   std::string_view pred_op, std::string_view pred_val) {
-  std::vector<std::string> out;
-  const int idx = schema_col_index(t, pred_col);
+std::string explain_where_index_hint(const LogicalTable& t, std::string_view pred_col, std::string_view pred_op,
+                                   std::string_view /*pred_val*/) {
   const std::string op_trim = trim_copy(pred_op);
+  if (col_name_eq(pred_col, "id")) {
+    if (op_trim == "=") return "row_key_point_lookup";
+    if (op_is_like(op_trim)) return "like_full_scan";
+    return "row_id_full_scan";
+  }
+  std::string named_idx;
+  if (op_trim == "=" && find_named_index_for_column(t, pred_col, &named_idx)) {
+    return "named_index=" + named_idx;
+  }
+  const int idx = schema_col_index(t, pred_col);
+  if (op_trim == "=" && idx >= 0 && is_string_type(t.schema[static_cast<std::size_t>(idx)].second)) {
+    auto it = t.str_idx.find(std::string(pred_col));
+    if (it != t.str_idx.end() && !it->second.empty()) return "string_eq_index";
+    return "string_eq_sidecar_maybe";
+  }
+  if (op_trim == "=" && idx >= 0 && is_int_type(t.schema[static_cast<std::size_t>(idx)].second)) {
+    auto it = t.int_idx.find(std::string(pred_col));
+    if (it != t.int_idx.end() && !it->second.empty()) return "int_eq_index";
+    return "int_eq_sidecar_maybe";
+  }
+  if (op_is_like(op_trim)) return "like_full_scan";
+  return "full_scan";
+}
+
+namespace {
+
+using MatchSink = std::function<bool(const std::string& row_id)>;
+
+bool visit_named_index_matches(const LogicalTable& t, std::string_view pred_col, std::string_view pred_val,
+                               const MdbEnginePorts* ports, std::uint64_t read_max_seq, const MatchSink& sink) {
+  std::string named_idx;
+  if (!find_named_index_for_column(t, pred_col, &named_idx)) return false;
+  const int ci = schema_col_index(t, pred_col);
+  if (ci < 0 || !ports || !ports->engine) return false;
+  namespace mk = structdb::storage::mdb_keyspace;
+  const std::string& typ = t.schema[static_cast<std::size_t>(ci)].second;
+  const std::string tok = named_index_token_for_cell(typ, pred_val);
+  const std::string col = t.named_indexes.at(named_idx).column;
+  const std::string pfx = std::string(mk::kNamedIdx) + t.name + '$' + named_idx + '$' + col + '$' + tok + '$';
+  const std::uint64_t rmax = read_max_seq ? read_max_seq : (std::numeric_limits<std::uint64_t>::max)();
+  bool any = false;
+  ports->engine->kv_visit_prefix(pfx, [&](std::string_view k, std::string_view v) {
+    (void)v;
+    if (k.size() <= pfx.size()) return true;
+    const std::size_t dollar = k.rfind('$');
+    if (dollar == std::string_view::npos || dollar + 1 >= k.size()) return true;
+    any = true;
+    return sink(std::string(k.substr(dollar + 1)));
+  }, rmax);
+  return any;
+}
+
+std::size_t count_multimap_matches(const std::unordered_multimap<std::string, std::string>& mm,
+                                   std::string_view pred_val) {
+  const auto er = mm.equal_range(std::string(pred_val));
+  return static_cast<std::size_t>(std::distance(er.first, er.second));
+}
+
+bool foreach_multimap_matches(const std::unordered_multimap<std::string, std::string>& mm, std::string_view pred_val,
+                              const LogicalTable& t, const MatchSink& sink) {
+  const auto er = mm.equal_range(std::string(pred_val));
+  for (auto j = er.first; j != er.second; ++j) {
+    const auto r = t.rows.find(j->second);
+    if (r == t.rows.end()) continue;
+    if (!sink(r->first)) return false;
+  }
+  return true;
+}
+
+std::size_t match_rows(const LogicalTable& t, std::string_view pred_col, std::string_view pred_op,
+                       std::string_view pred_val, const MdbEnginePorts* ports, std::uint64_t read_max_seq,
+                       std::vector<std::string>* out, std::size_t max_collect) {
+  const std::string op_trim = trim_copy(pred_op);
+  const auto emit = [&](const std::string& rid) -> bool {
+    if (out) {
+      if (max_collect == 0 || out->size() < max_collect) out->push_back(rid);
+    }
+    return true;
+  };
+
+  if (col_name_eq(pred_col, "id") && op_trim == "=") {
+    const auto it = t.rows.find(std::string(pred_val));
+    if (it != t.rows.end()) {
+      (void)emit(it->first);
+      return 1;
+    }
+    return 0;
+  }
+
+  if (op_trim == "=") {
+    std::size_t named_n = 0;
+    const bool saw_kv = visit_named_index_matches(t, pred_col, pred_val, ports, read_max_seq,
+                                                  [&](const std::string& rid) {
+                                                    if (t.rows.find(rid) == t.rows.end()) return true;
+                                                    ++named_n;
+                                                    return emit(rid);
+                                                  });
+    if (saw_kv) return named_n;
+  }
+
+  const int idx = schema_col_index(t, pred_col);
   if (op_trim == "=" && idx >= 0 && is_string_type(t.schema[static_cast<std::size_t>(idx)].second)) {
     auto it = t.str_idx.find(std::string(pred_col));
     if (it != t.str_idx.end()) {
-      const auto er = it->second.equal_range(std::string(pred_val));
-      for (auto j = er.first; j != er.second; ++j) {
-        const auto r = t.rows.find(j->second);
-        if (r != t.rows.end()) out.push_back(r->first);
-      }
-      return out;
+      const std::size_t n = count_multimap_matches(it->second, pred_val);
+      if (out) foreach_multimap_matches(it->second, pred_val, t, emit);
+      return n;
     }
   }
-  for (const auto& kv : t.rows) {
-    if (row_matches_predicate(t, kv.first, kv.second, pred_col, pred_op, pred_val)) out.push_back(kv.first);
+  if (op_trim == "=" && idx >= 0 && is_int_type(t.schema[static_cast<std::size_t>(idx)].second)) {
+    auto it = t.int_idx.find(std::string(pred_col));
+    if (it != t.int_idx.end()) {
+      const std::size_t n = count_multimap_matches(it->second, pred_val);
+      if (out) foreach_multimap_matches(it->second, pred_val, t, emit);
+      return n;
+    }
   }
+
+  std::size_t n = 0;
+  for (const auto& kv : t.rows) {
+    if (!row_matches_predicate(t, kv.first, kv.second, pred_col, pred_op, pred_val)) continue;
+    ++n;
+    if (out && (max_collect == 0 || out->size() < max_collect)) out->push_back(kv.first);
+  }
+  return n;
+}
+
+}  // namespace
+
+std::size_t count_matching_row_ids(const LogicalTable& t, std::string_view pred_col, std::string_view pred_op,
+                                   std::string_view pred_val, const MdbEnginePorts* ports,
+                                   std::uint64_t read_max_seq) {
+  return match_rows(t, pred_col, pred_op, pred_val, ports, read_max_seq, nullptr, 0);
+}
+
+std::vector<std::string> collect_matching_row_ids(const LogicalTable& t, std::string_view pred_col,
+                                                   std::string_view pred_op, std::string_view pred_val,
+                                                   const MdbEnginePorts* ports, std::uint64_t read_max_seq,
+                                                   std::size_t max_collect) {
+  std::vector<std::string> out;
+  (void)match_rows(t, pred_col, pred_op, pred_val, ports, read_max_seq, &out, max_collect);
   return out;
 }
 

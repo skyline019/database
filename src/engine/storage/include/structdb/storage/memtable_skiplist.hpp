@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "structdb/storage/imemtable.hpp"
+#include "structdb/storage/memtable_arena.hpp"
 
 namespace structdb::storage {
 
@@ -51,8 +52,10 @@ class MemTableSkipList final : public IMemTable {
   Node* find_predecessors(std::string_view key, Node** preds) const;
   Node* lower_bound_node_(std::string_view prefix) const;
   void destroy_all_nodes();
+  Node* alloc_node(std::string key, std::string value, int height);
 
   Node* head_{nullptr};
+  MemTableArena arena_;
   std::size_t n_{0};
   std::size_t bytes_{0};
 };

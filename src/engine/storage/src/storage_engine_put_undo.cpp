@@ -1,6 +1,8 @@
 #include "structdb/storage/storage_engine.hpp"
 
 #include "structdb/infra/file_handle.hpp"
+#include "structdb/infra/tracer.hpp"
+#include "structdb/storage/storage_trace.hpp"
 #include "structdb/storage/wal.hpp"
 
 #include <algorithm>
@@ -13,6 +15,8 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "storage_engine_detail.hpp"
@@ -21,6 +25,16 @@ namespace structdb::storage {
 
 namespace {
 constexpr bool kAppendRedoMirrorWal = false;
+constexpr std::size_t kMemtableBulkPutMinKeys = 32;
+
+void mem_apply_puts_unlocked(IMemTable& mt, std::vector<std::pair<std::string, std::string>>& items, bool bulk) {
+  if (bulk && items.size() >= kMemtableBulkPutMinKeys) {
+    std::sort(items.begin(), items.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    mt.reserve_capacity(items.size());
+  }
+  for (auto& pr : items) mt.put(std::move(pr.first), std::move(pr.second));
+}
 }  // namespace
 
 namespace sed = structdb::storage::storage_engine_detail;
@@ -47,24 +61,31 @@ bool StorageEngine::lookup_versioned_raw_for_undo_unlocked_(const std::string& k
   return false;
 }
 
+bool StorageEngine::append_versioned_undo_with_prev_unlocked_(const std::string& key, const std::string& prev_raw) {
+  if (!versioned_kv::key_versions_persist(key)) return true;
+  const std::uint64_t frame_start = checkpoint_undo_coordinator_.undo_logical_stream_total_bytes_unlocked();
+  if (!undo_.append_versioned_prev_snapshot(key, prev_raw, false)) return false;
+  std::string roll_err;
+  if (!checkpoint_undo_coordinator_.undo_maybe_roll_after_append_unlocked(&roll_err)) return false;
+  undo_stack_.push_back(UndoStackEntry{key, prev_raw, frame_start});
+  return true;
+}
+
 bool StorageEngine::append_versioned_undo_if_needed_unlocked_(const std::string& key) {
   if (!versioned_kv::key_versions_persist(key)) return true;
   std::string prev;
   if (!lookup_versioned_raw_for_undo_unlocked_(key, &prev)) {
-    // First visible write to this key: record tomb as previous so `rollback_one_undo_frame` can restore absence
-    // (needed for MDB chain ROLLBACK / PHASE23C on INSERT-only paths).
     prev = std::string(versioned_kv::kTomb);
   }
-  const std::uint64_t frame_start = checkpoint_undo_coordinator_.undo_logical_stream_total_bytes_unlocked();
-  if (!undo_.append_versioned_prev_snapshot(key, prev, false)) return false;
-  std::string roll_err;
-  if (!checkpoint_undo_coordinator_.undo_maybe_roll_after_append_unlocked(&roll_err)) return false;
-  undo_stack_.push_back(UndoStackEntry{key, std::move(prev), frame_start});
-  return true;
+  return append_versioned_undo_with_prev_unlocked_(key, prev);
 }
 
 std::string StorageEngine::logical_to_stored_for_put_unlocked_(const std::string& key, const std::string& logical,
                                                                std::uint64_t batch_commit_seq) {
+  if (import_batch_skip_undo_ && import_store_raw_logical_) {
+    if (logical == versioned_kv::kTomb) return std::string(versioned_kv::kTomb);
+    return logical;
+  }
   std::string to_store = logical;
   if (!versioned_kv::key_versions_persist(key)) return to_store;
   if (logical == versioned_kv::kTomb) {
@@ -85,18 +106,25 @@ bool StorageEngine::commit_embed_batch_unlocked_(const std::vector<std::string>&
                                                    const std::vector<std::pair<std::string, std::string>>& puts,
                                                    bool fsync_wal, std::string* error_out) {
   (void)error_out;
+  infra::SpanGuard trace_commit(trace::kCommitEmbedBatch, static_cast<std::uint64_t>(puts.size()));
   constexpr std::string_view kHdr = "STDBBW1\n";
   std::uint64_t batch_commit_seq = 0;
-  if (!puts.empty()) {
+  const bool raw_import = import_batch_skip_undo_ && import_store_raw_logical_;
+  if (!puts.empty() && !raw_import) {
     batch_commit_seq = commit_seq_hw_.fetch_add(1, std::memory_order_relaxed) + 1;
   }
   std::vector<std::pair<std::string, std::string>> stored_puts;
-  stored_puts.reserve(puts.size());
-  for (const auto& pr : puts) {
-    stored_puts.emplace_back(pr.first, logical_to_stored_for_put_unlocked_(pr.first, pr.second, batch_commit_seq));
+  const std::vector<std::pair<std::string, std::string>>* wal_puts = &puts;
+  if (!raw_import) {
+    stored_puts.reserve(puts.size());
+    for (const auto& pr : puts) {
+      stored_puts.emplace_back(pr.first, logical_to_stored_for_put_unlocked_(pr.first, pr.second, batch_commit_seq));
+    }
+    wal_puts = &stored_puts;
   }
   std::string body;
-  body.reserve(64 + dels.size() * 16 + puts.size() * 32);
+  body.reserve(static_cast<std::size_t>(
+      estimate_commit_embed_batch_wal_frame_bytes(dels, *wal_puts)));
   body.append(kHdr.data(), kHdr.size());
   sed::append_u32_le(&body, static_cast<std::uint32_t>(dels.size()));
   for (const auto& dk : dels) {
@@ -104,8 +132,8 @@ bool StorageEngine::commit_embed_batch_unlocked_(const std::vector<std::string>&
     sed::append_u32_le(&body, static_cast<std::uint32_t>(dk.size()));
     body.append(dk);
   }
-  sed::append_u32_le(&body, static_cast<std::uint32_t>(stored_puts.size()));
-  for (const auto& pr : stored_puts) {
+  sed::append_u32_le(&body, static_cast<std::uint32_t>(wal_puts->size()));
+  for (const auto& pr : *wal_puts) {
     if (pr.first.size() > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)()) ||
         pr.second.size() > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
       return false;
@@ -122,14 +150,92 @@ bool StorageEngine::commit_embed_batch_unlocked_(const std::vector<std::string>&
     const std::string redo_rec = std::string("PUTBATCH ") + body;
     if (!redo_.append(redo_rec.data(), redo_rec.size(), false)) return false;
   }
+  std::unordered_map<std::string, std::string> undo_prev;
+  if (batch_undo_lookup_ && !import_batch_skip_undo_) {
+    std::unordered_set<std::string> keys;
+    keys.reserve(dels.size() + stored_puts.size());
+    for (const auto& dk : dels) keys.insert(dk);
+    for (const auto& pr : stored_puts) keys.insert(pr.first);
+    for (const auto& key : keys) {
+      if (!versioned_kv::key_versions_persist(key)) continue;
+      std::string prev;
+      if (batch_undo_mem_only_) {
+        if (!mem_layers_get_raw_unlocked_(key, &prev) || prev == versioned_kv::kTomb) {
+          prev = std::string(versioned_kv::kTomb);
+        }
+      } else if (!lookup_versioned_raw_for_undo_unlocked_(key, &prev)) {
+        prev = std::string(versioned_kv::kTomb);
+      }
+      undo_prev.emplace(key, std::move(prev));
+    }
+  }
+  auto append_undo = [&](const std::string& key) -> bool {
+    if (import_batch_skip_undo_) return true;
+    if (!batch_undo_lookup_) return append_versioned_undo_if_needed_unlocked_(key);
+    const auto it = undo_prev.find(key);
+    if (it == undo_prev.end()) return append_versioned_undo_if_needed_unlocked_(key);
+    return append_versioned_undo_with_prev_unlocked_(key, it->second);
+  };
   for (const auto& dk : dels) {
-    if (!append_versioned_undo_if_needed_unlocked_(dk)) return false;
+    if (!append_undo(dk)) return false;
     mem_mgr_.active().put(dk, logical_to_stored_for_put_unlocked_(dk, std::string(versioned_kv::kTomb), 0));
   }
-  for (const auto& pr : stored_puts) {
-    if (!append_versioned_undo_if_needed_unlocked_(pr.first)) return false;
-    observe_stored_commit_seq_(pr.second);
-    mem_mgr_.active().put(pr.first, pr.second);
+  const bool bulk_mem =
+      (memtable_bulk_put_enabled_ || raw_import) && wal_puts->size() >= kMemtableBulkPutMinKeys;
+  if (bulk_mem) {
+    std::vector<std::pair<std::string, std::string>> put_items;
+    put_items.reserve(wal_puts->size());
+    for (const auto& pr : *wal_puts) {
+      if (!append_undo(pr.first)) return false;
+      if (!raw_import) observe_stored_commit_seq_(pr.second);
+      put_items.emplace_back(pr.first, pr.second);
+    }
+    mem_apply_puts_unlocked(mem_mgr_.active(), put_items, true);
+  } else {
+    for (const auto& pr : *wal_puts) {
+      if (!append_undo(pr.first)) return false;
+      if (!raw_import) observe_stored_commit_seq_(pr.second);
+      mem_mgr_.active().put(pr.first, pr.second);
+    }
+  }
+  return true;
+}
+
+bool StorageEngine::commit_embed_batch_unlocked_split_(std::vector<std::string> dels,
+                                                       std::vector<std::pair<std::string, std::string>> puts,
+                                                       bool fsync_last, std::string* error_out) {
+  const std::uint64_t max_bytes = embed_batch_max_frame_bytes_;
+  if (max_bytes == 0 || puts.empty()) {
+    return commit_embed_batch_unlocked_(dels, puts, fsync_last, error_out);
+  }
+  bool first = true;
+  for (std::size_t start = 0; start < puts.size();) {
+    std::vector<std::pair<std::string, std::string>> chunk;
+    chunk.reserve(4096);
+    const std::vector<std::string> empty_dels;
+    while (start + chunk.size() < puts.size()) {
+      chunk.push_back(puts[start + chunk.size()]);
+      const std::vector<std::string>& use_dels = first ? dels : empty_dels;
+      const std::uint64_t est = estimate_commit_embed_batch_wal_frame_bytes(use_dels, chunk);
+      if (est > max_bytes && chunk.size() > 1) {
+        chunk.pop_back();
+        break;
+      }
+      if (est > max_bytes && chunk.size() == 1) break;
+    }
+    if (chunk.empty()) {
+      if (error_out) *error_out = "embed batch split: empty chunk";
+      return false;
+    }
+    const bool fsync_chunk = fsync_last && (start + chunk.size() >= puts.size());
+    if (first) {
+      if (!commit_embed_batch_unlocked_(dels, chunk, fsync_chunk, error_out)) return false;
+      dels.clear();
+      first = false;
+    } else if (!commit_embed_batch_unlocked_(empty_dels, chunk, fsync_chunk, error_out)) {
+      return false;
+    }
+    start += chunk.size();
   }
   return true;
 }
@@ -143,6 +249,12 @@ bool StorageEngine::commit_embed_batch(const std::vector<std::string>& dels,
   }
   if (dels.empty() && puts.empty()) return true;
   std::lock_guard<std::shared_mutex> lk(mu_);
+  if (embed_batch_max_frame_bytes_ > 0) {
+    const std::uint64_t est = estimate_commit_embed_batch_wal_frame_bytes(dels, puts);
+    if (est > embed_batch_max_frame_bytes_) {
+      return commit_embed_batch_unlocked_split_(std::vector<std::string>(dels), puts, fsync_wal, error_out);
+    }
+  }
   return commit_embed_batch_unlocked_(dels, puts, fsync_wal, error_out);
 }
 

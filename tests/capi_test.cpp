@@ -13,6 +13,7 @@
 #include "test_artifact_env.hpp"
 
 #include "structdb/client/embed_client.hpp"
+#include "structdb/storage/checkpoint_chain.hpp"
 
 namespace fs = std::filesystem;
 
@@ -30,10 +31,10 @@ TEST(Capi, VersionString) {
   ASSERT_NE(v, nullptr);
   EXPECT_STRNE(v, "");
   EXPECT_EQ(STRUCTDB_CAPI_VERSION_MAJOR, 1);
-  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MINOR, 8);
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MINOR, 9);
   EXPECT_EQ(STRUCTDB_CAPI_VERSION_PATCH, 0);
-  EXPECT_EQ(structdb_capi_version(), (1u << 16) | (8u << 8) | 0u);
-  EXPECT_STREQ(structdb_capi_version_string(), "1.8.0");
+  EXPECT_EQ(structdb_capi_version(), (1u << 16) | (9u << 8) | 0u);
+  EXPECT_STREQ(structdb_capi_version_string(), "1.9.0");
 }
 
 TEST(Capi, RunMdbFile) {
@@ -692,6 +693,71 @@ TEST(Capi, MultiWaveWalSyncCheckpointAndSessionLog) {
     EXPECT_GE(count_sub(slog, "SESSION_OPEN"), static_cast<std::size_t>(wave + 1)) << slog;
     EXPECT_GE(count_sub(slog, "SESSION_CLOSE"), static_cast<std::size_t>(wave + 1)) << slog;
   }
+}
+
+TEST(Capi, Phase45RecoverToCheckpointSeq) {
+  namespace fs = std::filesystem;
+  const auto root = capi_case_root("p45_recover");
+  fs::remove_all(root);
+  fs::create_directories(root);
+  const std::string dd = (root / "_data").string();
+  const std::string sd = (root / "sess").string();
+  char err[512] = {};
+  structdb_engine* eng = structdb_engine_open(dd.c_str(), err, sizeof(err));
+  ASSERT_NE(eng, nullptr) << err;
+  structdb_embed_client* emb = structdb_embed_open(eng, sd.c_str(), err, sizeof(err));
+  ASSERT_NE(emb, nullptr) << err;
+  structdb_mdb_session* mdb = structdb_mdb_session_create();
+  ASSERT_NE(mdb, nullptr);
+  structdb_mdb_run_options opt{};
+  opt.struct_size = STRUCTDB_MDB_RUN_OPTIONS_SIZE_V1;
+  opt.fsync_each_batch = 1;
+  ASSERT_EQ(structdb_mdb_execute_line_ex(eng, emb, mdb, "CREATE TABLE(pr)", err, sizeof(err), &opt), STRUCTDB_CAPI_OK)
+      << err;
+  ASSERT_EQ(structdb_mdb_execute_line_ex(eng, emb, mdb, "USE(pr)", err, sizeof(err), &opt), STRUCTDB_CAPI_OK) << err;
+  ASSERT_EQ(structdb_mdb_execute_line_ex(eng, emb, mdb, "DEFATTR(k:string)", err, sizeof(err), &opt), STRUCTDB_CAPI_OK)
+      << err;
+  ASSERT_EQ(structdb_mdb_execute_line_ex(eng, emb, mdb, "INSERT(1,a)", err, sizeof(err), &opt), STRUCTDB_CAPI_OK) << err;
+  ASSERT_EQ(structdb_engine_flush_memtable(eng, err, sizeof(err)), STRUCTDB_CAPI_OK) << err;
+  std::vector<structdb::storage::CheckpointChainEntry> chain;
+  ASSERT_TRUE(structdb::storage::checkpoint_chain_read_all(fs::path(dd), &chain, nullptr));
+  ASSERT_FALSE(chain.empty());
+  const uint64_t seq = chain.back().checkpoint_seq;
+  ASSERT_EQ(structdb_mdb_execute_line_ex(eng, emb, mdb, "INSERT(2,b)", err, sizeof(err), &opt), STRUCTDB_CAPI_OK) << err;
+  structdb_mdb_session_destroy(mdb);
+  structdb_embed_close(emb);
+  structdb_engine_shutdown(eng);
+  ASSERT_EQ(structdb_recover_data_dir_to_checkpoint_seq(dd.c_str(), seq, err, sizeof(err)), STRUCTDB_CAPI_OK) << err;
+}
+
+TEST(Capi, Phase45DurabilityAndBackupBundle) {
+  namespace fs = std::filesystem;
+  const auto root = capi_case_root("p45_dur_bak");
+  fs::remove_all(root);
+  fs::create_directories(root);
+  const std::string dd = (root / "_data").string();
+  const std::string sd = (root / "sess").string();
+  char err[512] = {};
+  fs::create_directories(root / "sess");
+  structdb_mdb_session* mdb = structdb_mdb_session_create();
+  ASSERT_NE(mdb, nullptr);
+  EXPECT_EQ(structdb_mdb_session_set_durability(nullptr, 1), STRUCTDB_CAPI_ERR_NULL_ARG);
+  EXPECT_EQ(structdb_mdb_session_set_durability(mdb, 9), STRUCTDB_CAPI_ERR_NULL_ARG);
+  ASSERT_EQ(structdb_mdb_session_set_durability(mdb, 2), STRUCTDB_CAPI_OK);
+  structdb_engine* eng = structdb_engine_open(dd.c_str(), err, sizeof(err));
+  ASSERT_NE(eng, nullptr) << err;
+  structdb_embed_client* emb = structdb_embed_open(eng, sd.c_str(), err, sizeof(err));
+  ASSERT_NE(emb, nullptr) << err;
+  ASSERT_EQ(structdb_engine_flush_memtable(eng, err, sizeof(err)), STRUCTDB_CAPI_OK) << err;
+  structdb_embed_close(emb);
+  const std::string bout = (root / "bundle").string();
+  ASSERT_EQ(structdb_backup_bundle(dd.c_str(), sd.c_str(), bout.c_str(), err, sizeof(err)), STRUCTDB_CAPI_OK) << err;
+  EXPECT_TRUE(fs::exists(fs::path(bout) / "data_dir"));
+  if (fs::exists(fs::path(dd) / "checkpoint.chain")) {
+    EXPECT_TRUE(fs::exists(fs::path(bout) / "backup_manifest.json"));
+  }
+  structdb_mdb_session_destroy(mdb);
+  structdb_engine_shutdown(eng);
 }
 
 TEST(Capi, ExclusiveDirLockSecondOpenFails) {

@@ -236,7 +236,34 @@ bool hex_decode(std::string_view in, std::string* out) {
   return true;
 }
 
-std::string wire_encode_snapshot_blob(std::string_view raw) {
+namespace {
+void append_u32_le(std::string* out, std::uint32_t v) {
+  out->push_back(static_cast<char>(v & 0xff));
+  out->push_back(static_cast<char>((v >> 8) & 0xff));
+  out->push_back(static_cast<char>((v >> 16) & 0xff));
+  out->push_back(static_cast<char>((v >> 24) & 0xff));
+}
+bool read_u32_le(std::string_view in, std::size_t* pos, std::uint32_t* v) {
+  if (*pos + 4 > in.size()) return false;
+  const auto* p = reinterpret_cast<const unsigned char*>(in.data() + *pos);
+  *v = static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+         (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24);
+  *pos += 4;
+  return true;
+}
+}  // namespace
+
+std::string wire_encode_snapshot_blob(std::string_view raw, structdb::facade::MdbWireEncoding enc) {
+  if (enc == structdb::facade::MdbWireEncoding::Wire2) {
+    constexpr char kPfx[] = "mdbwire2:";
+    if (raw.size() > static_cast<std::size_t>((std::numeric_limits<std::uint32_t>::max)())) {
+      return std::string(kPfx);
+    }
+    std::string out(kPfx, sizeof(kPfx) - 1);
+    append_u32_le(&out, static_cast<std::uint32_t>(raw.size()));
+    out.append(raw);
+    return out;
+  }
   constexpr char kPfx[] = "mdbhex1:";
   return std::string(kPfx) + hex_encode(raw);
 }
@@ -247,6 +274,20 @@ bool wire_decode_snapshot_blob(std::string_view stored, std::string* raw_out, st
   if (stored.empty()) {
     if (err) *err = "empty snapshot value";
     return false;
+  }
+  constexpr char kWire2[] = "mdbwire2:";
+  constexpr std::size_t kWire2Len = sizeof(kWire2) - 1;
+  if (stored.size() > kWire2Len &&
+      detail::ascii_strncasecmp(stored.data(), kWire2, static_cast<int>(kWire2Len)) == 0) {
+    std::string_view body = stored.substr(kWire2Len);
+    std::size_t pos = 0;
+    std::uint32_t len = 0;
+    if (!read_u32_le(body, &pos, &len) || pos + len > body.size()) {
+      if (err) *err = "wire2 decode: bad length";
+      return false;
+    }
+    raw_out->assign(body.substr(pos, len));
+    return true;
   }
   constexpr char kPfx[] = "mdbhex1:";
   constexpr std::size_t kPfxLen = sizeof(kPfx) - 1;
@@ -443,6 +484,7 @@ bool deserialize_table(std::string_view blob, LogicalTable* out, std::string* er
     }
     out->rows[id] = std::move(vals);
   }
+  logical_row_index_rebuild_from_rows(out);
   return true;
 }
 

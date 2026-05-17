@@ -45,6 +45,8 @@
 | 2026-05-15 | **`open` 恢复阶段化 + `RecoveryCoordinator`** | `StorageRecoveryPhase` + `storage_recovery_phase_cstr`（`recovery_phase.*`）；**`RecoveryCoordinator`**：`prepare_directories_tmp` / `load_segment_catalogs` / `open_log_files_manifest_commit_seq` / `replay_checkpoint_and_wal` / `refresh_segment_observability` + 独占目录锁；**WAL 帧解码**委托 **`WalReplayApplier`**（`wal_replay_applier.*`）；`storage_engine_open_wal.cpp` 仅构造/`open`/`close`；各阶段 `SpanGuard`。 |
 | 2026-05-15 | **`WalReplayApplier`（WAL 重放解码）** | `apply_line_unlocked` / `apply_batch_unlocked`；`StorageEngine` `friend` + 成员（位于 `RecoveryCoordinator` 之前）；`structdb_storage` CMake 增加 `wal_replay_applier.cpp`。 |
 | 2026-05-15 | **`RecoveryOpenPolicy` + `CompactionResult` 类型锚点** | `recovery_open_policy.hpp`（与 `kOpenFlagRebuildUndoStackFromLog` 同源）；`compaction_result.hpp`（合并路径统一返回体，渐进迁移）。 |
+| 2026-05-16 | **PHASE39：persist 写放大消除 + opt-in 导入/合并** | 增量 `row_index`（`row_ids_ordered`）；`mdbwire2:`；`persist_table` 构建/提交拆分与分块；`commit_embed_batch` 批量 undo；`MemTableArena`；`mdb_persist_coalesce` / `mdb_bulk_import_mode` / `FLUSH PERSIST` / `IMPORT MODE` / `REBUILD INDEX`；`scripts/run_persist_baseline.ps1`；[`PHASE39_PERSIST_PERF.md`](phases/PHASE39_PERSIST_PERF.md)。 |
+| 2026-05-16 | **PHASE40：分帧 WAL + 导入快路径** | 延迟 `row_ids_ordered`、plain 行、raw 零拷贝；`persist_table_chunked`；`commit_embed_batch_unlocked_split_`；1M 行门禁 **~238K–328K TPS**；**`Mdb.Phase40*`**（24）+ **`Mdb.*`**（127）；[`PHASE40_PERSIST_PERF.md`](phases/PHASE40_PERSIST_PERF.md)。 |
 | 2026-05-15 | **MemTable 默认 `SkipList` + 演进专文** | `EngineConfigSnapshot` / `StorageEngine` / `MemTableManager` 默认 **`MemTableBackend::SkipList`**；远期 arena/job 等见 [`STORAGE_EVOLUTION_AND_OBSERVABILITY.md`](STORAGE_EVOLUTION_AND_OBSERVABILITY.md)。 |
 | 2026-05-15 | **观测命名：`stdb.storage.*` trace + `BM_StdbStorage*`** | `storage_trace.hpp`；`recovery_coordinator` / `compaction_coordinator` / `storage_engine_*` 内 `SpanGuard`；`benchmarks/engine_bench.cpp`。 |
 | 2026-05-15 | **WAL / Compaction / Checkpoint-Undo 协调器** | **`WalCoordinator`**（`wal_coordinator.*`）；**`CompactionCoordinator`**（`compaction_coordinator.*`，物化与 manifest 提交）；**`CheckpointUndoCoordinator`**（`checkpoint_undo_coordinator.*`）；`StorageEngine` `friend` + 末字段委托。 |
@@ -92,7 +94,9 @@
 | 目标 | 命令 |
 |------|------|
 | 全量单测（含 MDB + C API + Storage） | `ctest -C Release --output-on-failure`（或 Debug 配置） |
-| 仅 MDB 套件（`Mdb.*`） | `ctest -C Release -R "^mdb_tests$"` → 等价 `structdb_tests --gtest_filter=Mdb.*` |
+| 仅 MDB 套件（`Mdb.*`） | `ctest -C Release -R "^mdb_tests$"` → 等价 `structdb_tests --gtest_filter=Mdb.*`（**127** 项，2026-05-16 全绿） |
+| PHASE40 persist 切片 | `structdb_tests --gtest_filter=Mdb.Phase40*`（**24** 项） |
+| mega_data 导入压测 | `scripts/bench/mega_data_mdb_stress.ps1`；`STRUCTDB_MEGA_ROWS=1000000` |
 | Compaction 专用 I/O / 分块节流相关用例 | `structdb_tests.exe --gtest_filter=StorageEngine.CompactionDedicatedIo*:StorageEngine.CompactionExplicitIo*:StorageEngine.CompactionDeferredWorker*:StorageEngine.CompactionTieredL1ToL2*:Engine.DedicatedIo*`（Windows 下可执行文件在 `build/tests/Release/`） |
 | 运行时 trace | 环境变量 `STRUCTDB_TRACE=1` 后跑业务或单测，日志前缀 `[structdb trace]` |
 
@@ -108,7 +112,7 @@
 
 - [ ] **MemTable 结构**：arena / 更细锁（§6.1，中长期）；**已做**：**flush 双缓冲**（现由 **`MemTableManager`** 持有 frozen；锁外 SST 物化）、`IMemTable`/`MemTable`（`std::map`）、前缀/overlay、`bytes_approx`；**map 后端替换**仍待。
 - [ ] **GUI**：表格侧仍可按产品需要收紧「禁止全表一次拉取」（§4.3）；**已做**：模块级 `MDB_PAGE_JSON_MAX_PAGE_SIZE`，`query_page` / cap 会话 / `find_row_map_by_id_via_query_page` 统一钳制 `page_size`；**MDB 多行脚本**：**进度事件** `mdb-script-progress` + **`cancel_mdb_script`** + `ScriptExecResult.cancelled`（`App.vue` 停止按钮）；其它长任务（导出/压测等）仍待统一进度模型。
-- [ ] **MDB**：`PAGE_JSON` **大范围**游标化或缓存评估；**已做**：非 `id` 排序列分页 `partial_sort` 窗口；**`SCAN MORE`/`SCAN RESET`** 会话游标（大表日志输出分页）；增量 persist 默认路径，超大 dirty / schema 变更仍全量。
+- [ ] **MDB**：`PAGE_JSON` **大范围**游标化或缓存评估；**已做**：非 `id` 排序列分页 `partial_sort` 窗口；**`SCAN MORE`/`SCAN RESET`** 会话游标；**PHASE39/40** 脚本摊销、分块/plain/raw 导入（~32–44× PHASE39 基线）；**仍待（100× 方向）**：`IMPORT_SEGMENT` 段式 WAL、流式 chunk build 免全表 map、group commit / 导入 durability 档位、并行分片导入（见 PHASE40 专文「性能门禁」）。
 - [ ] **Compaction**：**已具备**：… **仍待**：与 WAL 的 **更强 OS 级**隔离（独立设备队列 / cgroup 权重等，见 **`Docs/OS_IO_ISOLATION.md`**）、按 merge 阶段更细默认调参。
 - [ ] **WAL**：分段重放与 checkpoint 协同的进一步收紧（§5.1 已部分具备段元数据，续作见 `COMPACTION.md` / PHASE 文档）。
 - [ ] **GraphExecutor / 存储压力联动**：**已做**：MemTable 探测按 **`estimated_cost` 缩放**、`backpressure_reason_cstr`、可选 **`GraphExecuteDiagnostics`**；**仍待**：与 `sync_scheduler_budget_from_storage_pressure` / `StoragePressureSnapshot` 的闭环与更细节点预算元数据。

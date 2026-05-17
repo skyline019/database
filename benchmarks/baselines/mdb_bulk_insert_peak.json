@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-05-17T00:00:00.0000000Z",
+  "note": "Reference peak insert throughput; not used by automated perf gate. See benchmarks/MDB_E2E_PEAK_PERFORMANCE.md",
+  "paths": [
+    {
+      "name": "mdb_query_complex_integrated_load",
+      "benchmark_profile": "mdb_query_complex_v1",
+      "total_rows": 1000000,
+      "rows_per_bulk_line": 800,
+      "import_mode": true,
+      "engine_bulk_import": false,
+      "load_wall_ms": 259878,
+      "load_tps_est": 3848,
+      "source_summary": "scripts/results/mdb_query_complex_summary_20260516_173946_672.json",
+      "script": "scripts/bench/mdb_query_complex_stress.ps1"
+    },
+    {
+      "name": "mega_data_engine_bulk",
+      "benchmark_profile": "mega_data_mdb_bulk_v1+engine_bulk",
+      "total_rows": 1000000,
+      "rows_per_bulk_line": 1000,
+      "import_mode": false,
+      "engine_bulk_import": true,
+      "wall_ms": 3050,
+      "runtime_pressure_tps_est": 327868.852,
+      "source_summary": "scripts/results/mega_data_summary_20260516_103927_414.json",
+      "script": "scripts/bench/mega_data_mdb_stress.ps1 -EngineBulkImport"
+    }
+  ]
+}

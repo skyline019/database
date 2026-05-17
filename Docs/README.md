@@ -6,13 +6,18 @@
 |------|------|
 | **[../intro/README.md](../intro/README.md)** | **LaTeX 源码级手册**（`Engine`/`StorageEngine`/MDB/参数表/测试矩阵）；**WSL 仅编译 PDF**；工程构建见根 `README`；细节仍以 `POLICY` 与各 `PHASE*.md` 为准 |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | **总览**：端到端数据流（Mermaid）、代码目录与依赖、关键类型与 API 摘录（附源码行引用）；与 `POLICY` / 各 PHASE 互补 |
+| **[COMPETITIVE_MATRIX.md](COMPETITIVE_MATRIX.md)** | **竞品矩阵**：全维度对比（排除网络层）、SQLite / RocksDB+SQL 细表、PHASE25 `[NOT_SUPPORTED]` 缺口、四十期性能边界 |
+| **[COMPETITIVE_IMPROVEMENT_PLAN.md](COMPETITIVE_IMPROVEMENT_PLAN.md)** | **完善计划**：自竞品矩阵导出的 W0–W4 波次、倡议 ID、PHASE41–44 建议、验收与 NOT_SUPPORTED 替代路径 |
+| **[BACKUP_RESTORE_RUNBOOK.md](BACKUP_RESTORE_RUNBOOK.md)** | **冷备份/恢复**：`data_dir` + `session_dir` 停写复制、`backup_bundle`、独占锁与 COUNT 验收 |
 | **[OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md)** | **性能路线图**：里程碑快照、存储/MDB/GUI 已落地项与 backlog（与代码同步维护） |
 | **[ENGINE_RUNTIME_CONFIG.md](ENGINE_RUNTIME_CONFIG.md)** | **配置清单**：运行时 / 启动期 / 实验开关与 `EngineConfigSnapshot` 锚点；与调度器压力、`Orchestrator` 前置 hook 交叉引用 |
 | **[NEXT_REFACTOR_RECOMMENDATIONS.md](NEXT_REFACTOR_RECOMMENDATIONS.md)** | **重构台账**：`StorageEngine` 拆分与 §13 落实进度 |
 | **[STORAGE_EVOLUTION_AND_OBSERVABILITY.md](STORAGE_EVOLUTION_AND_OBSERVABILITY.md)** | **存储演进收口**：MemTable 默认与远期 arena、`CompactionResult`、恢复策略与 Embed 编排索引、`stdb.storage.*` / bench 命名与压力 JSON 策略 |
 | **[OS_IO_ISOLATION.md](OS_IO_ISOLATION.md)** | **OS 级 I/O**：compaction 与 WAL 分卷/cgroup/ionice 等运维清单；与 `WalPipeline` / 专用 `CompactionIoExecutor` 的关系 |
 | [POLICY.md](POLICY.md) | 架构约束、构建与测试策略、平台与第三方依赖、贡献约定；**§4.0 文件系统保底**、**§3.3.1（九/十一/十二期 compaction）**、**§3.5（十期 undo 前缀 / v2 槽）**、**§4.4–4.5（七期 InnoDB 映射与耐久类比）**、**§4.5 后耐久矩阵（二十四期）**、**[`PHASE31.md`](phases/PHASE31.md)**、**[`PHASE34.md`](phases/PHASE34.md)**（多 TU 锚点与 `*Phase31*` filter） |
-| [ONBOARDING.md](ONBOARDING.md) | 新人阅读顺序（`POLICY` §4 → `TXN_INNODB_MAP` §2 → `WAL_REPLAY` → `TESTING_TXN_CHAIN` → **`ARCHITECTURE`**） |
+| [ONBOARDING.md](ONBOARDING.md) | 新人阅读顺序（`POLICY` §4 → 事务三档 → `TXN_INNODB_MAP` §2 → `WAL_REPLAY` → `TESTING_TXN_CHAIN` → **`ARCHITECTURE`**） |
+
+**PR 检查（性能/竞品相关）**：合入须附 `scripts/results/` 或 `benchmarks/baselines/` 路径；bulk 对比见 [`scripts/results/README.md`](../scripts/results/README.md)。
 | [CHANGELOG.md](CHANGELOG.md) | 面向使用者的版本变更（建议每次发版或合并里程碑时更新） |
 | [COMPACTION.md](COMPACTION.md) | 九期：`L0` 双文件合并、`MANIFEST`/checkpoint 顺序、`compaction_merge_count`；十期：写 checkpoint 时刷新 undo 水位（§4）；与 [phases/PHASE11.md](phases/PHASE11.md)、[phases/PHASE12.md](phases/PHASE12.md)、[phases/PHASE22.md](phases/PHASE22.md)、[phases/PHASE23.md](phases/PHASE23.md) 交叉引用 |
 | [phases/WAL_REPLAY.md](phases/WAL_REPLAY.md) | **二十四期**：`wal.log` 重放判别（`STDBBW1` / 文本行）、与 checkpoint 权威、混排（链入 `POLICY` §3.1） |
@@ -45,6 +50,15 @@
 | [phases/PHASE36.md](phases/PHASE36.md) | **三十六期**：L1+ 与 L0 对齐的两阶段 compaction、读锁 `shared_mutex` 延期结论、可选 Facade `kv_put` 队列与 GUI 独占锁环境变量 |
 | [phases/PHASE37.md](phases/PHASE37.md) | **三十七期**：文档与 CHANGELOG 收口、`_tmp_tier_compact_*` 与专文对齐、`*Phase37*` 对称并发回归、三十八期候选划界 |
 | [phases/PHASE38.md](phases/PHASE38.md) | **三十八期**：`CONFIRM_REORDER` / `[REORDER_MAP_JSON]`、GUI `id_remap_chain` 多行摄取与撤销栈一致性 |
-| [phases/PHASE13_PLUS_PLAN.md](phases/PHASE13_PLUS_PLAN.md) | **计划草案**：十三～三十一期路线划界（含 `p31`→…→`p38`） |
+| [phases/PHASE39_PERSIST_PERF.md](phases/PHASE39_PERSIST_PERF.md) | **三十九期**：persist 写放大消除、`mdbwire2`、coalesce / bulk import、MemTable arena、性能基线脚本 |
+| [phases/PHASE40_PERSIST_PERF.md](phases/PHASE40_PERSIST_PERF.md) | **四十期**：分块 persist、plain/raw 导入快路径、延迟行索引；**`Mdb.Phase40*`**（24）+ **`Mdb.*`** 回归；mega_data 门禁 ~238K–328K TPS |
+| [phases/PHASE41.md](phases/PHASE41.md) | **四十一期（Wave 2）**：`SET DURABILITY`、`ALTER TABLE ADD/RENAME COLUMN`、`CREATE INDEX`、RENAME 单批原子；**`Mdb.Phase41*`**（6） |
+| [phases/PHASE42.md](phases/PHASE42.md) | **四十二期（Wave 3）**：`GROUP BY` 子集、`SCAN INDEX`；**`Mdb.Phase42*`**（2） |
+| [phases/PHASE43.md](phases/PHASE43.md) | **四十三期（Wave 3）**：`checkpoint.chain`、`SHOW CHECKPOINTS`、`RECOVER TO CHECKPOINT_SEQ` |
+| [phases/PHASE44_PERSIST_STREAM.md](phases/PHASE44_PERSIST_STREAM.md) | **四十四期（Wave 4）**：流式 persist；`IMPORT SEGMENT` 段 idempotency |
+| [phases/PHASE45.md](phases/PHASE45.md) | **四十五期（Wave 4）**：`DROP INDEX`、`CREATE UNIQUE INDEX`；**`Mdb.Phase45*`**（2） |
+| [phases/PHASE46_NAMESPACE.md](phases/PHASE46_NAMESPACE.md) | **四十六期（远期）**：`mdb$ns$` 多租户设计占位 |
+| [phases/PHASE46_SQL_MAPPING.md](phases/PHASE46_SQL_MAPPING.md) | **远期**：只读 SQL→MDB 映射调研 |
+| [phases/PHASE13_PLUS_PLAN.md](phases/PHASE13_PLUS_PLAN.md) | **计划草案**：十三～三十一期路线划界（含 `p31`→…→`p39`） |
 
 上层设计意图见仓库内 Cursor 计划（文件名含 `structdb_layered_engine`）；**计划文件本身不作为本目录的同步副本**，以本目录与代码为准。

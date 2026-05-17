@@ -102,6 +102,71 @@ bool mdb_parse_command_line(std::string_view line_trimmed, MdbParsedLine* out, s
     out->verb = MdbVerb::Vacuum;
     return true;
   }
+  if (low == "flush persist") {
+    out->verb = MdbVerb::FlushPersist;
+    return true;
+  }
+  if (low.rfind("import mode", 0) == 0) {
+    out->verb = MdbVerb::ImportMode;
+    out->tail = trim_copy_sv(line_trimmed.substr(11));
+    return true;
+  }
+  if (low.rfind("rebuild index", 0) == 0) {
+    std::size_t i = 13;
+    while (i < line_trimmed.size() && std::isspace(static_cast<unsigned char>(line_trimmed[i]))) ++i;
+    if (i < line_trimmed.size() && line_trimmed[i] == '(') {
+      if (!extract_open_paren(line_trimmed, i, out)) {
+        if (err) *err = "REBUILD INDEX: expected (name)";
+        return false;
+      }
+    }
+    out->verb = MdbVerb::RebuildIndex;
+    return true;
+  }
+  if (low.rfind("scan index", 0) == 0) {
+    out->verb = MdbVerb::ScanIndex;
+    std::size_t i = 10;
+    while (i < line_trimmed.size() && std::isspace(static_cast<unsigned char>(line_trimmed[i]))) ++i;
+    if (!extract_open_paren(line_trimmed, i, out)) {
+      if (err) *err = "SCAN INDEX: expected (name)";
+      return false;
+    }
+    return true;
+  }
+  if (low == "show checkpoints") {
+    out->verb = MdbVerb::ShowCheckpoints;
+    return true;
+  }
+  if (low.rfind("recover to checkpoint_seq", 0) == 0) {
+    out->verb = MdbVerb::RecoverToCheckpointSeq;
+    out->tail = trim_copy_sv(line_trimmed.substr(25));
+    if (out->tail.empty()) {
+      if (err) *err = "RECOVER TO CHECKPOINT_SEQ: need n";
+      return false;
+    }
+    return true;
+  }
+  if (low.rfind("import segment", 0) == 0) {
+    out->verb = MdbVerb::ImportSegment;
+    std::size_t i = 14;
+    while (i < line_trimmed.size() && std::isspace(static_cast<unsigned char>(line_trimmed[i]))) ++i;
+    if (!extract_open_paren(line_trimmed, i, out)) {
+      if (err) *err = "IMPORT SEGMENT: expected (token)";
+      return false;
+    }
+    return true;
+  }
+  if (low.rfind("group by", 0) == 0) {
+    out->verb = MdbVerb::GroupBy;
+    std::size_t i = 8;
+    while (i < line_trimmed.size() && std::isspace(static_cast<unsigned char>(line_trimmed[i]))) ++i;
+    out->tail = trim_copy_sv(line_trimmed.substr(i));
+    if (out->tail.empty()) {
+      if (err) *err = "GROUP BY: expected (col) COUNT or (col) SUM(col)";
+      return false;
+    }
+    return true;
+  }
   if (low == "scan" || low.rfind("scan ", 0) == 0) {
     out->verb = MdbVerb::Scan;
     if (low == "scan") return true;
@@ -182,6 +247,33 @@ bool mdb_parse_command_line(std::string_view line_trimmed, MdbParsedLine* out, s
   }
   if (low == "help" || low == "?") {
     out->verb = MdbVerb::Help;
+    return true;
+  }
+  if (low.rfind("create unique index", 0) == 0) {
+    out->verb = MdbVerb::CreateIndex;
+    out->tail = std::string("unique ") + trim_copy_sv(line_trimmed.substr(19));
+    if (out->tail.size() <= 7) {
+      if (err) *err = "CREATE UNIQUE INDEX: need name ON table(col)";
+      return false;
+    }
+    return true;
+  }
+  if (low.rfind("create index", 0) == 0) {
+    out->verb = MdbVerb::CreateIndex;
+    out->tail = trim_copy_sv(line_trimmed.substr(12));
+    if (out->tail.empty()) {
+      if (err) *err = "CREATE INDEX: need name ON table(col)";
+      return false;
+    }
+    return true;
+  }
+  if (low.rfind("drop index", 0) == 0) {
+    out->verb = MdbVerb::DropIndex;
+    out->tail = trim_copy_sv(line_trimmed.substr(10));
+    if (out->tail.empty()) {
+      if (err) *err = "DROP INDEX: need name ON table";
+      return false;
+    }
     return true;
   }
   if (low.rfind("create schema", 0) == 0) {
@@ -381,11 +473,52 @@ bool mdb_parse_command_line(std::string_view line_trimmed, MdbParsedLine* out, s
     return true;
   }
 
-  if (low.rfind("autovacuum", 0) == 0 || low.rfind("recover to ", 0) == 0 ||
+  if (low.rfind("set durability", 0) == 0) {
+    out->verb = MdbVerb::SetDurability;
+    out->tail = trim_copy_sv(line_trimmed.substr(14));
+    if (out->tail.empty()) {
+      if (err) *err = "SET DURABILITY: need level 0|1|2";
+      return false;
+    }
+    return true;
+  }
+
+  if (low.rfind("alter table", 0) == 0) {
+    std::string_view rest = line_trimmed.substr(11);
+    while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t')) rest.remove_prefix(1);
+    std::string rest_low = trim_copy_sv(rest);
+    for (auto& c : rest_low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (rest_low.rfind("add column", 0) == 0) {
+      std::string_view inner = rest.substr(10);
+      while (!inner.empty() && (inner.front() == ' ' || inner.front() == '\t')) inner.remove_prefix(1);
+      if (!extract_open_paren(rest, rest.find('('), out)) {
+        if (err) *err = "ALTER TABLE ADD COLUMN: expected (name:type[,default])";
+        return false;
+      }
+      out->verb = MdbVerb::AlterTableAddColumn;
+      return true;
+    }
+    if (rest_low.rfind("rename column", 0) == 0) {
+      std::string_view inner = rest.substr(13);
+      while (!inner.empty() && (inner.front() == ' ' || inner.front() == '\t')) inner.remove_prefix(1);
+      if (!extract_open_paren(rest, rest.find('('), out)) {
+        if (err) *err = "ALTER TABLE RENAME COLUMN: expected (old,new)";
+        return false;
+      }
+      out->verb = MdbVerb::AlterTableRenameColumn;
+      return true;
+    }
+    out->verb = MdbVerb::NotPortable;
+    out->tail = trim_copy_sv(line_trimmed) + " (supported: ADD COLUMN, RENAME COLUMN; see PHASE41.md)";
+    return true;
+  }
+
+  if (low.rfind("autovacuum", 0) == 0 ||
+      (low.rfind("recover to ", 0) == 0 && low.rfind("recover to checkpoint_seq", 0) != 0) ||
       low.rfind("walsync", 0) == 0 || low.rfind("groupcommit", 0) == 0 || low.rfind("waladaptive", 0) == 0 ||
       low.rfind("segment", 0) == 0 || low.rfind("hotindex", 0) == 0 || low.rfind("writeconflict", 0) == 0 ||
       low.rfind("create schema", 0) == 0 || low.rfind("drop schema", 0) == 0 || low == "list schemas" ||
-      low == "show schemas" || low.rfind("alter table", 0) == 0) {
+      low == "show schemas") {
     out->verb = MdbVerb::NotPortable;
     out->tail = trim_copy_sv(line_trimmed);
     return true;

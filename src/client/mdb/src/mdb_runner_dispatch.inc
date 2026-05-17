@@ -1,4 +1,4 @@
-﻿    switch (pl.verb) {
+    switch (pl.verb) {
       case MdbVerb::CountBare: {
         if (current.name.empty()) {
           res.ok = false;
@@ -25,10 +25,11 @@
           res.last_error = "COUNT: need (col,op,val)";
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[0], pr[1], pr[2]);
+        const std::size_t matched =
+            count_matching_row_ids(current, pr[0], pr[1], pr[2], &ports, storage_read_seq);
         {
           std::ostringstream o;
-          o << "[COUNT] matched " << ids.size() << " / " << current.rows.size() << " rows";
+          o << "[COUNT] matched " << matched << " / " << current.rows.size() << " rows";
           log_line(log_sink ? &line_log : nullptr, o.str());
         }
         flush_line_log();
@@ -46,10 +47,11 @@
           res.last_error = "WHERE: need (col,op,val)";
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[0], pr[1], pr[2]);
+        const std::size_t matched =
+            count_matching_row_ids(current, pr[0], pr[1], pr[2], &ports, storage_read_seq);
         {
           std::ostringstream o;
-          o << "[WHERE] matched " << ids.size() << " / " << current.rows.size() << " rows";
+          o << "[WHERE] matched " << matched << " / " << current.rows.size() << " rows";
           log_line(log_sink ? &line_log : nullptr, o.str());
         }
         flush_line_log();
@@ -82,7 +84,7 @@
           res.last_error = "WHEREP: key_attr must be non-id";
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[2], pr[3], pr[4]);
+        const auto ids = collect_matching_row_ids(current, pr[2], pr[3], pr[4], &ports, storage_read_seq);
         const int pix = schema_col_index(current, pr[0]);
         if (pix < 0) {
           res.ok = false;
@@ -213,6 +215,17 @@
         int smaxsec = 0;
         bool min_from_calendar = false;
         bool max_from_calendar = false;
+        if (pl.verb == MdbVerb::Sum && is_int_col) {
+          long long cached_sum = 0;
+          int cached_n = 0;
+          if (logical_agg_try_int_sum(current, col, &cached_sum, &cached_n)) {
+            std::ostringstream o;
+            o << "[SUM] " << col << "=" << cached_sum;
+            log_line(log_sink ? &line_log : nullptr, o.str());
+            flush_line_log();
+            break;
+          }
+        }
         for (const auto& kv : current.rows) {
           const std::string& cell = kv.second[static_cast<std::size_t>(ci)];
           if (pl.verb == MdbVerb::Sum || pl.verb == MdbVerb::Avg) {
@@ -458,6 +471,18 @@
         long long sum_i = 0;
         double sum_f = 0.0;
         std::size_t cnt = 0;
+        if (col_int) {
+          const long long minv_i = static_cast<long long>(minv);
+          long long cached_sum = 0;
+          std::size_t cached_matched = 0;
+          if (logical_agg_try_qbal_int_ge(current, col, minv_i, &cached_sum, &cached_matched)) {
+            std::ostringstream o;
+            o << "[QBAL] col=" << col << " min=" << smin << " matched=" << cached_matched << " sum=" << cached_sum;
+            log_line(log_sink ? &line_log : nullptr, o.str());
+            flush_line_log();
+            break;
+          }
+        }
         for (const auto& kv : current.rows) {
           const std::string& cell = kv.second[static_cast<std::size_t>(ci)];
           if (col_int) {
@@ -526,7 +551,7 @@
           res.last_error = msg;
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[3], pr[4], pr[5]);
+        const auto ids = collect_matching_row_ids(current, pr[3], pr[4], pr[5], &ports, storage_read_seq);
         for (const std::string& rid : ids) {
           auto it = current.rows.find(rid);
           if (it == current.rows.end()) continue;
@@ -578,7 +603,7 @@
           res.last_error = "DELETEWHERE: need (col,op,val)";
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[0], pr[1], pr[2]);
+        const auto ids = collect_matching_row_ids(current, pr[0], pr[1], pr[2], &ports, storage_read_seq);
         for (const std::string& rid : ids) {
           auto it = current.rows.find(rid);
           if (it == current.rows.end()) continue;
@@ -914,10 +939,12 @@
           res.last_error = err;
           return res;
         }
-        if (!persist_now()) {
-          res.ok = false;
-          res.last_error = err;
-          return res;
+        if (!script_amortize_bulk_dml) {
+          if (!persist_now()) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
         }
         {
           std::ostringstream o;
@@ -973,15 +1000,20 @@
           res.last_error = err;
           return res;
         }
-        if (!persist_table(ports, current, idem, false, &err)) {
-          res.ok = false;
-          res.last_error = err;
-          return res;
+        if (!script_amortize_bulk_dml) {
+          if (!persist_now()) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
         }
         {
           std::ostringstream o;
           o << "[BULKINSERTFAST] rows=" << chunks.size();
           log_line(log_sink ? &line_log : nullptr, o.str());
+        }
+        if (current.rows.size() >= 4096 && !script_amortize_bulk_dml) {
+          logical_table_refresh_analytics_caches(&current);
         }
         flush_line_log();
         break;
@@ -1071,8 +1103,13 @@
         break;
       }
       case MdbVerb::ShowTxn: {
+        const auto cfg_txn = engine.config().snapshot();
+        const char* rollback_pol = cfg_txn.mdb_persist_in_begin
+                                       ? (cfg_txn.mdb_chain_rollback_on_mdb_rollback ? "chain_undo" : "session_only")
+                                       : "no_persist_in_txn";
         std::ostringstream o;
-        o << "[SHOW TXN] active=" << (txn_active ? "yes" : "no");
+        o << "[SHOW TXN] active=" << (txn_active ? "yes" : "no")
+          << " storage_rollback_policy=" << rollback_pol;
         if (txn_active) {
           o << " read_committed=" << (txn_read_committed ? "yes" : "no") << " snap_seq=" << txn_snap_seq
             << " engine_latest_commit_seq=" << engine.latest_commit_seq()
@@ -1083,9 +1120,14 @@
         break;
       }
       case MdbVerb::ShowSnapshot: {
+        const auto cfg_snap = engine.config().snapshot();
+        const char* rollback_pol = cfg_snap.mdb_persist_in_begin
+                                       ? (cfg_snap.mdb_chain_rollback_on_mdb_rollback ? "chain_undo" : "session_only")
+                                       : "no_persist_in_txn";
         std::ostringstream o;
         o << "[SHOW SNAPSHOT] embed_read_snapshot_seq=" << client.read_snapshot_seq()
-          << " engine_latest_commit_seq=" << engine.latest_commit_seq();
+          << " engine_latest_commit_seq=" << engine.latest_commit_seq()
+          << " storage_rollback_policy=" << rollback_pol;
         if (txn_active) {
           o << " txn_storage_read_seq=" << storage_read_seq;
         }
@@ -1098,7 +1140,8 @@
                  "[HELP] CREATE/DROP/RENAME/RESET/USE/DEFATTR/ADDATTR([idx,]name:type types:int,string,varchar,text,char,float,double,datetime,"
                  "timestamp)/SET PRIMARY KEY/INSERT/BULKINSERT/BULKINSERTFAST/"
                  "UPDATE/DELETE/DELETEPK/UPDATEWHERE/DELETEWHERE/SETATTR/SETATTRMULTI/DELATTR/RENATTR/WHERE/WHEREP/"
-                 "COUNT/PAGE/PAGE_JSON/FIND/FINDPK/SUM/AVG/MIN/MAX/QBAL/SHOW PLAN/EXPLAIN WHERE/EXPORT [JSON] <path>/IMPORTDIR/"
+                 "GROUP BY/SCAN INDEX/SET DURABILITY/CREATE INDEX/DROP INDEX/IMPORT SEGMENT/ALTER TABLE ADD|RENAME COLUMN/COUNT/PAGE/PAGE_JSON/FIND/FINDPK/SUM/AVG/MIN/MAX/QBAL/"
+                 "SHOW PLAN/EXPLAIN WHERE/EXPORT [JSON] <path>/IMPORTDIR/"
                  "TXNISOLATION/BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE SAVEPOINT/LIST TABLES/SHOW TABLES/SHOW ATTR/"
                  "SHOW KEY/CONFIRM_REORDER+JSON/SHOW TXN/SHOW SNAPSHOT/SHOW TUNING/SHOW STORAGE/SHOWLOG/VACUUM/SCAN[/RESET/MORE]/EXIT + "
                  "[NOT_SUPPORTED] heap-only/newdb-txn verbs [see Docs/PHASE25.md]; CONFIRM_REORDER supported per PHASE38");
@@ -1139,10 +1182,20 @@
         txn_active = false;
         savepoints.clear();
         txn_undo_stack_depth_at_begin.reset();
-        if (!persist_table(ports, current, idem, fsync_batch, &err)) {
-          res.ok = false;
-          res.last_error = err;
-          return res;
+        {
+          MdbEnginePorts commit_ports = ports;
+          mdb_ports_set_bulk_import_persist(&commit_ports, bulk_import_mode);
+          if (!persist_table(commit_ports, current, idem, fsync_batch, &err)) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
+          if (bulk_import_mode &&
+              !rebuild_secondary_index_storage(commit_ports, current, idem + ":rebuild", fsync_batch, &err)) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
         }
         txn_log_remove_if_exists(client);
         log_line(log_sink ? &line_log : nullptr, "[COMMIT] ok");
@@ -1232,7 +1285,7 @@
         break;
       }
       case MdbVerb::PageJson: {
-        if (!handle_page_json(current, pl.paren_inner, log_sink ? &line_log : nullptr, &err)) {
+        if (!handle_page_json(current, pl.paren_inner, log_sink ? &line_log : nullptr, &err, &paging)) {
           res.ok = false;
           res.last_error = err;
           return res;
@@ -1275,7 +1328,11 @@
           res.last_error = err;
           return res;
         }
+        if (current.rows.size() >= 4096) {
+          logical_table_refresh_analytics_caches(&current);
+        }
         scan_cursor_ordinal = 0;
+        mdb_paging_reset_table_caches(&paging);
         if (txn_active && !txn_v2_append("USE", tname)) {
           res.ok = false;
           res.last_error = err;
@@ -1370,6 +1427,11 @@
             res.last_error = msg;
             return res;
           }
+        }
+        if (!named_index_check_row_unique(current, id, vals, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
         }
         current.rows[id] = vals;
         logical_str_index_add_row(&current, id, current.rows[id]);
@@ -1506,11 +1568,387 @@
         }
         current = std::move(nxt);
         client.refresh_read_snapshot();
+        mdb_paging_reset_table_caches(&paging);
         log_line(log_sink ? &line_log : nullptr, reorder_line);
         flush_line_log();
         break;
       }
+      case MdbVerb::FlushPersist: {
+        if (!mdb_flush_coalesced_persist(ports, current, idem, fsync_batch, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        if (current.rows.size() >= 4096) {
+          logical_table_refresh_analytics_caches(&current);
+        }
+        log_line(log_sink ? &line_log : nullptr, "[FLUSH PERSIST] ok");
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::ImportMode: {
+        std::string mode = pl.tail;
+        trim_inplace(mode);
+        for (char& c : mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (mode == "on" || mode == "1" || mode == "true") {
+          if (bulk_import_session_override) *bulk_import_session_override = true;
+          log_line(log_sink ? &line_log : nullptr, "[IMPORT MODE] on");
+        } else if (mode == "off" || mode == "0" || mode == "false" || mode.empty()) {
+          if (bulk_import_session_override) *bulk_import_session_override = false;
+          log_line(log_sink ? &line_log : nullptr, "[IMPORT MODE] off");
+        } else {
+          res.ok = false;
+          res.last_error = "IMPORT MODE: use ON or OFF";
+          return res;
+        }
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::RebuildIndex: {
+        if (current.name.empty() || current.schema.empty()) {
+          res.ok = false;
+          res.last_error = "REBUILD INDEX: no table";
+          return res;
+        }
+        if (!pl.paren_inner.empty()) {
+          const std::string idx_name = trim_copy(pl.paren_inner);
+          structdb::client::CommandBatch b;
+          b.idempotency_token = idem + ":rebuild:" + idx_name;
+          if (!rebuild_named_index_postings(ports, current, idx_name, &b)) {
+            res.ok = false;
+            res.last_error = "REBUILD INDEX: unknown index";
+            return res;
+          }
+          if (!submit_persist_command_batch(ports, std::move(b), fsync_batch, &err)) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
+        } else if (!rebuild_secondary_index_storage(ports, current, idem, fsync_batch, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr, "[REBUILD INDEX] ok");
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::SetDurability: {
+        if (!session_durability_level) {
+          res.ok = false;
+          res.last_error = "SET DURABILITY: no session";
+          return res;
+        }
+        const std::string lvl = trim_copy(pl.tail);
+        if (lvl.size() != 1 || lvl[0] < '0' || lvl[0] > '2') {
+          res.ok = false;
+          res.last_error = "SET DURABILITY: level must be 0, 1, or 2";
+          return res;
+        }
+        *session_durability_level = lvl[0] - '0';
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[SET DURABILITY] level=") + lvl + " (see TXN_INNODB_MAP.md)");
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::AlterTableAddColumn: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE ADD COLUMN: not allowed inside BEGIN";
+          return res;
+        }
+        if (!mdb_apply_addattr_inner(&current, pl.paren_inner, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        logical_rebuild_str_index(&current);
+        logical_persist_mark_schema_change(&current);
+        if (!persist_now()) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[ALTER TABLE] ADD COLUMN ok ") + std::string(pl.paren_inner));
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::AlterTableRenameColumn: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE RENAME COLUMN: not allowed inside BEGIN";
+          return res;
+        }
+        if (current.name.empty() || current.schema.empty()) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE RENAME COLUMN: no table/schema";
+          return res;
+        }
+        const auto comma_rc = pl.paren_inner.find(',');
+        if (comma_rc == std::string_view::npos) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE RENAME COLUMN: need (old,new)";
+          return res;
+        }
+        const std::string oldn_rc = trim_copy(pl.paren_inner.substr(0, comma_rc));
+        const std::string newn_rc = trim_copy(pl.paren_inner.substr(comma_rc + 1));
+        if (oldn_rc.empty() || newn_rc.empty()) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE RENAME COLUMN: empty name";
+          return res;
+        }
+        const int ci_rc = schema_col_index(current, oldn_rc);
+        if (ci_rc < 0) {
+          res.ok = false;
+          res.last_error = "ALTER TABLE RENAME COLUMN: unknown column";
+          return res;
+        }
+        current.schema[static_cast<std::size_t>(ci_rc)].first = newn_rc;
+        logical_rebuild_str_index(&current);
+        logical_persist_mark_schema_change(&current);
+        if (!persist_now()) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[ALTER TABLE] RENAME COLUMN ok ") + oldn_rc + " -> " + newn_rc);
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::CreateIndex: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "CREATE INDEX: not allowed inside BEGIN";
+          return res;
+        }
+        std::string idx_name, tbl, col;
+        bool unique_idx = false;
+        if (!parse_create_index_spec(pl.tail, &idx_name, &tbl, &col, &err, &unique_idx)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        if (!col_name_eq(current.name, tbl)) {
+          res.ok = false;
+          res.last_error = "CREATE INDEX: USE target table first";
+          return res;
+        }
+        if (!create_named_index_storage(ports, current, idx_name, col, unique_idx, idem + ":cidx:" + idx_name,
+                                        fsync_batch, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string(unique_idx ? "[CREATE UNIQUE INDEX] ok " : "[CREATE INDEX] ok ") + idx_name + " ON " +
+                     tbl + "(" + col + ")");
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::DropIndex: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "DROP INDEX: not allowed inside BEGIN";
+          return res;
+        }
+        std::string idx_name, tbl;
+        if (!parse_drop_index_spec(pl.tail, &idx_name, &tbl, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        if (!col_name_eq(current.name, tbl)) {
+          res.ok = false;
+          res.last_error = "DROP INDEX: USE target table first";
+          return res;
+        }
+        if (!drop_named_index_storage(ports, current, idx_name, idem + ":didx:" + idx_name, fsync_batch, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[DROP INDEX] ok ") + idx_name + " ON " + tbl);
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::GroupBy: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "GROUP BY: not allowed inside BEGIN";
+          return res;
+        }
+        if (!mdb_execute_group_by(current, pl.tail, log_sink ? &line_log : nullptr, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::ScanIndex: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "SCAN INDEX: not allowed inside BEGIN";
+          return res;
+        }
+        if (current.name.empty()) {
+          res.ok = false;
+          res.last_error = "SCAN INDEX: no table";
+          return res;
+        }
+        auto scan_args = split_csv_paren_content(pl.paren_inner);
+        MdbScanIndexSpec scan_spec;
+        if (!parse_scan_index_spec(scan_args, &scan_spec, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        const std::string& idx_name = scan_spec.index_name;
+        const std::size_t kMax = scan_spec.max_rows;
+        const MdbScanIndexEmit scan_emit = scan_spec.emit;
+        std::size_t keys_scanned = 0;
+        std::size_t rows_shown = 0;
+        std::function<bool(const std::string&)> on_row;
+        if (scan_emit == MdbScanIndexEmit::IdsOnly) {
+          on_row = [&](const std::string& rid) {
+            log_line(log_sink ? &line_log : nullptr, std::string("  id=") + rid);
+            return true;
+          };
+        } else if (scan_emit == MdbScanIndexEmit::FullRow) {
+          on_row = [&](const std::string& rid) {
+            const auto it = current.rows.find(rid);
+            if (it == current.rows.end()) return true;
+            std::ostringstream r;
+            r << "  id=" << rid;
+            for (std::size_t c = 0; c < it->second.size(); ++c) {
+              r << " " << current.schema[c].first << "=" << it->second[c];
+            }
+            log_line(log_sink ? &line_log : nullptr, r.str());
+            return true;
+          };
+        }
+        if (!mdb_scan_named_index_rows(ports, current, idx_name, kMax, scan_emit,
+                                       scan_emit == MdbScanIndexEmit::StatsOnly ? nullptr : on_row, &keys_scanned,
+                                       &rows_shown, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        if (scan_emit != MdbScanIndexEmit::StatsOnly && rows_shown >= kMax &&
+            kMax < std::numeric_limits<std::size_t>::max()) {
+          log_line(log_sink ? &line_log : nullptr,
+                   "[SCAN INDEX] ... truncated at " + std::to_string(kMax) + " rows");
+        }
+        {
+          std::ostringstream o;
+          o << "[SCAN INDEX] index=" << idx_name << " rows_shown=" << rows_shown << " keys_scanned=" << keys_scanned
+            << " order=index_key";
+          if (scan_emit == MdbScanIndexEmit::StatsOnly) {
+            o << " mode=stats";
+          } else if (scan_emit == MdbScanIndexEmit::IdsOnly) {
+            o << " mode=ids";
+          }
+          log_line(log_sink ? &line_log : nullptr, o.str());
+        }
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::ShowCheckpoints: {
+        std::vector<structdb::storage::CheckpointChainEntry> entries;
+        const auto data_dir = std::filesystem::path(engine.config().snapshot().data_dir);
+        if (!structdb::storage::checkpoint_chain_read_all(data_dir, &entries, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        for (const auto& ckent : entries) {
+          std::ostringstream o;
+          o << "[CHECKPOINT] seq=" << ckent.checkpoint_seq << " wal_offset=" << ckent.wal_offset
+            << " manifest=" << ckent.manifest_version;
+          log_line(log_sink ? &line_log : nullptr, o.str());
+        }
+        {
+          std::ostringstream o;
+          o << "[SHOW CHECKPOINTS] count=" << entries.size();
+          log_line(log_sink ? &line_log : nullptr, o.str());
+        }
+        flush_line_log();
+        break;
+      }
+      case MdbVerb::RecoverToCheckpointSeq: {
+        if (txn_active) {
+          res.ok = false;
+          res.last_error = "RECOVER TO CHECKPOINT_SEQ: not allowed inside BEGIN";
+          return res;
+        }
+        std::uint64_t target = 0;
+        try {
+          target = std::stoull(trim_copy(pl.tail));
+        } catch (...) {
+          res.ok = false;
+          res.last_error = "RECOVER TO CHECKPOINT_SEQ: bad seq";
+          return res;
+        }
+        client.close();
+        if (!engine.recover_to_checkpoint_seq(target, &err)) {
+          res.ok = false;
+          res.last_error = err;
+          return res;
+        }
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[RECOVER TO CHECKPOINT_SEQ] ok seq=") + std::to_string(target) +
+                     " (restart engine/session to continue)");
+        flush_line_log();
+        res.ok = true;
+        return res;
+      }
+      case MdbVerb::ImportSegment: {
+        const std::string tok = trim_copy(pl.paren_inner);
+        if (tok.empty()) {
+          res.ok = false;
+          res.last_error = "IMPORT SEGMENT: empty token";
+          return res;
+        }
+        if (import_segment_token && import_segment_token->has_value() && import_segment_token->value() != tok) {
+          if (!persist_now()) {
+            res.ok = false;
+            res.last_error = err;
+            return res;
+          }
+        }
+        if (import_segment_token) *import_segment_token = tok;
+        log_line(log_sink ? &line_log : nullptr,
+                 std::string("[IMPORT SEGMENT] token=") + tok + " idem=idem:import:" +
+                     (current.name.empty() ? "<table>" : current.name) + ":seg:" + tok);
+        flush_line_log();
+        break;
+      }
       case MdbVerb::NotPortable: {
+        {
+          std::string low = pl.tail;
+          for (char& c : low) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+          if (low.rfind("recover to", 0) == 0) {
+            log_line(log_sink ? &line_log : nullptr,
+                     "[NOT_SUPPORTED] use RECOVER TO CHECKPOINT_SEQ n (not TIME/LSN; see PHASE43.md)");
+            flush_line_log();
+            break;
+          }
+          if (low.rfind("walsync", 0) == 0 || low.rfind("groupcommit", 0) == 0) {
+            log_line(log_sink ? &line_log : nullptr,
+                     "[NOT_SUPPORTED] use SET DURABILITY 0|1|2 and SHOW TUNING (see TXN_INNODB_MAP.md, PHASE41)");
+            flush_line_log();
+            break;
+          }
+          if (low.rfind("hotindex", 0) == 0) {
+            log_line(log_sink ? &line_log : nullptr,
+                     "[NOT_SUPPORTED] use CREATE INDEX name ON table(col) and REBUILD INDEX (PHASE41)");
+            flush_line_log();
+            break;
+          }
+        }
         log_line(log_sink ? &line_log : nullptr,
                  std::string("[NOT_SUPPORTED] StructDB KV/LSM has no heap/newdb-txn equivalent for: ") + pl.tail +
                      " (see Docs/PHASE25.md)");
@@ -1608,23 +2046,12 @@
           res.last_error = "SHOW PLAN/EXPLAIN WHERE: need (col,op,val)";
           return res;
         }
-        const auto ids = collect_matching_row_ids(current, pr[0], pr[1], pr[2]);
-        const int idx = schema_col_index(current, pr[0]);
-        const std::string op_trim = trim_copy(pr[1]);
-        bool maybe_idx = false;
-        if (op_trim == "=" && idx >= 0 && is_string_type(current.schema[static_cast<std::size_t>(idx)].second)) {
-          maybe_idx = true;
-        }
+        const std::size_t matched = count_matching_row_ids(current, pr[0], pr[1], pr[2], &ports, storage_read_seq);
         {
           std::ostringstream o;
           o << "[" << (pl.verb == MdbVerb::ShowPlan ? "SHOW PLAN" : "EXPLAIN WHERE") << "] pred=(" << pr[0] << " "
-            << pr[1] << " " << pr[2] << ") matched=" << ids.size();
-          if (maybe_idx)
-            o << " index_hint=string_eq_sidecar_maybe";
-          else if (op_is_like(op_trim))
-            o << " index_hint=like_full_scan";
-          else
-            o << " index_hint=full_scan";
+            << pr[1] << " " << pr[2] << ") matched=" << matched
+            << " index_hint=" << explain_where_index_hint(current, pr[0], pr[1], pr[2]);
           log_line(log_sink ? &line_log : nullptr, o.str());
         }
         flush_line_log();
@@ -1650,7 +2077,22 @@
           << " wal_auto_trim_prefix_after_flush=" << (c.wal_auto_trim_prefix_after_flush ? "on" : "off")
           << " l0_compact_trigger_threshold=" << c.l0_compact_trigger_threshold
           << " mdb_persist_in_begin=" << (c.mdb_persist_in_begin ? "on" : "off")
-          << " mdb_incremental_persist=" << (c.mdb_incremental_persist ? "on" : "off");
+          << " mdb_incremental_persist=" << (c.mdb_incremental_persist ? "on" : "off")
+          << " mdb_wire_encoding=" << (c.mdb_wire_encoding == structdb::facade::MdbWireEncoding::Wire2 ? "wire2" : "hex")
+          << " mdb_persist_coalesce=" << (c.mdb_persist_coalesce ? "on" : "off")
+          << " mdb_bulk_import_mode=" << (c.mdb_bulk_import_mode ? "on" : "off")
+          << " mdb_script_amortize_bulk_dml=" << (c.mdb_script_amortize_bulk_dml ? "on" : "off")
+          << " mdb_persist_chunk_max_puts=" << c.mdb_persist_chunk_max_puts
+          << " mdb_persist_chunk_max_frame_bytes=" << c.mdb_persist_chunk_max_frame_bytes
+          << " storage_import_store_raw_logical=" << (c.storage_import_store_raw_logical ? "on" : "off")
+          << " storage_embed_batch_max_frame_bytes=" << c.storage_embed_batch_max_frame_bytes
+          << " memtable_bulk_put_enabled=" << (c.memtable_bulk_put_enabled ? "on" : "off")
+          << " storage_batch_undo_lookup=" << (c.storage_batch_undo_lookup ? "on" : "off");
+        if (session_durability_level && session_durability_level->has_value()) {
+          o << " session_durability_level=" << session_durability_level->value();
+        } else {
+          o << " session_durability_level=default";
+        }
         log_line(log_sink ? &line_log : nullptr, o.str());
         flush_line_log();
         break;
@@ -1695,6 +2137,15 @@
           << ",\"l0_compact_trigger_threshold\":" << c.l0_compact_trigger_threshold
           << ",\"mdb_persist_in_begin\":" << (c.mdb_persist_in_begin ? "true" : "false")
           << ",\"mdb_incremental_persist\":" << (c.mdb_incremental_persist ? "true" : "false")
+          << ",\"mdb_wire_encoding\":\"" << (c.mdb_wire_encoding == structdb::facade::MdbWireEncoding::Wire2 ? "wire2" : "hex")
+          << "\",\"mdb_persist_coalesce\":" << (c.mdb_persist_coalesce ? "true" : "false")
+          << ",\"mdb_bulk_import_mode\":" << (c.mdb_bulk_import_mode ? "true" : "false")
+          << ",\"mdb_persist_chunk_max_puts\":" << c.mdb_persist_chunk_max_puts
+          << ",\"mdb_persist_chunk_max_frame_bytes\":" << c.mdb_persist_chunk_max_frame_bytes
+          << ",\"storage_import_store_raw_logical\":" << (c.storage_import_store_raw_logical ? "true" : "false")
+          << ",\"storage_embed_batch_max_frame_bytes\":" << c.storage_embed_batch_max_frame_bytes
+          << ",\"memtable_bulk_put_enabled\":" << (c.memtable_bulk_put_enabled ? "true" : "false")
+          << ",\"storage_batch_undo_lookup\":" << (c.storage_batch_undo_lookup ? "true" : "false")
           << ",\"latest_commit_seq\":" << engine.latest_commit_seq() << ",\"storage_l0_files\":" << p.l0_files
           << ",\"wal_bytes\":" << p.wal_bytes << ",\"undo_bytes\":" << p.undo_bytes
           << ",\"manifest_version\":" << p.manifest_version           << ",\"wal_append_record_calls_total\":"

@@ -1,0 +1,18 @@
+{
+    "timestamp":  "2026-05-16T14:56:57.3795202Z",
+    "benchmark_profile":  "oltp_persist_micro_v1",
+    "rows":  1000,
+    "wall_ms":  944,
+    "build_dir":  "e:\\db\\StructDB\\build",
+    "build_config":  "Release",
+    "git_sha":  "e3331c0",
+    "insert_p50_ms":  0.31105,
+    "insert_p99_ms":  0.634314,
+    "insert_tps":  3001.5,
+    "update_p50_ms":  0.338,
+    "update_p99_ms":  0.653204,
+    "update_tps":  2746.92,
+    "insert_total_ms":  333.167,
+    "update_total_ms":  364.044,
+    "mdb_incremental_persist_default":  true
+}

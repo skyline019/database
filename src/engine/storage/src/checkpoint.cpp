@@ -1,5 +1,7 @@
 #include "structdb/storage/checkpoint.hpp"
 
+#include "structdb/storage/checkpoint_chain.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -229,6 +231,7 @@ bool CheckpointWriter::read_latest(const std::filesystem::path& dir, CheckpointS
 }
 
 bool CheckpointWriter::write_rotating(const std::filesystem::path& dir, const CheckpointState& st, std::string* error_out) {
+  std::filesystem::create_directories(dir);
   CheckpointState cur{};
   if (!read_latest(dir, &cur, error_out)) {
     return false;
@@ -277,6 +280,47 @@ bool CheckpointWriter::write_rotating(const std::filesystem::path& dir, const Ch
 
   if (!write(dir, to_write)) {
     if (error_out) *error_out = "checkpoint: legacy write";
+    return false;
+  }
+  if (!checkpoint_chain_append(dir, to_write, now_ns, error_out)) {
+    return false;
+  }
+  return true;
+}
+
+bool CheckpointWriter::write_recovery_checkpoint(const std::filesystem::path& dir, const CheckpointState& st,
+                                                 std::uint64_t written_unix_ns, std::string* error_out) {
+  if (st.checkpoint_seq == 0) {
+    if (error_out) *error_out = "checkpoint: recovery seq must be > 0";
+    return false;
+  }
+  const auto now_ns = written_unix_ns ? written_unix_ns
+                                      : static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                                         std::chrono::system_clock::now().time_since_epoch())
+                                                                         .count());
+  std::array<std::uint8_t, kSlotBytesV2> slot{};
+  encode_slot_v2(st, now_ns, &slot);
+  for (const char which : {'a', 'b'}) {
+    const std::filesystem::path p = (which == 'a') ? (dir / "checkpoint.a") : (dir / "checkpoint.b");
+    infra::FileWriter w(p, false);
+    if (!w.is_open()) {
+      if (error_out) *error_out = "checkpoint: recovery slot open";
+      return false;
+    }
+    if (!w.write_all(slot.data(), slot.size()) || !w.sync()) {
+      if (error_out) *error_out = "checkpoint: recovery slot write";
+      return false;
+    }
+  }
+  {
+    infra::FileWriter w(dir / "checkpoint.active", false);
+    if (!w.is_open() || !w.write_all("a\n", 2) || !w.sync()) {
+      if (error_out) *error_out = "checkpoint: recovery active";
+      return false;
+    }
+  }
+  if (!write(dir, st)) {
+    if (error_out) *error_out = "checkpoint: recovery legacy";
     return false;
   }
   return true;

@@ -18,6 +18,8 @@
 | MemTable 默认后端、CompactionResult、观测前缀 | [STORAGE_EVOLUTION_AND_OBSERVABILITY.md](STORAGE_EVOLUTION_AND_OBSERVABILITY.md) |
 | 运行时 / 实验开关清单 | [ENGINE_RUNTIME_CONFIG.md](ENGINE_RUNTIME_CONFIG.md) |
 | 性能路线图与长任务落地快照 | [OPTIMIZATION_PLAN.md](OPTIMIZATION_PLAN.md)、[STRUCTDB_EVALUATION_SUMMARY.md](STRUCTDB_EVALUATION_SUMMARY.md) |
+| 竞品全维度对比与功能缺口 | [COMPETITIVE_MATRIX.md](COMPETITIVE_MATRIX.md) |
+| MDB persist 性能（摊销 / 分块 / plain·raw） | [phases/PHASE39_PERSIST_PERF.md](phases/PHASE39_PERSIST_PERF.md)、[phases/PHASE40_PERSIST_PERF.md](phases/PHASE40_PERSIST_PERF.md) |
 | `StorageEngine` 多 TU 权威表 | [phases/PHASE34.md](phases/PHASE34.md) |
 
 ---
@@ -51,8 +53,8 @@ flowchart TB
   APP --> ENG
   CAPI --> MDB
   CAPI -->|"engine_bind_long_task"| ENG
-  MDB -->|"persist_table → CommandBatch"| LOG
-  LOG -->|"submit(puts/dels, fsync?)"| ENG
+  MDB -->|"persist_table / persist_table_chunked\n→ CommandBatch"| LOG
+  LOG -->|"submit / submit_ex\n(fsync?, write_journal?)"| ENG
   MDB -->|"直接 kv_put mdb$ 键"| ENG
   ENG --> SE
   SE --> MTM
@@ -76,8 +78,53 @@ flowchart TB
 
 **写路径（两类）**：
 
-1. **逻辑表会话内变更**（`INSERT` / `UPDATE` / …）：先更新内存中的 `LogicalTable`，在 `persist_table` 时编码为 **`mdb$v2$*`** 键批次，经 **`EmbedClient::submit`** 落盘（可选 `fsync_journal`）。
-2. **已直接走引擎的键**（部分工具路径）：`Engine::kv_put` / `kv_remove`（可选 **WAL 调度预算** `WalMutationBudget` 与 **异步 `kv_put` 队列**）。
+1. **逻辑表会话内变更**（`INSERT` / `UPDATE` / …）：先更新内存中的 `LogicalTable`，在 `persist_table` 时编码为 **`mdb$v2$*`** 键批次，经 **`EmbedClient::submit` / `submit_ex`** 落盘（可选 `fsync_journal`、plain 导入批可 **`write_journal=false`**）。
+2. **大表 bulk 导入快路径**（[PHASE39](phases/PHASE39_PERSIST_PERF.md) / [PHASE40](phases/PHASE40_PERSIST_PERF.md)）：脚本内 `BULKINSERTFAST` 默认 **EOF 摊销**一次 persist；脏行 >8192 时 **`persist_table_chunked`** 多帧 WAL（catalog/schema/`row_index` **仅末帧**）；可选 **plain 行**（tab 分隔）、**raw 逻辑值**（无 `ver$` 包装）、**skip undo**、MemTable **排序批量 put**。详见 §2.2。
+3. **已直接走引擎的键**（部分工具路径）：`Engine::kv_put` / `kv_remove`（可选 **WAL 调度预算** `WalMutationBudget` 与 **异步 `kv_put` 队列**）。
+
+### 2.2 MDB 大表导入持久化（PHASE39 / PHASE40）
+
+```mermaid
+flowchart LR
+  subgraph Script["脚本 / REPL"]
+    BIF["BULKINSERTFAST\n→ LogicalTable.rows"]
+    AM["mdb_script_amortize_bulk_dml\n脚本 EOF 一次 persist"]
+    FL["FLUSH PERSIST / COMMIT"]
+  end
+  subgraph Build["mdb_persistence.cpp"]
+    BB["build_persist_command_batch\nplain / hex wire"]
+    CH["persist_table_chunked\n≤ chunk puts/bytes"]
+    IDX["logical_row_index\n>8K 延迟 row_ids_ordered"]
+  end
+  subgraph Embed["EmbedClient"]
+    SX["submit_ex\nwrite_journal? fsync?"]
+  end
+  subgraph Store["StorageEngine"]
+    CEB["commit_embed_batch\nraw import / split frame"]
+    MT["MemTable bulk put\nopt-in sorted"]
+    WAL2["wal.log STDBBW1"]
+  end
+
+  BIF --> AM
+  AM --> FL
+  FL --> BB
+  BB --> IDX
+  BB --> CH
+  CH --> SX
+  SX --> CEB
+  CEB --> MT
+  CEB --> WAL2
+```
+
+| 阶段 | 行为 |
+|------|------|
+| 会话内 ingest | `BULKINSERTFAST` 写入 `LogicalTable`；全表 bulk 时 **延迟** 维护 `row_ids_ordered`，persist 前一次性重建（避免 O(n²)）。 |
+| 批构建 | `PersistBuildOptions`：`plain_row_values`、`bulk_import` → `apply_storage_persist_hints`（raw + skip undo）。 |
+| 分块 submit | 每块 `idempotency_token` `{base}:chunk:{i}`；仅末块 `fsync`；多表场景须 **每表** `FLUSH PERSIST`。 |
+| 存储提交 | `commit_embed_batch`：导入批可走 **零拷贝 WAL puts**、`memtable_bulk_put_enabled`；超大帧由 `storage_embed_batch_max_frame_bytes` 兜底拆分。 |
+| REPL / 事务 | REPL 与 **事务内** bulk 可能 **每批立即 persist**（`script_amortize && !txn_active`）；`ROLLBACK` 恢复 session 基线，存储回滚需 **`mdb_chain_rollback_on_mdb_rollback`**。 |
+
+**压测参考**（本机 1M 行、`mega_data_mdb_stress.ps1`）：相对 PHASE39 基线 ~7.5K TPS，PHASE40 默认约 **~238K TPS**，`--mdb-bulk-import` 约 **~328K TPS**。回归：`Mdb.Phase40*`（24）、`Mdb.*`（127）。
 
 ### 2.1 GUI 宿主壳（`gui/rust_gui`）
 
@@ -110,6 +157,8 @@ flowchart TB
 
 ## 3. 写入时序（MDB 持久化）
 
+### 3.1 单行 / 小批量（增量或全量 snapshot）
+
 ```mermaid
 sequenceDiagram
   participant U as 用户 / GUI
@@ -123,10 +172,34 @@ sequenceDiagram
   U->>M: MDB 文本行 e.g. INSERT(...)
   M->>L: 更新 current.rows / schema
   M->>E: persist_table → CommandBatch
-  E->>K: submit → kv_put 多键
+  E->>K: submit / submit_ex → kv_put 多键
   K->>S: versioned put + commit_seq
   S->>W: WAL 记录（权威恢复）
   Note over S: MemTableManager / SST / undo 栈<br/>按配置 flush / compact
+```
+
+### 3.2 脚本大 bulk（摊销 + 分块，PHASE40）
+
+```mermaid
+sequenceDiagram
+  participant S as run_mdb_script
+  participant M as BULKINSERTFAST
+  participant P as persist_table_chunked
+  participant E as EmbedClient
+  participant C as commit_embed_batch
+  participant W as wal.log
+
+  loop 每行 / 每 pipe 段
+    S->>M: 仅更新 LogicalTable（mark dirty）
+  end
+  Note over S: EOF 或 FLUSH PERSIST
+  S->>P: build 多 CommandBatch 块
+  loop chunk i
+    P->>E: submit_ex(chunk_i, fsync=末块?, journal=plain?)
+    E->>C: dels + puts（raw 导入可无 ver$）
+    C->>W: STDBBW1 帧
+  end
+  Note over P: 末块含 catalog/schema/row_index
 ```
 
 ---
@@ -203,10 +276,10 @@ flowchart LR
 | `mdb_runner.cpp` | `run_mdb_script`、`MdbInteractiveSession` |
 | `mdb_dispatch.cpp` + `mdb_runner_dispatch.inc` | 命令分派 |
 | `mdb_command_parser.cpp` | 行解析 |
-| `mdb_persistence.cpp` | `persist_table`、增量脏行编码 |
+| `mdb_persistence.cpp` | `persist_table` / `persist_table_chunked`、`build/submit_persist_command_batch`、plain/raw 导入提示 |
+| `mdb_ops_logical_index.cpp` | `row_ids_ordered`、延迟重建、sec_idx 辅助 |
 | `mdb_query_paging.cpp` | `PAGE_JSON` / `SCAN MORE` 游标 |
 | `mdb_ops_string_wire.cpp` | hex / snapshot wire |
-| `mdb_ops_logical_index.cpp` | 二级索引 |
 | `mdb_ops_predicate.cpp` | WHERE / 谓词 |
 | `mdb_ops_reorder.cpp` | `CONFIRM_REORDER` |
 | `mdb_ops_pages_journal_import.cpp` | 分页 / journal / import |
@@ -291,7 +364,7 @@ flowchart LR
 **算法要点（文字）**：
 
 1. **`open`**：创建目录 → 加载 WAL / undo 目录项 → `wal_.open` → **`RecoveryCoordinator::replay_checkpoint_and_wal`**（`RecoveryOpenPolicy`、`WalReplayApplier`）→ manifest / checkpoint / `COMMIT_SEQ`；可选 **`data_dir/.structdb_exclusive.lock`** 建议锁（Phase 35）。
-2. **`put`**：在写锁下追加 WAL 帧、写入 **版本化 KV**（`mdb$` 键与 `commit_seq` 绑定），并更新 **`MemTableManager::active()`** / 索引结构；WAL / compaction 字节节流经 **`SteadyClockByteTokenBucket`**（`byte_token_bucket.*`）。
+2. **`put` / `commit_embed_batch`**：在写锁下追加 WAL 帧（`STDBBW1` 或文本行）、写入 **版本化 KV**（`mdb$` 键与 `commit_seq` 绑定；**导入 raw** 可对 `mdb$` 键存 logical 字节无 `ver$` 包装），并更新 **`MemTableManager::active()`**；大批导入可走 **`mem_apply_puts_unlocked` 排序批量**路径。WAL / compaction 字节节流经 **`SteadyClockByteTokenBucket`**（`byte_token_bucket.*`）。超大 embed 批由 **`commit_embed_batch_unlocked_split_`** 按 `storage_embed_batch_max_frame_bytes` 分帧。
 3. **`flush_memtable`**：将 active memtable **移入 frozen 快照**，锁外物化 **`STDBSST3` + footer Bloom** SST，更新 **MANIFEST** 与 **checkpoint**；失败时 **`merge_frozen_into_active_and_clear`** 回滚。
 4. **`compact_merge_two_oldest_l0`**（及 L1→L2、L2→L3 等）：经 **`CompactionCoordinator`** 归并 SST、更新 MANIFEST；可选 **compaction worker** 队列（Phase 20）；长任务进度经 **`LongTaskReporter`** 上报。
 5. **读路径**：`shared_mutex` 共享锁 + MemTable overlay（active over frozen）+ SST 层链；前缀扫描可走 **`for_each_sorted_prefix`** / overlay 优化。
@@ -376,6 +449,8 @@ struct LogicalTable {
   std::unordered_map<std::string, std::vector<std::string>> mdb_persist_prev_cells;
   /// Schema/catalog layout changed — forces full persist.
   bool mdb_persist_schema_dirty{false};
+  /// Primary keys in lexicographic order (mirrors `rows`); bulk >8K may defer rebuild until persist.
+  std::vector<std::string> row_ids_ordered;
 
   void clear_data_keep_name() {
     schema.clear();
@@ -385,6 +460,7 @@ struct LogicalTable {
     mdb_persist_dirty_rows.clear();
     mdb_persist_prev_cells.clear();
     mdb_persist_schema_dirty = false;
+    row_ids_ordered.clear();
   }
 };
 ```
@@ -440,9 +516,13 @@ class EmbedClient {
   void close();
   // ...
   bool submit(const CommandBatch& batch, bool fsync_journal, std::string* error_out = nullptr);
+  /// When `write_journal` is false, storage/WAL still commit; journal line skipped (bulk import; WAL authoritative).
+  bool submit_ex(const CommandBatch& batch, bool fsync_journal, bool write_journal, std::string* error_out = nullptr);
 ```
 
 **耐久档位**与 **`fsync_journal` / `fsync_each_batch` / `fsync_each_session_txn_op`** 的对照见 **[phases/TXN_INNODB_MAP.md §2](phases/TXN_INNODB_MAP.md)**（类比，非等价 InnoDB）。
+
+**导入批 journal 跳过**：PHASE40 plain 大表 persist 对 `submit_persist_command_batch` 传 **`write_journal=false`**（WAL 仍为恢复权威；与 `embed_journal_skip_until_commit` 正交）。分块 persist 中途崩溃可能已持久化部分行（与 PHASE39 导入语义一致）；导入批 **无 undo** 时 MDB `ROLLBACK` 不保证撤销已提交存储批次。
 
 **`session.journal` 写入**：`EmbedClient` 在会话期间对 `session.journal` 保持 **`FileWriter` 追加句柄**（避免每条 `submit` 反复 `open`）；`append_journal_line(..., fsync=true)` 在 `write_all` 后调用 `FileWriter::sync()`，与 `StorageEngine::wal_sync` 共同构成 **`fsync_journal=true`** 时的耐久边界。
 
@@ -501,7 +581,7 @@ class MemTable final : public IMemTable {
 };
 ```
 
-**`MemTableSkipList`**（`memtable_skiplist.*`）为默认热路径后端。`flush_memtable` 对 frozen 表做 **`for_each_sorted`** 快照并调用 `write_sst_sorted_entries`，写出 **`STDBSST3` + footer Bloom**（与 compaction 输出一致）。磁盘上仍可读历史 **`STDBSST2`** 与 **无前缀 legacy** SST（`storage_engine_detail.cpp` 统一切片）；点查可走 Bloom，前缀扫描对 Bloom 保守不用。
+**`MemTableSkipList`**（`memtable_skiplist.*`）为默认热路径后端。`commit_embed_batch` 在 **`memtable_bulk_put_enabled`** 或 **raw 导入** 且 puts 数 ≥ 阈值时，对 WAL puts **排序后** 调用 **`mem_apply_puts_unlocked(..., bulk=true)`**（`storage_engine_put_undo.cpp`）。`flush_memtable` 对 frozen 表做 **`for_each_sorted`** 快照并调用 `write_sst_sorted_entries`，写出 **`STDBSST3` + footer Bloom**（与 compaction 输出一致）。磁盘上仍可读历史 **`STDBSST2`** 与 **无前缀 legacy** SST（`storage_engine_detail.cpp` 统一切片）；点查可走 Bloom，前缀扫描对 Bloom 保守不用。
 
 ---
 
@@ -509,9 +589,9 @@ class MemTable final : public IMemTable {
 
 ```mermaid
 flowchart LR
-  PUT["StorageEngine::put"] --> WAL2["WalWriter 追加"]
-  PUT --> VK["VersionedKV / commit_seq"]
-  PUT --> MTM2["MemTableManager::active"]
+  PUT["put / commit_embed_batch"] --> WAL2["WalWriter 追加\nSTDBBW1 / 文本"]
+  PUT --> VK["VersionedKV / commit_seq\n或 raw logical"]
+  PUT --> MTM2["MemTableManager::active\n含 bulk put 路径"]
   GET["StorageEngine::get"] --> MTM2
   GET --> FRZ["frozen_flush overlay"]
   GET --> SST2["SST 层链"]
@@ -538,4 +618,4 @@ flowchart LR
 
 ## 15. 维护
 
-新增子系统或跨目录依赖时：**更新本页 Mermaid 与源码引用路径**（仓库根下 **`src/`** 为 C++ 主树、**`gui/rust_gui/`** 为 Tauri + Vue）、**`Docs/README.md` 索引**；发版时可在 **`CHANGELOG.md`** 记一条「文档」变更。
+新增子系统或跨目录依赖时：**更新本页 Mermaid 与源码引用路径**（仓库根下 **`src/`** 为 C++ 主树、**`gui/rust_gui/`** 为 Tauri + Vue）、**`Docs/README.md` 索引**；persist 性能里程碑合入时同步 **[PHASE40_PERSIST_PERF.md](phases/PHASE40_PERSIST_PERF.md)** 与本节 §2.2 / §3.2；发版时可在 **`CHANGELOG.md`** 记一条「文档」变更。

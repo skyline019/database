@@ -1,5 +1,9 @@
 #include "structdb/facade/engine.hpp"
 
+#include "structdb/storage/checkpoint_chain.hpp"
+
+#include <filesystem>
+
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -143,7 +147,23 @@ bool Engine::startup(std::string* error_out) {
   storage_->set_wal_segment_roll_max_bytes(snap.wal_segment_roll_max_bytes);
   storage_->set_undo_segment_roll_max_bytes(snap.undo_segment_roll_max_bytes);
   storage_->set_memtable_backend(snap.memtable_backend);
+  storage_->set_batch_undo_lookup(snap.storage_batch_undo_lookup);
   if (!storage_->open(error_out, snap.storage_open_flags)) return false;
+
+  {
+    std::string chain_err;
+    if (!storage::checkpoint_chain_validate(data_dir_path, snap.checkpoint_chain_strict, &chain_err)) {
+      storage_->close();
+      storage_.reset();
+      if (error_out) {
+        *error_out = chain_err.empty() ? std::string("checkpoint.chain validate failed") : chain_err;
+      }
+      return false;
+    }
+    if (!chain_err.empty() && !snap.checkpoint_chain_strict) {
+      structdb::infra::log_debug("checkpoint.chain validate: " + chain_err);
+    }
+  }
   storage_->set_wal_fsync_min_interval_ms(snap.wal_fsync_min_interval_ms);
   storage_->set_compaction_merge_min_interval_ms(snap.compaction_merge_min_interval_ms);
   storage_->set_compaction_merge_max_bytes_per_second(snap.compaction_merge_max_bytes_per_second);
@@ -227,6 +247,19 @@ void Engine::shutdown() {
   orch_.reset();
   storage_.reset();
   services_.clear();
+}
+
+bool Engine::recover_to_checkpoint_seq(std::uint64_t checkpoint_seq, std::string* error_out) {
+  if (storage_) {
+    if (error_out) *error_out = "recover: call Engine::shutdown() first";
+    return false;
+  }
+  const auto dir = std::filesystem::path(config_.snapshot().data_dir);
+  if (dir.empty()) {
+    if (error_out) *error_out = "recover: empty data_dir";
+    return false;
+  }
+  return storage::recover_data_dir_to_checkpoint_seq(dir, checkpoint_seq, error_out);
 }
 
 bool Engine::kv_get(const std::string& key, std::string* value_out, std::uint64_t read_max_seq) const {

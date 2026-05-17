@@ -1,0 +1,6 @@
+{
+  "wave": 4,
+  "note": "Archive peak WorkingSet from scripts/bench/mega_data_mdb_stress.ps1 -SampleWorkingSet; compare with Wave 2/3 runs.",
+  "peak_working_set_bytes": null,
+  "captured_utc": null
+}

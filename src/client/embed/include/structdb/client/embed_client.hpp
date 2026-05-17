@@ -53,6 +53,8 @@ class EmbedClient {
   /// **InnoDB durability analogy** (`Docs/TXN_INNODB_MAP.md` §2, `POLICY` §4.5): **Level 1** when true for that batch.
   /// Replays with the same non-empty `idempotency_token` are ignored (already committed).
   bool submit(const CommandBatch& batch, bool fsync_journal, std::string* error_out = nullptr);
+  /// When `write_journal` is false, storage/WAL still commit; journal line skipped (bulk import; WAL authoritative).
+  bool submit_ex(const CommandBatch& batch, bool fsync_journal, bool write_journal, std::string* error_out = nullptr);
 
   /// Persists last committed seq and engine checkpoint pointer.
   bool save_checkpoint(std::string* error_out = nullptr);

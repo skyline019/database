@@ -118,6 +118,8 @@ StructDB 是一个 **分层运行时 + 混合存储（LSM 思路与页式/redo/u
 
 **约定**：仓库与工具链以 **`_data`** 作为引擎持久化根目录的**规范名**（便于 `.gitignore`、文档与运维统一）；部署可通过 **`--data-dir`** 指向任意绝对或相对路径。
 
+运维 **冷备份/恢复** 步骤见 **[`BACKUP_RESTORE_RUNBOOK.md`](BACKUP_RESTORE_RUNBOOK.md)**（`scripts/backup_bundle.ps1` / `structdb_app --backup-bundle`）。
+
 #### 4.0.2 保底文件清单（须随实现演进同步修订）
 
 - **引擎侧（`data_dir`）**：`wal.log`（**崩溃恢复权威**的当前尾段；自 checkpoint 的 `wal_offset` 起重放；不完整尾帧规则见 `CHANGELOG`）；**二十期起**可选 `wal.segments`（v1 占位计数或 **v2 多段目录项**）与 **`wal/archive/*`** 封存段（与 v2 联用，详见 [`PHASE20.md`](phases/PHASE20.md)）；`checkpoint` / `checkpoint.a` / `checkpoint.b` / `checkpoint.active`（五期）；MANIFEST 与 SST；**`undo.log`**（版本化覆盖写；可选 `kOpenFlagRebuildUndoStackFromLog`）；**二十二 22C 起**可选 **`undo.segments`（v2）** 与 **`undo/archive/*`** 封存段（与 `EngineConfigSnapshot::undo_segment_roll_max_bytes` 联用，详见 [`PHASE22.md`](phases/PHASE22.md)、[`UNDO_LOG_4C.md`](phases/UNDO_LOG_4C.md)）；`redo.log` 存在但 **默认不作为 `open` 重放权威**（§3.1）。

@@ -26,9 +26,16 @@
 - **`redo.log`**：**不**作为 `open` 重放权威（`POLICY` §3.1）。
 - **`undo.log`**：服务版本化写与 **`undo_stack_`**；与 WAL 混排 **无**「单条 redo 替代 WAL」语义。
 
-## 5. 相关链接
+## 5. `RECOVER TO CHECKPOINT_SEQ`（四十三期）
+
+- 权威仍是 **WAL + checkpoint**；恢复动作 **截断** `wal.log` 至 chain 中记录的 `wal_offset`，并 `write_recovery_checkpoint`（见 [`PHASE43.md`](PHASE43.md)）。
+- **不**删除 `wal/archive/` 封存段；**不**回退已 flush 进 SST 的行（仅 WAL 尾未 flush 部分可截断）。
+- 操作前冷备见 [`BACKUP_RESTORE_RUNBOOK.md`](../BACKUP_RESTORE_RUNBOOK.md)。
+
+## 6. 相关链接
 
 - [`POLICY.md`](POLICY.md) §3.1、§3.3、§3.4  
 - [`TXN_BEGIN_PERSIST_DESIGN.md`](TXN_BEGIN_PERSIST_DESIGN.md)  
 - [`PHASE20.md`](PHASE20.md)（多段 WAL）  
-- [`PHASE24.md`](PHASE24.md)
+- [`PHASE24.md`](PHASE24.md)  
+- [`PHASE43.md`](PHASE43.md)（checkpoint.chain / seq 恢复）

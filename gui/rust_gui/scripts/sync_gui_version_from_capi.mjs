@@ -32,8 +32,18 @@ if (pkg.version !== version) {
 }
 
 const tauri = JSON.parse(readFileSync(tauriConfPath, "utf8"));
+let tauriChanged = false;
 if (tauri.version !== version) {
   tauri.version = version;
+  tauriChanged = true;
+}
+const winTitle = `StructDB ${version}`;
+const windows = tauri.app?.windows;
+if (Array.isArray(windows) && windows[0] && windows[0].title !== winTitle) {
+  windows[0].title = winTitle;
+  tauriChanged = true;
+}
+if (tauriChanged) {
   writeFileSync(tauriConfPath, `${JSON.stringify(tauri, null, 2)}\n`, "utf8");
 }
 

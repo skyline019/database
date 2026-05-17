@@ -32,7 +32,7 @@
 flowchart TB
   subgraph Host["宿主进程"]
     GUI["gui/rust_gui\nTauri + Vue\n(invoke → capi)"]
-    CAPI["structdb_capi_shared\n1.8.0 + long_task_control"]
+    CAPI["structdb_capi_shared\n1.9.0"]
     MDB["client::mdb\nparse → dispatch → mdb_ops_*"]
     LOG["EmbedClient\njournal + session_log"]
     ENG["facade::Engine\nkv_put / kv_get / visit_prefix\nWalMutationBudget / pressure"]
@@ -145,7 +145,7 @@ flowchart LR
 | CLI 终端 | `cli_terminal_start`、`cli_terminal_write_line`、`cli_terminal_stop` |
 | 诊断 | `dll_info`、`runtime_artifact_info` |
 
-**长任务与进度（C API 1.8.0）**：
+**长任务与进度（C API 1.8.0+，当前 1.9.0）**：
 
 - **`structdb_long_task_control`** + **`structdb_mdb_run_options.long_task_control`**（V3，`STRUCTDB_MDB_RUN_OPTIONS_SIZE_V3 = 64`）：MDB 脚本、compaction merge、export 等共享 **协作取消** 与 **进度回调**。
 - GUI 脚本批处理：`structdb_engine_begin_mdb_script_batch` → 循环 `structdb_mdb_execute_line_ex` → `structdb_engine_end_mdb_script_batch`；compaction 进度经 **`structdb_engine_bind_long_task`** 绑定到 `StorageEngine::active_long_task()`。
@@ -244,7 +244,7 @@ flowchart LR
     MR["mdb\nmdb_ops_* + runner/dispatch"]
   end
   subgraph CAPI["src/c_api"]
-    FFI["structdb_* FFI\n1.8.0"]
+    FFI["structdb_* FFI\n1.9.0"]
   end
   subgraph GUI["gui/rust_gui"]
     RS["src-tauri/lib.rs\ninvoke → capi"]

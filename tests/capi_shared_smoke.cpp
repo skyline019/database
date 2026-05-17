@@ -13,8 +13,14 @@ TEST(CapiSharedSmoke, VersionAndDllImportMacro) {
   const char* v = structdb_capi_version_string();
   ASSERT_NE(v, nullptr);
   EXPECT_STRNE(v, "");
-  EXPECT_EQ(structdb_capi_version(), (1u << 16) | (8u << 8) | 0u);
-  EXPECT_STREQ(v, "1.8.0");
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MAJOR, 1);
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_MINOR, 9);
+  EXPECT_EQ(STRUCTDB_CAPI_VERSION_PATCH, 0);
+  EXPECT_EQ(structdb_capi_version(),
+            (static_cast<uint32_t>(STRUCTDB_CAPI_VERSION_MAJOR) << 16) |
+                (static_cast<uint32_t>(STRUCTDB_CAPI_VERSION_MINOR) << 8) |
+                static_cast<uint32_t>(STRUCTDB_CAPI_VERSION_PATCH));
+  EXPECT_STREQ(v, "1.9.0");
 }
 
 TEST(CapiSharedSmoke, EngineOpenNullDataDirUsesCwdDefault) {

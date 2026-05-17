@@ -190,30 +190,6 @@ const std::unordered_map<std::string, const std::vector<std::string>*>* ensure_p
   return &paging->row_ptr_by_id;
 }
 
-const std::vector<const std::vector<std::string>*>* ensure_page_row_dense_cache(
-    const structdb::client::mdb::LogicalTable& t, structdb::client::mdb::MdbQueryPagingState* paging) {
-  if (!paging) return nullptr;
-  if (t.row_ids_ordered.size() != t.rows.size() || t.rows.empty()) return nullptr;
-  if (paging->row_dense_table != t.name || paging->row_dense_rows != t.rows.size() ||
-      paging->row_dense_ordered != t.row_ids_ordered.size()) {
-    paging->row_dense_table = t.name;
-    paging->row_dense_rows = t.rows.size();
-    paging->row_dense_ordered = t.row_ids_ordered.size();
-    paging->row_cells_dense.clear();
-    paging->row_cells_dense.resize(t.row_ids_ordered.size());
-    for (std::size_t i = 0; i < t.row_ids_ordered.size(); ++i) {
-      const auto it = t.rows.find(t.row_ids_ordered[i]);
-      paging->row_cells_dense[i] = (it != t.rows.end()) ? &it->second : nullptr;
-    }
-  }
-  return &paging->row_cells_dense;
-}
-
-bool order_aliases_row_ids_ordered(const structdb::client::mdb::LogicalTable& t,
-                                 const std::vector<std::string>& order) {
-  return order.size() == t.row_ids_ordered.size() && order.data() == t.row_ids_ordered.data();
-}
-
 void json_append_rank(std::string& out, int rank) {
   out.push_back('"');
   char buf[24];
@@ -318,22 +294,6 @@ std::size_t find_after_index(const std::vector<std::string>& order, std::string_
       lo = mid + 1;
   }
   return lo;
-}
-
-void append_page_json_rows(std::string& j, const structdb::client::mdb::LogicalTable& t,
-                           const std::vector<PageJsonColDef>& col_defs, const std::vector<std::string>& order,
-                           std::size_t begin, std::size_t end, int rank_base,
-                           const std::unordered_map<std::string, const std::vector<std::string>*>* ptr_cache) {
-  bool first_row = true;
-  j.append("\"rows\":[");
-  for (std::size_t i = begin; i < end; ++i) {
-    const std::vector<std::string>* cells = resolve_row_cells_at(t, order, i, ptr_cache);
-    if (!cells) continue;
-    if (!first_row) j.push_back(',');
-    first_row = false;
-    append_one_page_json_row(j, rank_base + static_cast<int>(i - begin) + 1, order[i], *cells, col_defs);
-  }
-  j.push_back(']');
 }
 
 void append_page_ids_array(std::string& j, const std::vector<std::string>& order, std::size_t begin,

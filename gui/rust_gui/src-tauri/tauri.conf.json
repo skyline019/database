@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "StructDB",
+        "title": "StructDB 1.9.0",
         "width": 1280,
         "height": 840,
         "resizable": true

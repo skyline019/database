@@ -3823,6 +3823,8 @@ struct RuntimeArtifactInfo {
     build_profile: String,
     /// Tauri / GUI build: `debug` vs `release` (from `cfg!(debug_assertions)`).
     gui_package_kind: String,
+    /// Semver from `src-tauri/Cargo.toml` (synced with C API via `sync_gui_version_from_capi.mjs`).
+    gui_package_version: String,
     /// Bundled GoogleTest C API shim DLL when synced (`libgtest_capi.dll`); empty if absent.
     gtest_capi_dll_path: String,
     gtest_capi_dll_modified: String,
@@ -3887,6 +3889,7 @@ fn runtime_artifact_info() -> RuntimeArtifactInfo {
         backend_git_commit,
         build_profile,
         gui_package_kind,
+        gui_package_version: env!("CARGO_PKG_VERSION").to_string(),
         gtest_capi_dll_path: String::new(),
         gtest_capi_dll_modified: "n/a".to_string(),
         c_api_version_major,

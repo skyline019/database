@@ -95,6 +95,8 @@ type RuntimeArtifactInfo = {
   buildProfile?: string;
   /** `debug` | `release` — GUI/Tauri build kind from `runtime_artifact_info`. */
   guiPackageKind?: string;
+  /** Desktop 安装包 semver（与 C API 同步，见 `sync_gui_version_from_capi.mjs`）。 */
+  guiPackageVersion?: string;
   cApiVersionMajor?: number;
   cApiVersionMinor?: number;
   cApiVersionPatch?: number;
@@ -4587,6 +4589,14 @@ onUnmounted(() => {
       <div class="help-shell-body about-shell-body">
         <div class="about-kv-card">
           <div class="about-kv-row">
+            <span class="about-kv-key">客户端版本</span>
+            <span class="about-kv-val mono">{{ runtimeArtifacts?.guiPackageVersion || "—" }}</span>
+          </div>
+          <div v-if="runtimeArtifacts?.guiPackageKind" class="about-kv-row">
+            <span class="about-kv-key">构建类型</span>
+            <span class="about-kv-val mono">{{ runtimeArtifacts.guiPackageKind }}</span>
+          </div>
+          <div class="about-kv-row">
             <span class="about-kv-key">引擎 DLL</span>
             <span class="about-kv-val">{{ dll.loaded ? "已加载" : "未加载" }}</span>
           </div>
@@ -4620,7 +4630,9 @@ onUnmounted(() => {
 
       <template #footer>
         <div class="help-footer">
-          <span class="help-footer-hint">版本信息来自当前已加载的 C API 动态库</span>
+          <span class="help-footer-hint">
+            客户端 {{ runtimeArtifacts?.guiPackageVersion || "—" }} · 引擎 DLL {{ dll.version || "未加载" }}
+          </span>
           <div class="about-footer-actions">
             <el-button @click="openAboutModal">刷新</el-button>
             <el-button type="primary" plain @click="showAboutModal = false">关闭</el-button>

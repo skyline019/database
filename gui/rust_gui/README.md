@@ -89,7 +89,7 @@ npm run tauri:dev
 - **冷备**：`backup_storage_bundle` → `structdb_backup_bundle`（关闭 embed 后复制 `data_dir`，含 `backup_manifest.json`）。
 - **checkpoint 恢复**：`SHOW CHECKPOINTS` / `RECOVER TO CHECKPOINT_SEQ n` 或 `recover_to_checkpoint_seq`（`structdb_recover_data_dir_to_checkpoint_seq`）。
 - **索引 / 分块导入**：菜单「表 → 索引」与「文件 → IMPORT SEGMENT」；帮助面板已收录 `CREATE/DROP INDEX`、`GROUP BY`、`PAGE_JSON` 等条目。
-- 版本号：`npm run sync-version-from-capi` 从 `structdb_capi.h` 同步（当前 **1.9.0**）。
+- 版本号：`npm run sync-version-from-capi` 从 `structdb_capi.h` 同步到 `package.json`、`tauri.conf.json`（含窗口标题 `StructDB x.y.z`）、`src-tauri/Cargo.toml`（当前 **1.9.0**）。关于对话框显示 **客户端版本** 与 **C API DLL** 版本。
 
 ## 测试
 
